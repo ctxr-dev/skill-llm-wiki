@@ -29,7 +29,8 @@
     "SKILL.md",
     "README.md",
     "LICENSE",
-    "scripts/"
+    "scripts/",
+    "guide/"
   ],
   "ctxr": {
     "type": "skill",
