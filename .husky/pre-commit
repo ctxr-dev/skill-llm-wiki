@@ -1,0 +1,18 @@
+#!/bin/sh
+# Pre-commit hook — runs `npm run <check>` for each check script declared
+# in package.json. Missing scripts are skipped gracefully, so a minimal
+# package with only `validate` runs only validate, and a package with all
+# three runs all three.
+#
+# Add `lint`, `validate`, and/or `test` scripts to package.json and this
+# hook will start invoking them on every commit automatically — no hook
+# edits required.
+
+set -e
+
+for check in lint validate test; do
+  if node -e "process.exit((require('./package.json').scripts||{})['$check']?0:1)" 2>/dev/null; then
+    echo "→ npm run $check"
+    npm run "$check"
+  fi
+done
