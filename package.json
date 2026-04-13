@@ -1,0 +1,42 @@
+{
+  "name": "@ctxr/skill-llm-wiki",
+  "version": "0.1.0",
+  "description": "Claude Code skill — build, extend, validate, rebuild, fix, and join LLM wikis from any knowledge corpus. Token-efficient retrieval via hierarchical indices, DAG parents, and deterministic rewrite operators.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ctxr-dev/skill-llm-wiki.git"
+  },
+  "homepage": "https://github.com/ctxr-dev/skill-llm-wiki#readme",
+  "bugs": {
+    "url": "https://github.com/ctxr-dev/skill-llm-wiki/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "claude-code",
+    "skill",
+    "llm-wiki",
+    "knowledge-base",
+    "documentation",
+    "retrieval",
+    "ctxr",
+    "ai"
+  ],
+  "files": [
+    "SKILL.md",
+    "README.md",
+    "LICENSE",
+    "scripts/"
+  ],
+  "ctxr": {
+    "type": "skill",
+    "target": "folder"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "validate": "node scripts/cli.mjs --version"
+  }
+}
