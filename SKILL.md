@@ -62,7 +62,7 @@ When the user asks for an operation:
 1. **Read the ask carefully.** Which operation? What's the source? What's the target? Confirm uncertain details before mutating anything.
 2. **Identify the exact target.** Never infer a target. Ask if unclear or resolve via `node scripts/cli.mjs resolve-wiki <source>`.
 3. **Detect mode** (free vs hosted) as described above.
-4. **Load the routing slice for this operation** — see the Routing section below. Read the listed `guide/` files in order before executing any phase beyond preflight.
+4. **Route into `guide/` via its own indices** — see the Routing section below. Read `guide/index.md`, compute the activation set from the user's ask, then read only the activated leaves. Never hand-pick `guide/` files from outside the wiki.
 5. **Plan the phases.** Use TodoWrite for long operations so the user can see progress and interrupt if needed.
 6. **Start with the lowest-risk phase.** For anything touching an existing wiki, run Validate first and report findings before proceeding to structural changes.
 7. **Use the CLI for deterministic phases.** Every subcommand is documented in `guide/cli.md`.
@@ -70,79 +70,63 @@ When the user asks for an operation:
 9. **Verify before commit.** Always run Validate on the new state before commit. Never leave a wiki in a broken state.
 10. **Stop after the requested operation completes.** Do not chain into Rebuild or Fix unless asked. Do not run `shape-check` on wikis the user didn't mention. Do not open sibling wikis for comparison.
 
-## Routing: which `guide/` files to read for each operation
+## Routing into `guide/`
 
-Each operation specifies the ordered list of `guide/` files to read. Read them in order before executing phases. **Do not read files outside your operation's slice.** If you finish an operation and the user asks a follow-up that requires a different operation, re-enter the workflow and load the new operation's slice from scratch.
+`guide/` is a real LLM wiki — the same kind of structure this skill builds for users. Claude routes into it via the methodology's standard **activation procedure**, not via a hand-maintained table. This teaches you the routing discipline once so it generalises to any wiki you later operate on.
 
-### Build
+### The procedure
 
-1. `guide/concepts.md`
-2. `guide/schema.md`
-3. `guide/operators.md`
-4. `guide/invariants.md`
-5. `guide/cli.md`
-6. `guide/safety.md`
-7. `guide/operations/build.md`
-8. **If hosted mode:** also read `guide/layout-contract.md`
+1. **Build a context profile** from the user's ask. A profile is a small structured object with three fields Claude constructs in its head:
 
-### Extend
+    - **`keywords`** — tokens from the ask. Include operation names (`build`, `extend`, `validate`, `rebuild`, `fix`, `join`), their common synonyms (`create wiki`, `check wiki`, `repair`, `optimise`, `merge wikis`), subcommand names (`ingest`, `shape-check`), and any other concrete terms the user used.
+    - **`tags`** — short categorical labels Claude derives from the ask:
+        - `operation` — set whenever the user is requesting any of the six operations (otherwise the operations subcategory stays short-circuited).
+        - `hosted-mode` — set when the target is hosted (the mode-detection step decided this).
+        - `mutation` — set for any operation except Validate (structural change may happen).
+        - `preflight-failure` — set only when the Node.js preflight check actually failed; never by default.
+    - **`operation`** — the one operation id the ask is about (`build` / `extend` / `validate` / `rebuild` / `fix` / `join`), or `null` for informational queries. Used as an escalation source.
 
-1. `guide/concepts.md`
-2. `guide/schema.md`
-3. `guide/invariants.md`
-4. `guide/cli.md`
-5. `guide/safety.md`
-6. `guide/operations/extend.md`
-7. **If hosted mode:** also read `guide/layout-contract.md`
+2. **Read `guide/index.md`.** Parse its frontmatter. The `entries[]` field is a self-sufficient routing table: each record carries the child's `id`, `file`, `type`, `focus`, `tags`, and — most importantly — its full `activation` block (or `activation_defaults` for subcategory indices). You do **not** need to open any leaf's frontmatter separately.
 
-### Validate
+3. **Compute the activation set.** Initialise it to the empty set. For each entry in the root's `entries[]`, activate it when any of these is true:
 
-1. `guide/invariants.md`
-2. `guide/cli.md`
-3. `guide/operations/validate.md`
-4. **If hosted mode:** also read `guide/layout-contract.md`
+    - `activation.keyword_matches` has a string that appears (case-insensitively) in the profile `keywords`
+    - `activation.tag_matches` has a tag that is in the profile `tags`
+    - `activation.escalation_from` contains the profile `operation` (or an id already in the activation set)
 
-### Rebuild
+    Then **iterate**: re-check every entry against the now-expanded activation set. Escalation can cascade (e.g. `operation = build` activates `operations/build`, which puts `build` in the set, which triggers `cli`, `concepts`, `schema`, `operators`, `invariants`, `safety`). Stop when a full pass makes no new activations.
 
-1. `guide/concepts.md`
-2. `guide/operators.md`
-3. `guide/invariants.md`
-4. `guide/cli.md`
-5. `guide/safety.md`
-6. `guide/operations/rebuild.md`
-7. **If hosted mode:** also read `guide/layout-contract.md`
+4. **Descend matched subcategory indices.** For each entry with `type: index` that passed step 3, AND-filter: the subcategory's `activation_defaults.tag_matches` must intersect the profile `tags`. If it does, `Read` the subcategory's own `index.md` and repeat from step 2 at that level. The subcategory's leaves are only considered once the parent activated. For `guide/`, this means `operations/` is entered only when the profile has the `operation` tag — informational queries short-circuit the whole subtree.
 
-### Fix
+5. **Load the activated leaves.** Now (and only now) `Read` each leaf's full file. Do not read leaves that did not activate. Do not re-read index files.
 
-1. `guide/concepts.md`
-2. `guide/schema.md`
-3. `guide/invariants.md`
-4. `guide/cli.md`
-5. `guide/safety.md`
-6. `guide/operations/fix.md`
-7. **If hosted mode:** also read `guide/layout-contract.md`
+6. **Preflight failures take a dedicated path.** If the Node.js preflight fails, your profile gets `tags: [preflight-failure]` and nothing else — this activates exactly `guide/preflight.md` and no operation leaves. Read it, relay the appropriate Case message to the user verbatim, stop.
 
-### Join
+7. **Informational queries.** When the user asks "what does this skill do?", "explain hosted mode", "what operations exist?", or any other question that does not demand an operation against a target, the profile has `operation: null` and no `operation` tag. The root `entries[]` produce zero activations. **Read nothing from `guide/`.** Answer from SKILL.md alone.
 
-1. `guide/concepts.md`
-2. `guide/schema.md`
-3. `guide/invariants.md`
-4. `guide/cli.md`
-5. `guide/safety.md`
-6. `guide/operations/join.md`
-7. **If hosted mode:** also read `guide/layout-contract.md` (both source contracts must be compatible)
+### Why this is better than a hand-maintained table
 
-### Informational queries ("what does this skill do?", "explain layout modes", etc.)
+- **Self-maintaining.** Adding a new leaf to `guide/` only requires writing its frontmatter with correct activation; the routing picks it up on the next `index-rebuild`. No SKILL.md edit required.
+- **Teaches a transferable skill.** The activation procedure you apply to `guide/` is the same one you apply to any LLM wiki — e.g., the user's own `./memory.llmwiki.v1/` or `./docs.llmwiki.v2/`. One procedure, infinite wikis.
+- **Short-circuits informational queries.** Zero wiki reads when the user just wants to chat about what the skill is. That's the cheapest path by far.
+- **Cross-cutting escalation is automatic.** `cli.md` lists every operation in its `escalation_from`, so any operation automatically pulls it in. You don't have to remember which operations need which supporting leaves.
+- **Mode-aware.** `layout-contract.md`'s `activation.tag_matches: [hosted-mode]` means it loads automatically in hosted mode and never loads in free mode, with zero per-operation conditionals.
 
-Read nothing beyond SKILL.md. Everything needed to answer a question about the skill's capabilities, contract, or workflow is already here. Only load `guide/` files when the user explicitly asks for an operation against a target.
+### Forbidden shortcuts
+
+- Do not read `guide/` files by hardcoded path from SKILL.md. Always walk the activation procedure.
+- Do not read leaves without first reading `guide/index.md` to see their activation.
+- Do not peek into leaf frontmatter before deciding to activate — the root index already has the activation aggregated.
+- Do not skip the informational-query short-circuit and preemptively read everything. Every byte costs tokens.
 
 ## Common mistakes to avoid
 
-- **Reading files outside your routing slice.** Every byte costs tokens. Stick to the list for your operation.
-- **Reading any `guide/` file for an informational query.** Answer from SKILL.md alone.
-- **Reading scripts as source.** Never. Use them via `guide/cli.md`.
+- **Reading `guide/` files by hardcoded path.** Always walk the activation procedure. The routing is the methodology — don't bypass it.
+- **Reading any `guide/` file for an informational query.** Zero-activation profiles produce an empty load set. Answer from SKILL.md alone.
+- **Peeking at leaf frontmatter before activating.** `guide/index.md` aggregates activation into `entries[]`; you never need a separate read for activation decisions.
+- **Reading scripts as source.** Never. Use them via the CLI subcommands documented in `guide/cli.md` (which itself is activated via the routing procedure).
 - **Skipping the Node.js preflight.** Runs before every operation, no exceptions.
-- **Attempting to install or upgrade Node.js yourself.** Never. Relay the message from `guide/preflight.md`; the user takes the action.
+- **Attempting to install or upgrade Node.js yourself.** Never. On preflight failure, profile gets `tags: [preflight-failure]`, which activates `guide/preflight.md`; read it and relay verbatim.
 - **Writing inside the user's source folder (free mode).** Never.
 - **Writing outside the layout contract (hosted mode).** The contract is authoritative.
 - **Writing leaf content into `index.md`.** Index bodies are navigation only. Leaf content belongs in leaf files.

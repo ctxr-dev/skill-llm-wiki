@@ -1,3 +1,33 @@
+---
+id: join
+type: primary
+depth_role: leaf
+focus: "Join operation — merge N ≥ 2 existing wikis into a single unified wiki"
+parents:
+  - index.md
+covers:
+  - "11-phase pipeline: preflight, ingest-all, source-validate, plan-union, resolve-id-collisions, merge-categories, rewire-references, apply-operators, generate-indices, validation, golden-path-union, commit"
+  - "id collision policies: merge, namespace (default), ask"
+  - "category merging via category-level MERGE when focus matches"
+  - "reference rewiring across sources via id → alias → rename map"
+  - "source immutability: inputs are read-only and byte-identical after Join"
+  - "hosted wikis require compatible contracts or a merged contract at the join target"
+tags:
+  - operations
+  - join
+  - merge
+activation:
+  keyword_matches:
+    - join
+    - merge wikis
+    - combine wikis
+    - unify
+  tag_matches:
+    - operation
+    - building
+    - mutation
+---
+
 # Join
 
 **Purpose:** merge N ≥ 2 existing wikis into one.

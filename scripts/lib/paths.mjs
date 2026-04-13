@@ -104,13 +104,19 @@ export function shapeDir(wikiPath) {
 }
 
 // A directory is a wiki root iff:
-//   (a) its name matches `*.llmwiki.v<N>`
-//   (b) it contains an `index.md`
-//   (c) that `index.md`'s frontmatter declares `generator: skill-llm-wiki/v<N>`
+//   (a) it contains an `index.md`
+//   (b) that `index.md`'s frontmatter declares `generator: skill-llm-wiki/v<N>`
+//   (c) AND EITHER:
+//       - its name matches `*.llmwiki.v<N>` (classic sibling-versioned mode), OR
+//       - it has a `.llmwiki.layout.yaml` file at its root (hosted mode)
 //
-// (a) alone would match any folder a user has lying around. (b) plus (a)
-// would match any folder with any index. (c) positively identifies a wiki
-// this skill is responsible for — everything else is ignored by the hook.
+// The generator marker (b) is the core safety check — it positively
+// identifies a directory the skill itself built. Name matching (c-left)
+// handles free-mode sibling outputs like `./docs.llmwiki.v1/`. Layout
+// contract presence (c-right) handles hosted-mode targets with arbitrary
+// names like `./memory/` or `./docs-wiki/` where the user (or another
+// skill) has declared a contract to govern the directory structure in
+// place. Both paths require the marker — that's non-negotiable.
 //
 // This means the first Build of a wiki MUST write `generator:` into the
 // root frontmatter; `indices.rebuildIndex` does that when it detects the
@@ -118,8 +124,14 @@ export function shapeDir(wikiPath) {
 export function isWikiRoot(dirPath) {
   const indexMd = join(dirPath, "index.md");
   if (!existsSync(indexMd)) return false;
+
   const base = basename(dirPath);
-  if (!/\.llmwiki\.v\d+$/.test(base)) return false;
+  const hasVersionedName = /\.llmwiki\.v\d+$/.test(base);
+  const hasLayoutContract = existsSync(join(dirPath, ".llmwiki.layout.yaml"));
+
+  // Must satisfy at least one structural recognition rule.
+  if (!hasVersionedName && !hasLayoutContract) return false;
+
   // Frontmatter probe: cheap, bounded, no YAML parse required for the
   // marker check — we just look for the line within the fence.
   try {

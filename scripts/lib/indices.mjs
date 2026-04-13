@@ -45,6 +45,12 @@ const AUTHORED_FIELDS = [
   "tags",
   "domains",
   "generator",
+  // Hosted-mode markers — set on the root index when the wiki is governed
+  // by a layout contract. Must survive rebuilds so `isWikiRoot` and the
+  // hosted-mode operation paths keep recognising the target after every
+  // regeneration.
+  "mode",
+  "layout_contract_path",
 ];
 
 export function readIndex(dirPath) {
@@ -108,7 +114,9 @@ export function rebuildIndex(dirPath, wikiRoot) {
   // Ensure required identity fields.
   data.id = data.id ?? (isRoot ? basename(wikiRoot) : basename(dirPath));
   data.type = "index";
-  data.depth_role = depth === 0 ? "category" : depth === 1 ? "category" : "subcategory";
+  // Depth-role mapping per schema: root is "category", everything deeper is
+  // "subcategory". (Early drafts mislabeled depth-1 as "category"; fixed.)
+  data.depth_role = depth === 0 ? "category" : "subcategory";
   if (isRoot) data.depth_role = "category";
   data.depth = depth;
 
@@ -124,25 +132,40 @@ export function rebuildIndex(dirPath, wikiRoot) {
     }
   }
 
-  // Derived: entries (aggregate child frontmatter)
+  // Derived: entries (aggregate child frontmatter).
+  //
+  // Router-relevant fields are lifted from each child into its entries[]
+  // record so a single `Read <dir>/index.md` gives the router enough info
+  // to compute activations without having to peek at every leaf's own
+  // frontmatter. This is what makes routing cheap: one index read per
+  // level, no per-leaf probes.
   const entries = [];
   for (const leaf of leaves) {
-    entries.push({
+    const record = {
       id: leaf.data.id,
       file: relative(dirPath, leaf.path),
       type: leaf.data.type ?? "primary",
       focus: leaf.data.focus ?? "",
-    });
+    };
+    if (leaf.data.activation) record.activation = leaf.data.activation;
+    if (leaf.data.tags) record.tags = leaf.data.tags;
+    if (leaf.data.overlay_targets) record.overlay_targets = leaf.data.overlay_targets;
+    entries.push(record);
   }
   for (const sub of subdirs) {
     const subIndex = readIndex(sub);
     if (!subIndex) continue;
-    entries.push({
+    const record = {
       id: subIndex.data.id,
       file: relative(dirPath, join(sub, "index.md")),
       type: "index",
       focus: subIndex.data.focus ?? "",
-    });
+    };
+    if (subIndex.data.activation_defaults) {
+      record.activation_defaults = subIndex.data.activation_defaults;
+    }
+    if (subIndex.data.tags) record.tags = subIndex.data.tags;
+    entries.push(record);
   }
   data.entries = entries;
 
@@ -252,6 +275,8 @@ function orderKeys(data, isRoot) {
     "source_wikis",
     "orientation",
     "generator",
+    "mode",
+    "layout_contract_path",
     "rebuild_needed",
     "rebuild_reasons",
     "rebuild_command",

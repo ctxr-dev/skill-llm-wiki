@@ -1,0 +1,17 @@
+mode: hosted
+
+versioning:
+  style: in-place
+  backup_before_mutate: true
+  backup_dir: .llmwiki.backups
+
+purpose: "skill-llm-wiki operational reference and CLI documentation, organized for on-demand loading by SKILL.md's routing table"
+
+global_invariants:
+  - "every leaf must declare a focus strictly narrower than its parent"
+  - "parent index bodies contain navigation and orientation only (no leaf content)"
+
+layout:
+  - path: operations
+    purpose: "operation phase pipelines (one leaf per top-level operation)"
+    allow_entry_types: [primary]

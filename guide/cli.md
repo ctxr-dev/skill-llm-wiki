@@ -1,3 +1,44 @@
+---
+id: cli
+type: primary
+depth_role: leaf
+focus: "complete CLI subcommand reference for scripts/cli.mjs"
+parents:
+  - index.md
+covers:
+  - "ingest: walk a source directory, compute hashes, emit entry candidates"
+  - "draft-leaf: script-first frontmatter draft with confidence score and needs_ai flag"
+  - "draft-category: deterministic category hint by directory prefix"
+  - "index-rebuild and index-rebuild-one: regenerate index.md files bottom-up or one at a time"
+  - "validate: run hard invariants, exit 0 or 2"
+  - "shape-check: detect operator candidates, update rebuild_needed flag"
+  - "resolve-wiki, next-version, list-versions, set-current: version and path management"
+  - "exit code summary (0 ok, 1 usage, 2 validation errors, 3 resolve miss, 4 Node too old)"
+tags:
+  - cli
+  - commands
+  - reference
+activation:
+  keyword_matches:
+    - cli
+    - command
+    - subcommand
+    - ingest
+    - shape-check
+    - index-rebuild
+    - draft-leaf
+    - resolve-wiki
+  tag_matches:
+    - any-op
+  escalation_from:
+    - build
+    - extend
+    - validate
+    - rebuild
+    - fix
+    - join
+---
+
 # CLI subcommand reference
 
 All subcommands are invoked via `node scripts/cli.mjs <subcommand> [args]`. Never read the source of any `.mjs` file — everything you need is documented here.
@@ -66,7 +107,7 @@ Run all hard invariants against a wiki. Read-only.
 Detect operator candidates and write findings to `<wiki>/.shape/suggestions.md`. Also updates the root `index.md` `rebuild_needed` flag when pending suggestions cross the configured threshold.
 
 - **Input:** `<wiki>` = wiki root.
-- **Output (stdout):** `N pending shape candidate(s)` followed by one `  OPERATOR  target / reason` entry per candidate.
+- **Output (stdout):** `N pending shape candidate(s)` followed by one `OPERATOR  target / reason` entry per candidate (indented two spaces in the actual output).
 - **Exit codes:** 0 on success.
 
 ## `resolve-wiki <source>`

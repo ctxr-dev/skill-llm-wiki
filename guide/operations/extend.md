@@ -1,3 +1,30 @@
+---
+id: extend
+type: primary
+depth_role: leaf
+focus: "Extend operation — add new sources to an existing wiki without reprocessing existing entries"
+parents:
+  - index.md
+covers:
+  - "9-phase pipeline: preflight, resolve-current, check-mode, ingest-new, classify-new, draft-frontmatter-new, copy-on-write or in-place, index-rebuild-affected, validation, commit"
+  - "free mode: copy-on-write produces a new vN+1 sibling; hosted in-place writes directly into existing directories"
+  - "classify new entries against existing categories; hosted mode cannot invent new top-level directories"
+  - "Extend never applies rewrite operators; shape warnings accumulate for the next Rebuild"
+tags:
+  - operations
+  - extend
+activation:
+  keyword_matches:
+    - extend
+    - add source
+    - add to wiki
+    - new source
+    - append
+  tag_matches:
+    - operation
+    - building
+---
+
 # Extend
 
 **Purpose:** add new sources to an existing wiki without reprocessing existing entries.

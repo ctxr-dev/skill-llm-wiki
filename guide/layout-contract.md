@@ -1,3 +1,31 @@
+---
+id: layout-contract
+type: primary
+depth_role: leaf
+focus: "hosted-mode layout contract schema, validation, and conflict-resolution rules"
+parents:
+  - index.md
+covers:
+  - "full contract schema (mode, versioning, purpose, global_invariants, layout with children and dynamic_subdirs)"
+  - "field semantics for path, purpose, content_rules, allow_entry_types, max_depth, dynamic_subdirs.template placeholders"
+  - "contract validation rules applied before every operation"
+  - "conflict resolution: the contract always wins over methodology defaults when they disagree"
+  - "authoring contracts on behalf of the user (always confirm before writing)"
+tags:
+  - hosted-mode
+  - layout-contract
+  - schema
+activation:
+  keyword_matches:
+    - hosted
+    - contract
+    - layout.yaml
+    - llmwiki.layout
+    - in-place
+  tag_matches:
+    - hosted-mode
+---
+
 # Layout contract (hosted mode)
 
 A layout contract is a YAML file at the hosted-mode target's root: `<target>/.llmwiki.layout.yaml`. Presence of this file is the sole signal that enters hosted mode. When you read this file, you are operating on a hosted-mode target and must honor every rule below.

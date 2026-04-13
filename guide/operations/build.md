@@ -1,3 +1,32 @@
+---
+id: build
+type: primary
+depth_role: leaf
+focus: "Build operation — create a new wiki from source(s) via the full phase pipeline"
+parents:
+  - index.md
+covers:
+  - "11-phase pipeline: preflight, check-mode, validate-contract (hosted), ingest, classify, draft-frontmatter, layout, operator-convergence, index-generation, validation, golden-path, commit"
+  - "free mode produces sibling `<source>.llmwiki.v1/`; hosted mode writes in-place into the contract target"
+  - "classify into contract-permitted directories only in hosted mode; escalate unplaceable candidates to HUMAN"
+  - "draft-frontmatter uses script-first heuristic + AI fallback for prose-heavy sources"
+  - "operator-convergence is contract-gated in hosted mode"
+  - "idempotency: same source + same seed → byte-identical output"
+tags:
+  - operations
+  - build
+activation:
+  keyword_matches:
+    - build
+    - create wiki
+    - new wiki
+    - from source
+    - build wiki
+  tag_matches:
+    - operation
+    - building
+---
+
 # Build
 
 **Purpose:** create a new wiki from source(s).

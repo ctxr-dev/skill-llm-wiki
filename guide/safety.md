@@ -1,3 +1,41 @@
+---
+id: safety
+type: primary
+depth_role: leaf
+focus: "safety envelope, phased pipeline, and commit semantics for every operation"
+parents:
+  - index.md
+covers:
+  - "source immutability in free mode; contract-defined write surface in hosted mode"
+  - ".work/ staging convention: all intermediate artifacts live there until commit"
+  - "progress manifest (progress.yaml) flushed after every per-item write for resumability"
+  - "full validator must pass before commit; otherwise abort and preserve prior state"
+  - "atomic commit semantics for free (sibling version + pointer flip) and hosted (in-place with backup) modes"
+  - "resumable pipeline: on resume, read manifest, jump to current phase, continue from cursor"
+  - "backup before structural mutation in hosted mode (backup_before_mutate default true)"
+tags:
+  - safety
+  - pipeline
+  - commit
+activation:
+  keyword_matches:
+    - safety
+    - envelope
+    - manifest
+    - commit
+    - backup
+    - resumable
+  tag_matches:
+    - mutation
+    - any-op
+  escalation_from:
+    - build
+    - extend
+    - rebuild
+    - fix
+    - join
+---
+
 # Safety envelope and phased pipeline
 
 Every operation honors these rules. Break any of them and you have broken the skill.

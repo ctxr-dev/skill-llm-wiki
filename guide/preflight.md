@@ -1,3 +1,28 @@
+---
+id: preflight
+type: primary
+depth_role: leaf
+focus: "user-facing messages for Node.js preflight failures"
+parents:
+  - index.md
+covers:
+  - "Case A message: Node.js is not installed, with install options per platform"
+  - "Case B message: Node.js version is too old, with upgrade options per platform"
+  - "post-install verification command"
+  - "PATH-staleness hint for existing shell sessions"
+tags:
+  - preflight
+  - user-messages
+activation:
+  tag_matches:
+    - preflight-failure
+  keyword_matches:
+    - node missing
+    - node too old
+    - install node
+    - upgrade node
+---
+
 # Preflight — user-facing messages
 
 Relay one of the messages below **verbatim** to the user when the Node.js preflight fails. Do not paraphrase. Do not try to install or upgrade Node yourself. Do not propose workarounds. After relaying, stop the operation and wait for the user to take the action.

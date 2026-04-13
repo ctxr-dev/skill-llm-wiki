@@ -1,3 +1,40 @@
+---
+id: concepts
+type: primary
+depth_role: leaf
+focus: "core vocabulary and static structure rules for LLM wikis"
+parents:
+  - index.md
+covers:
+  - "vocabulary: entry, frontmatter, index, primary, overlay, activation, operator, layout contract, work manifest"
+  - "narrowing chain definition along canonical parents[0]"
+  - "13 static structure rules every well-formed wiki satisfies at rest"
+  - "DAG acyclicity requirement for parents[]"
+  - "canonical-parent consistency rule for filesystem placement"
+  - "parent-file contract (index bodies hold navigation only, not leaf content)"
+  - "leaf size caps (500 lines primary, 200 lines overlay)"
+tags:
+  - concepts
+  - vocabulary
+  - structure
+activation:
+  keyword_matches:
+    - concepts
+    - vocabulary
+    - structure
+    - narrowing chain
+    - static structure
+  tag_matches:
+    - building
+    - modifying-structure
+  escalation_from:
+    - build
+    - extend
+    - rebuild
+    - fix
+    - join
+---
+
 # Concepts and static structure
 
 ## Vocabulary

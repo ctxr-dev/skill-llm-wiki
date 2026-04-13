@@ -1,3 +1,32 @@
+---
+id: fix
+type: primary
+depth_role: leaf
+focus: "Fix operation — repair methodology divergences in an existing wiki"
+parents:
+  - index.md
+covers:
+  - "three repair classes: AUTO (deterministic), AI-ASSIST (script detects, Claude generates content), HUMAN (user must decide)"
+  - "modes: --dry-run, --batch, --interactive, --hard-only, --with-soft"
+  - "10-phase pipeline: preflight, validate-input, scan-divergences, plan-fixes, apply-auto, apply-ai-assist, prompt-human, regenerate-indices, validate-again, golden-path, commit"
+  - "Fix enforces contract invariants on top of methodology invariants in hosted mode"
+  - "always report repairs back to the user; never run silently"
+tags:
+  - operations
+  - fix
+  - repair
+activation:
+  keyword_matches:
+    - fix
+    - repair
+    - divergence
+    - reconcile
+  tag_matches:
+    - operation
+    - fixing
+    - mutation
+---
+
 # Fix
 
 **Purpose:** repair methodology divergences. Uses the same safety envelope, produces a new version (or in-place updated tree in hosted mode).

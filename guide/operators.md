@@ -1,3 +1,39 @@
+---
+id: operators
+type: primary
+depth_role: leaf
+focus: "the four rewrite operators that shape wiki trees toward a token-minimal normal form"
+parents:
+  - index.md
+covers:
+  - "DECOMPOSE: horizontal split when one entry covers disjoint concerns"
+  - "NEST: vertical specialisation when an entry's sections are narrower derivations of its focus"
+  - "MERGE: two siblings with compatible covers and activation collapse into one"
+  - "LIFT: single-child folder collapses up one level"
+  - "DESCEND: gravity toward leaves, push leaf-shaped content out of parent indices"
+  - "detection criteria, application procedures, and priority order (DESCEND > LIFT > MERGE > NEST > DECOMPOSE)"
+  - "contract-gating: hosted-mode operator applications are rejected when they would violate the layout contract"
+tags:
+  - operators
+  - rebuild
+  - normal-form
+activation:
+  keyword_matches:
+    - operator
+    - rewrite
+    - decompose
+    - nest
+    - merge
+    - lift
+    - descend
+    - restructure
+  tag_matches:
+    - structural-change
+  escalation_from:
+    - build
+    - rebuild
+---
+
 # Rewrite operators
 
 Reshape trees toward a token-minimal normal form. Applied in fixed priority order: **DESCEND > LIFT > MERGE > NEST > DECOMPOSE**.

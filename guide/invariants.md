@@ -1,3 +1,40 @@
+---
+id: invariants
+type: primary
+depth_role: leaf
+focus: "hard validation invariants and soft shape signals for LLM wikis"
+parents:
+  - index.md
+covers:
+  - "21 hard invariants checked by `cli.mjs validate` — including id/filename match, narrowing chain, DAG acyclicity, canonical-parent consistency, parent-file contract, size caps, and generator marker"
+  - "soft shape signals reported by `cli.mjs shape-check` (DECOMPOSE, NEST, MERGE, LIFT, DESCEND candidates, coverage holes, golden-path regressions)"
+  - "hosted-mode layering: contract global_invariants add to the methodology defaults"
+  - "how to read the validate report (TAG, CODE, path, severity)"
+  - "exit codes: 0 clean, 2 errors, warnings do not change exit"
+tags:
+  - validation
+  - invariants
+  - shape-check
+activation:
+  keyword_matches:
+    - invariant
+    - validate
+    - validation
+    - errors
+    - check
+    - verify
+  tag_matches:
+    - validating
+    - fixing
+  escalation_from:
+    - build
+    - extend
+    - validate
+    - rebuild
+    - fix
+    - join
+---
+
 # Validation invariants
 
 ## Hard invariants (checked by `node scripts/cli.mjs validate`)

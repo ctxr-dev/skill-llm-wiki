@@ -1,3 +1,37 @@
+---
+id: schema
+type: primary
+depth_role: leaf
+focus: "frontmatter field schema and the unified index.md file format"
+parents:
+  - index.md
+covers:
+  - "fields common to every entry (id, type, depth_role, focus, parents, tags, domains, aliases, links, source, version, nests_into)"
+  - "leaf-only fields (covers, activation, applies_to)"
+  - "overlay-only fields (overlay_targets)"
+  - "index-only fields (shared_covers, activation_defaults, orientation, entries, children)"
+  - "root-index-only fields (generator, rebuild_needed/reasons/command, sources, source_wikis, mode, layout_contract_path)"
+  - "unified index.md file layout with frontmatter + auto-generated navigation + authored orientation zones"
+  - "rebuild contract: which fields/zones are preserved vs replaced on regeneration"
+tags:
+  - schema
+  - frontmatter
+  - index-format
+activation:
+  keyword_matches:
+    - schema
+    - frontmatter
+    - index.md format
+    - field
+  tag_matches:
+    - writing-frontmatter
+  escalation_from:
+    - build
+    - extend
+    - fix
+    - join
+---
+
 # Frontmatter schema and unified index.md format
 
 ## Fields on every entry

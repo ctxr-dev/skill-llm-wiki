@@ -133,6 +133,40 @@ test("shape-check detects LIFT for single-child folder", () => {
   }
 });
 
+test("hosted mode: arbitrary directory name is a valid wiki root when layout contract + generator marker are both present", () => {
+  const base = tmp();
+  const hosted = `${base}-arbitrary-name`;
+  const plain = `${base}-plain-with-index`;
+  try {
+    // Hosted: arbitrary name + layout contract + generator marker → valid
+    mkdirSync(hosted, { recursive: true });
+    writeFileSync(
+      join(hosted, ".llmwiki.layout.yaml"),
+      "mode: hosted\nversioning:\n  style: in-place\nlayout: []\n",
+    );
+    writeFileSync(
+      join(hosted, "index.md"),
+      `---\nid: ${hosted.split("/").pop()}\ntype: index\ndepth_role: category\ndepth: 0\nfocus: "hosted target"\nparents: []\ngenerator: skill-llm-wiki/v1\nmode: hosted\n---\n`,
+    );
+    assert.equal(isWikiRoot(hosted), true, "hosted-mode directory with contract + marker must be recognized");
+
+    // Plain: arbitrary name + generator marker but NO layout contract → rejected
+    mkdirSync(plain, { recursive: true });
+    writeFileSync(
+      join(plain, "index.md"),
+      `---\nid: plain\ntype: index\ndepth_role: category\ndepth: 0\nfocus: "no contract"\nparents: []\ngenerator: skill-llm-wiki/v1\n---\n`,
+    );
+    assert.equal(
+      isWikiRoot(plain),
+      false,
+      "arbitrary-name directory without layout contract must be rejected even if it has the marker",
+    );
+  } finally {
+    rmSync(hosted, { recursive: true, force: true });
+    rmSync(plain, { recursive: true, force: true });
+  }
+});
+
 test("script safety: findEnclosingWiki only matches skill-generated wikis", () => {
   const base = tmp();
   const realWiki = `${base}.llmwiki.v1`;

@@ -1,3 +1,32 @@
+---
+id: rebuild
+type: primary
+depth_role: leaf
+focus: "Rebuild operation — optimise structure via rewrite operators, produce a rewrite plan then apply"
+parents:
+  - index.md
+covers:
+  - "10-phase pipeline including validate-input, check-mode, collect-candidates, dry-run-apply, iterate, golden-path-check, emit-plan, backup (hosted), apply, commit"
+  - "always emit the plan first; require user review before `--apply`"
+  - "operator-convergence is contract-gated in hosted mode"
+  - "failed apply leaves the previous state intact (pointer unchanged or backup restored)"
+tags:
+  - operations
+  - rebuild
+  - operators
+activation:
+  keyword_matches:
+    - rebuild
+    - optimize
+    - optimise
+    - restructure
+    - rewrite plan
+  tag_matches:
+    - operation
+    - structural-change
+    - mutation
+---
+
 # Rebuild
 
 **Purpose:** optimise structure via rewrite operators, produce a new version (or in-place updated tree in hosted mode).
