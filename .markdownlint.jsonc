@@ -1,0 +1,53 @@
+// Markdownlint config — applied to every markdown file in this package.
+// Shipped by `@ctxr/kit init` as the universal default for skill, agent,
+// command, rule, output-style, and team artifacts. Tuned to minimise
+// friction on long-form markdown (tables, frontmatter, code examples)
+// while still catching real structural issues.
+{
+  // Allow long lines — markdown tables and prose shouldn't be hard-wrapped
+  "MD013": false,
+
+  // Allow inline HTML (common in tables, callouts, and emoji badges)
+  "MD033": false,
+
+  // Allow duplicate headings in different sections
+  "MD024": { "siblings_only": true },
+
+  // Allow multiple top-level headings (YAML frontmatter does not count
+  // as an H1, but some files have both a title and section anchors)
+  "MD025": false,
+
+  // Enforce consistent unordered list marker
+  "MD004": { "style": "dash" },
+
+  // Enforce no trailing spaces
+  "MD009": true,
+
+  // Enforce no hard tabs
+  "MD010": true,
+
+  // Enforce blank line around headings
+  "MD022": true,
+
+  // Enforce blank line around lists
+  "MD032": true,
+
+  // Allow emphasis used as heading (common in severity/category blocks)
+  "MD036": false,
+
+  // Allow bare URLs (common in references and install instructions)
+  "MD034": false,
+
+  // Allow fenced code blocks without language (generic output examples)
+  "MD040": false,
+
+  // Allow inline code with spaces (e.g. `$queryRaw`, `Record<K, V>`)
+  "MD038": false,
+
+  // Allow compact table pipe style
+  "MD060": false,
+
+  // Scope and ignores
+  "globs": ["**/*.md"],
+  "ignores": ["node_modules/**", ".git/**", ".work/**", ".shape/**"]
+}

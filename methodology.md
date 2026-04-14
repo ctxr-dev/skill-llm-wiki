@@ -599,15 +599,15 @@ The validator enforces structural correctness in two layers: **hard invariants**
 
 ### Shape signals (soft)
 
-These do not block commits but are written to `.shape/suggestions.md` and drive the next Rebuild's agenda.
+These do not block commits but are written to `.shape/suggestions.md` and drive the next Rebuild's agenda. Counter restarts because they are a separate list under a new heading — not a continuation of the hard-invariant numbering above.
 
-21. **DECOMPOSE candidate.** Entry's `covers[]` clusters into ≥2 disjoint groups by tag/keyword similarity.
-22. **NEST candidate.** Entry has ≥3 H2 sections, body size > half-cap, and each section is a declared narrowing via `nests_into[]` or passes the heuristic narrowing check.
-23. **MERGE candidate.** Two siblings with `focus` similarity above threshold, `covers[]` overlap above threshold, compatible `activation`, compatible `parents[]`.
-24. **LIFT candidate.** Folder contains exactly one non-index entry.
-25. **DESCEND candidate.** Parent index body weight (after stripping auto-generated navigation) exceeds its depth-proportional byte budget.
-26. **Coverage hole.** A parent index's `shared_covers[]` is empty or has no overlap with its children's actual `covers[]` — suggests the category has no shared essence and may be spurious.
-27. **Golden-path regression.** The last Rebuild's recorded fixture load-sets are compared to the current tree. Any fixture whose load set grew is flagged.
+1. **DECOMPOSE candidate.** Entry's `covers[]` clusters into ≥2 disjoint groups by tag/keyword similarity.
+2. **NEST candidate.** Entry has ≥3 H2 sections, body size > half-cap, and each section is a declared narrowing via `nests_into[]` or passes the heuristic narrowing check.
+3. **MERGE candidate.** Two siblings with `focus` similarity above threshold, `covers[]` overlap above threshold, compatible `activation`, compatible `parents[]`.
+4. **LIFT candidate.** Folder contains exactly one non-index entry.
+5. **DESCEND candidate.** Parent index body weight (after stripping auto-generated navigation) exceeds its depth-proportional byte budget.
+6. **Coverage hole.** A parent index's `shared_covers[]` is empty or has no overlap with its children's actual `covers[]` — suggests the category has no shared essence and may be spurious.
+7. **Golden-path regression.** The last Rebuild's recorded fixture load-sets are compared to the current tree. Any fixture whose load set grew is flagged.
 
 ### Severity and reporting
 
