@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { collectExistingLeavesBySource } from "../../scripts/lib/orchestrator.mjs";
 
@@ -25,10 +25,10 @@ function tmpWiki(tag) {
 }
 
 function writeLeaf(absPath, sourcePath, hash, extra = "") {
-  mkdirSync(absPath.slice(0, absPath.lastIndexOf("/")), { recursive: true });
+  mkdirSync(dirname(absPath), { recursive: true });
   const fm = [
     "---",
-    `id: ${absPath.split("/").pop().replace(/\.md$/, "")}`,
+    `id: ${basename(absPath, ".md")}`,
     "type: primary",
     "depth_role: leaf",
     "focus: anchor",

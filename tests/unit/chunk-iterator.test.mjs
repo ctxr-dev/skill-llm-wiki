@@ -16,7 +16,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { tmpdir } from "node:os";
 import {
   collectEntryPaths,
@@ -69,7 +69,10 @@ test("collectEntryPaths returns md files in sorted order, skipping dot dirs", ()
     writeFileSync(join(wiki, ".shape", "hint.md"), leaf("hint"));
 
     const paths = collectEntryPaths(wiki);
-    const rel = paths.map((p) => p.replace(wiki + "/", ""));
+    // Normalize to POSIX-separator relative paths so the assertion is
+    // platform-independent. `relative` uses the current platform's
+    // separator (`\` on Windows); we swap to `/` before comparing.
+    const rel = paths.map((p) => relative(wiki, p).split(sep).join("/"));
     assert.deepEqual(rel, [
       "api/alpha.md",
       "api/zeta.md",

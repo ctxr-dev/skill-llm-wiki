@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseFrontmatter, renderFrontmatter } from "../scripts/lib/frontmatter.mjs";
 import { ingestSource } from "../scripts/lib/ingest.mjs";
@@ -79,7 +79,7 @@ test("hand-built wiki passes validate; index-rebuild is idempotent", () => {
 
     writeFileSync(
       join(wiki, "index.md"),
-      `---\nid: ${wiki.split("/").pop()}\ntype: index\ndepth_role: category\ndepth: 0\nfocus: "product docs"\nparents: []\n---\n`,
+      `---\nid: ${basename(wiki)}\ntype: index\ndepth_role: category\ndepth: 0\nfocus: "product docs"\nparents: []\n---\n`,
     );
     writeFileSync(
       join(wiki, "installation", "index.md"),
@@ -117,7 +117,7 @@ test("shape-check detects LIFT for single-child folder", () => {
     mkdirSync(join(wiki, "lonely"), { recursive: true });
     writeFileSync(
       join(wiki, "index.md"),
-      `---\nid: ${wiki.split("/").pop()}\ntype: index\ndepth_role: category\ndepth: 0\nfocus: "root"\nparents: []\n---\n`,
+      `---\nid: ${basename(wiki)}\ntype: index\ndepth_role: category\ndepth: 0\nfocus: "root"\nparents: []\n---\n`,
     );
     writeFileSync(
       join(wiki, "lonely", "index.md"),
@@ -150,7 +150,7 @@ test("hosted mode: arbitrary directory name is a valid wiki root when layout con
     );
     writeFileSync(
       join(hosted, "index.md"),
-      `---\nid: ${hosted.split("/").pop()}\ntype: index\ndepth_role: category\ndepth: 0\nfocus: "hosted target"\nparents: []\ngenerator: skill-llm-wiki/v1\nmode: hosted\n---\n`,
+      `---\nid: ${basename(hosted)}\ntype: index\ndepth_role: category\ndepth: 0\nfocus: "hosted target"\nparents: []\ngenerator: skill-llm-wiki/v1\nmode: hosted\n---\n`,
     );
     assert.equal(isWikiRoot(hosted), true, "hosted-mode directory with contract + marker must be recognized");
 
@@ -180,7 +180,7 @@ test("script safety: findEnclosingWiki only matches skill-generated wikis", () =
     mkdirSync(join(realWiki, "cat"), { recursive: true });
     writeFileSync(
       join(realWiki, "index.md"),
-      `---\nid: ${realWiki.split("/").pop()}\ntype: index\ndepth_role: category\ndepth: 0\nfocus: "real root"\nparents: []\n---\n`,
+      `---\nid: ${basename(realWiki)}\ntype: index\ndepth_role: category\ndepth: 0\nfocus: "real root"\nparents: []\n---\n`,
     );
     writeFileSync(
       join(realWiki, "cat", "index.md"),

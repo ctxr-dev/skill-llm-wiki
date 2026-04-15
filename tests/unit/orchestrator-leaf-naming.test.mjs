@@ -9,7 +9,17 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+
+// Resolve once, reuse across tests. `new URL(...).pathname` is NOT a
+// cross-platform path — on Windows it returns `/D:/a/.../cli.mjs`
+// which spawnSync then rewrites to `C:\D:\a\...\cli.mjs` against the
+// test's cwd. `fileURLToPath` returns a platform-native absolute
+// path on both POSIX and Windows.
+const CLI_PATH = fileURLToPath(
+  new URL("../../scripts/cli.mjs", import.meta.url),
+);
 import { draftCategory } from "../../scripts/lib/draft.mjs";
 
 function tmp() {
@@ -35,10 +45,7 @@ test("build: flat source lands at wiki root (no `general/` bucket)", () => {
     mkdirSync(src);
     writeFileSync(join(src, "alpha.md"), "# Alpha\n\nalpha content\n");
     writeFileSync(join(src, "beta.md"), "# Beta\n\nbeta content\n");
-    const cliPath = join(
-      new URL("../../scripts/cli.mjs", import.meta.url).pathname,
-    );
-    const r = spawnSync("node", [cliPath, "build", src], {
+    const r = spawnSync("node", [CLI_PATH, "build", src], {
       cwd: parent,
       encoding: "utf8",
       env: { ...process.env, CI: "1", LLM_WIKI_SKIP_CLUSTER_NEST: "1" },
@@ -72,10 +79,7 @@ test("build: subdirectory source file keeps plain filename (no flattened prefix)
     );
     // Need at least one more so the build has >1 candidate.
     writeFileSync(join(src, "readme.md"), "# Readme\n\nreadme text\n");
-    const cliPath = join(
-      new URL("../../scripts/cli.mjs", import.meta.url).pathname,
-    );
-    const r = spawnSync("node", [cliPath, "build", src], {
+    const r = spawnSync("node", [CLI_PATH, "build", src], {
       cwd: parent,
       encoding: "utf8",
       env: { ...process.env, CI: "1", LLM_WIKI_SKIP_CLUSTER_NEST: "1" },
