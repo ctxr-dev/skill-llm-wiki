@@ -1,6 +1,6 @@
 {
   "name": "@ctxr/skill-llm-wiki",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "description": "Claude Code skill — build, extend, validate, rebuild, fix, and join LLM wikis from any knowledge corpus. Token-efficient retrieval via hierarchical indices, DAG parents, and deterministic rewrite operators.",
   "type": "module",
   "license": "MIT",
@@ -29,6 +29,7 @@
     "SKILL.md",
     "README.md",
     "LICENSE",
+    "CHANGELOG.md",
     "scripts/",
     "guide/"
   ],
@@ -46,5 +47,9 @@
   "devDependencies": {
     "husky": "^9.1.0",
     "markdownlint-cli2": "^0.14.0"
+  },
+  "dependencies": {
+    "@xenova/transformers": "2.17.2",
+    "gray-matter": "^4.0.3"
   }
 }
