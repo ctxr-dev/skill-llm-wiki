@@ -38,7 +38,7 @@
     "target": "folder"
   },
   "scripts": {
-    "test": "node --test tests/*.test.mjs tests/unit/*.test.mjs tests/e2e/*.test.mjs",
+    "test": "node --test",
     "validate": "node scripts/cli.mjs --version",
     "lint": "markdownlint-cli2 '**/*.md' '#node_modules'",
     "lint:fix": "markdownlint-cli2 --fix '**/*.md' '#node_modules'",
