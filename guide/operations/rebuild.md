@@ -50,3 +50,33 @@ activation:
 - Always write the plan first and let the user review before applying. Rebuild is the most structurally-invasive operation — the user should see what's about to move before it moves.
 - Rebuild never silently skips contract rules in hosted mode. If a proposed move violates the contract, it's rejected and the remaining operators still run until convergence within the contract's boundaries.
 - A failed apply leaves the previous state intact (free: previous version still pointed to by current-pointer; hosted: backup restored).
+
+## `--review` — interactive per-iteration review (Phase 7)
+
+Pass `--review` on any `rebuild` invocation to pause after operator-
+convergence and walk through the pending operator commits one by
+one. After the convergence phase produces its per-iteration commits
+(and before validation + commit-finalize run), the review flow:
+
+1. Prints `git diff --stat pre-op/<id>..HEAD` so you see the file-
+   level summary of what moved.
+2. Lists every pending iteration commit with its subject line.
+3. Prompts you to pick one of: **approve**, **abort**, or **drop
+   &lt;iteration&gt;**.
+
+- **approve** — proceed to validation + commit-finalize as normal.
+- **abort**   — `git reset --hard pre-op/<id>` + `git clean -fd`,
+  roll the working tree back to its pre-op state, and exit with
+  code 2. Nothing lands in the wiki.
+- **drop &lt;N&gt;** — revert the commit for iteration N via
+  `git revert --no-edit`, producing an inverse commit. Iteration
+  N's move is undone but the other iterations survive. Re-prompts
+  so you can drop more iterations one at a time.
+
+In non-interactive mode (CI, hooks, `--no-prompt`, or stdin not a
+TTY), `--review` is a silent pass-through — the orchestrator
+proceeds as if the flag hadn't been passed.
+
+`--review` only pauses when convergence actually produced at
+least one commit. An op that triggered zero operators auto-
+approves without prompting.

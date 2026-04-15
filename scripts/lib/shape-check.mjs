@@ -164,7 +164,7 @@ function setRootRebuildFlag(wikiRoot, suggestions, needed) {
   data.rebuild_needed = needed;
   data.rebuild_reasons = suggestions.slice(0, 10).map((s) => `${s.operator}: ${s.reason}`);
   if (!data.rebuild_command) {
-    data.rebuild_command = `skill-llm-wiki rebuild ${wikiRoot} --plan`;
+    data.rebuild_command = "skill-llm-wiki rebuild <wiki> --plan";
   }
   const tmp = p + ".tmp";
   writeFileSync(tmp, renderFrontmatter(data, body), "utf8");

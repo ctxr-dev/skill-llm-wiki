@@ -71,7 +71,7 @@ These terms appear throughout the rest of the document. They are defined once he
 - **Narrowing chain.** The sequence of `focus` strings obtained by walking an entry's canonical `parents[]` chain up to the root. A well-formed wiki has strictly-narrowing chains.
 - **Operator.** One of four transformations (DECOMPOSE, NEST, MERGE/LIFT, DESCEND) that reshape the tree toward a normal form.
 - **Rewrite plan.** A file listing proposed operator applications — produced by Rebuild, reviewed by a user or AI, applied atomically if approved.
-- **Work manifest.** `.work/progress.yaml` — the durable progress record that makes every long-running operation resumable from interruption.
+- **Phase-commit audit trail.** Per-phase (and per-operator-convergence-iteration) git commits in the private repo at `<wiki>/.llmwiki/git/` give every long-running operation a durable, introspectable history. The `.work/` directory is ephemeral scratch space for phases that need to stage intermediate artifacts — it is deleted at commit-finalize. See 9.9 for the full lifecycle. (True mid-phase resume is scoped as future work; today an interrupted operation is handled by rollback + re-run.)
 
 ---
 
@@ -596,6 +596,8 @@ The validator enforces structural correctness in two layers: **hard invariants**
 18. **Stale-index detection.** If any leaf entry's mtime is newer than its containing `index.md`'s mtime, the index is stale — error (the hook should have caught it).
 19. **Source integrity.** If `source.hash` is set on an entry, the upstream content's current hash must still match; otherwise the entry is stale and Fix should regenerate it.
 20. **Cross-reference coherence.** For every entry listed in a soft parent's `index.md` with `canonical_parent: X`, the file `X/<entry-id>.md` must exist and its `parents[0]` must point back to `X`.
+21. **`GIT-01` — private git integrity.** When the wiki has a private git repository (guarded on the presence of `<wiki>/.llmwiki/git/HEAD`, i.e., an initialised repo), `git fsck --no-dangling --no-reflogs` must succeed under the skill's isolation environment (see 9.9), and — when the op-log is non-empty — the most recent logged operation's `pre-op/<op-id>` tag must exist and be reachable from `HEAD` via `git merge-base --is-ancestor`. This is an **ancestry check**, not a "working-tree matches HEAD" check: an operator who hand-edited the working tree after a clean commit would still pass `GIT-01`. A tighter "working tree matches most recent op" check is scoped as future work; for now, ancestry is the structural trust anchor for every rollback, diff, and `skill-llm-wiki history` query described in 9.9.
+22. **`LOSS-01` — byte-range coverage.** When `<wiki>/.llmwiki/provenance.yaml` exists, for every source file recorded in it, the total byte coverage (sum of `sources[].byte_range` lengths on every target that references that source, plus `discarded_ranges[].byte_range` lengths) must equal the source file's size, and no two ranges may overlap on the same source. Source sizes are read from the manifest's `sources[].source_size` field (authoritative at ingest time via `provenance.mjs::recordSource`) so the check does not depend on the original source file still being available at validation time. The invariant is **guarded** on the presence of `.llmwiki/provenance.yaml`; wikis built before provenance tracking was introduced remain valid. Together with `GIT-01`, this is the load-bearing losslessness guarantee described in 9.9.
 
 ### Shape signals (soft)
 
@@ -697,9 +699,11 @@ The four operators from section 3.5 are implemented as reusable primitives. Each
 
 ---
 
-## 9.4. Safety: Sibling Versioned Outputs, Resumable Phases, Never Touching the Source
+## 9.4. Safety: Sibling Outputs, Phase-Based Pipelines, Never Touching the Source
 
-This is the safety envelope that makes `skill-llm-wiki` trustworthy. Users must be able to run any operation against a real folder without fearing data loss, and interrupted operations must resume cleanly. Three pillars: immutability of sources, versioned sibling outputs, phase-based resumable pipelines.
+> **Supersession note.** The original §9.4 described a `.llmwiki.v<N>/` sibling-versioned layout and a hand-rolled `.work/progress.yaml` resumption manifest. Both have been superseded by the Phase 1–7 git-backed substrate documented in §9.4.2 (layout modes) and §9.9 (private git + per-phase commits). Where §9.4 and the later sections disagree, the later sections are authoritative. The text below is retained for historical context and because the core safety pillars (source immutability, phase decomposition, atomic commit) still hold.
+
+This is the safety envelope that makes `skill-llm-wiki` trustworthy. Users must be able to run any operation against a real folder without fearing data loss, and interrupted operations must be safely recoverable. Three pillars: immutability of sources, stable sibling outputs, phase-based pipelines.
 
 ### Pillar 1 — Sources are immutable
 
@@ -731,76 +735,26 @@ When the user extends `./docs.llmwiki.v1` with `./arch`, the resulting `./docs.l
 
 ### Pillar 2 — Phase-based pipelines
 
-Every operation (Build, Extend, Rebuild, Fix, Join) runs as a sequence of named phases. Each phase has a precise input (the previous phase's artifact), a precise output, and a completion marker. The pipeline is orchestrated via a single file `<wiki>/.work/progress.yaml` that is updated atomically after every per-item write.
+Every operation (Build, Extend, Rebuild, Fix, Join) runs as a sequence of named phases. Each phase has a precise input (the previous phase's committed state), a precise output, and a durable checkpoint (a git commit). The authoritative pipeline description lives in §9.9 "Operation lifecycle"; the phase names retained below are the same, the checkpoint substrate is the private git.
 
 ### Canonical phases (Build; other operations have similar shapes)
 
-1. **ingest** — walk the source(s), read files, compute content hashes, write one metadata record per candidate entry to `.work/ingest/`. Per-item unit: source file path. Output: list of entry candidates with hash, size, detected type.
-2. **classify** — assign each candidate a draft category path via clustering (script) or LLM classification (AI fallback). Writes `.work/classify/assignments.yaml`. Per-item unit: entry id.
-3. **draft-frontmatter** — generate frontmatter for each entry. Script-first for structured sources; AI fallback for prose-heavy entries where heuristic confidence is below the threshold. Writes `.work/frontmatter/<entry-id>.yaml`. Per-item unit: entry id.
-4. **layout** — place each entry in a draft directory tree using classify assignments and the narrowing-chain rule. Writes `.work/layout/tree.yaml`. Phase unit: whole-tree atomic.
-5. **operator-convergence** — apply the four operators from section 3.5 until no operator reports a change. Records every application to `.work/operators/applied.yaml`. Per-iteration checkpoint.
-6. **index-generation** — emit `index.md` for every directory, with frontmatter and body zones. Writes to `.work/indices/` first; the commit phase moves them into final locations. Per-item unit: directory.
-7. **validation** — run all hard invariants from section 8 against the projected tree. Writes `.work/validation/report.yaml`. Phase unit: whole-tree. Hard violations halt the pipeline.
-8. **golden-path** — run fixture queries through the projected router on the new tree (and, for Rebuild, through the old tree as well) and compare load sets. Writes `.work/golden-path/report.yaml`. Regressions halt the pipeline.
-9. **commit** — atomic filesystem move from `.work/` staging to the final wiki layout. Update the current-pointer. Archive the `.work/` tree into `.shape/history/<timestamp>/` for post-mortem inspection.
+1. **pre-op snapshot** — `git add -A && git commit -m "pre-op <op-id>"`, tag `pre-op/<op-id>`. Rollback anchor for the entire operation.
+2. **ingest** — walk the source(s), read files, compute content hashes and byte ranges, record per-target provenance to `<wiki>/.llmwiki/provenance.yaml`. Build-only in the current implementation.
+3. **draft-frontmatter** — generate frontmatter for each entry. Heuristic extractor for structured sources; escalates to Claude (via `guide/tiered-ai.md`) for prose-heavy entries. Commit at phase end: `phase draft-frontmatter: wrote N leaves`.
+4. **operator-convergence** — apply the five operators from §3.5 (DESCEND > LIFT > MERGE > NEST > DECOMPOSE) until no operator reports a change. **One git commit per iteration** so `git log pre-op/<id>..HEAD` reads like a per-iteration audit trail.
+5. **review (optional, `rebuild --review` only)** — surface `git diff --stat pre-op/<id>..HEAD` and the per-iteration commit list; accept approve / abort / `drop:<sha>`. Drops land as `git revert --no-edit` commits and the loop re-prompts. Aborts reset to `pre-op/<id>`.
+6. **index-generation** — emit a unified `index.md` for every directory. Commit: `phase index-generation: rebuilt N index.md files`.
+7. **validation** — run all hard invariants from §8 (including `GIT-01` and `LOSS-01`) against the committed tree. Hard violations trigger `git reset --hard pre-op/<id>` + `git clean -fd`; the failed phase commits survive in the reflog for post-mortem.
+8. **commit-finalize** — tag the final commit `op/<op-id>`, append to `<wiki>/.llmwiki/op-log.yaml`.
 
-### Progress manifest schema
+**Not yet implemented in the orchestrator:** a deterministic "golden-path" phase (fixture load-set comparison) and a `.work/` → `.shape/history/<op-id>/` archive step. Both are scoped as future work; the orchestrator currently just removes the live `.work/` scratch directory at the end of a successful operation.
 
-`<wiki>/.work/progress.yaml`:
+### Resumption
 
-```yaml
-wiki_path: ./docs.llmwiki.v2
-operation: build
-source_paths:
-  - ./docs
-source_hashes:
-  "./docs": "sha256:abc123..."
-started: 2026-04-13T10:30:00Z
-last_progress: 2026-04-13T10:47:22Z
-current_phase: draft-frontmatter
-determinism_seed: 1142008
-phases:
-  ingest:
-    status: done
-    items_total: 127
-    items_completed: 127
-    artifact: .work/ingest/
-    completed_at: 2026-04-13T10:32:11Z
-  classify:
-    status: done
-    items_total: 127
-    items_completed: 127
-    artifact: .work/classify/assignments.yaml
-    completed_at: 2026-04-13T10:35:03Z
-  draft-frontmatter:
-    status: in_progress
-    items_total: 127
-    items_completed: 84
-    next_item: security-overview
-    failed_items: []
-  layout:
-    status: pending
-  operator-convergence:
-    status: pending
-  index-generation:
-    status: pending
-  validation:
-    status: pending
-  golden-path:
-    status: pending
-  commit:
-    status: pending
-```
+The Phase 1–7 implementation does **not** persist a standalone `progress.yaml` manifest. Resumability relies on git itself: because every phase's output is a commit, an interrupted operation can be diagnosed with `skill-llm-wiki log --op <id>` (showing which phase commits landed) and either resumed manually (by rerunning the operation, which is currently a full re-build rather than a resume) or rolled back with `skill-llm-wiki rollback <wiki> --to pre-<op-id>`. A true in-place resume ("pick up where the last phase stopped") is scoped as future work.
 
-### Resumption protocol
-
-1. On any skill invocation targeting an existing `.work/progress.yaml`, read the manifest.
-2. If the current phase is `in_progress`, resume from `next_item` within that phase.
-3. Every per-item success flushes the manifest before returning. Flush cost is sub-millisecond; the atomicity of a single-file write is the transactional primitive.
-4. On phase completion, atomically advance `current_phase` and write. The next phase's first item begins only after this write succeeds.
-5. On resume, recompute hashes for all source paths. If any source hash has changed (the user edited a source file during processing), halt with a clear error — the user chooses to discard `.work/` and start fresh, or to manually resolve.
-6. **Determinism guarantee.** Given the same inputs and the same `determinism_seed`, a resumed run must produce byte-identical output to an uninterrupted run. This requires: deterministic file ordering (sorted by path), deterministic id generation (content-hash-derived, not random), no wall-clock-dependent logic, and any AI call cached by its exact input so resumes replay cached responses instead of re-calling models.
+**Determinism guarantee.** Setting `LLM_WIKI_FIXED_TIMESTAMP=<epoch>` pins `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` on every phase commit so same-input builds produce byte-identical commit SHAs across runs and across machines. Without the env var, commits inherit the ambient wall clock and SHAs drift. The *tree* objects (content-addressed) are still byte-identical either way — only the commit wrapper differs. Additional determinism requirements: sorted file ordering, content-hash-derived ids, no wall-clock-dependent logic, AI-call caching by request hash. See §9.9 "Determinism and resumability" for the implemented pieces.
 
 ### AI call cache
 
@@ -818,6 +772,103 @@ Every AI call in any phase writes its full request and response to `.work/ai-cac
 ### No partial commits
 
 The commit phase is the only phase that writes to user-visible wiki files. It is atomic: either the new version is fully materialised and the current-pointer is flipped, or nothing visible changes. Interruptions during commit (an extremely short window) can leave `.work/` staged and the current-pointer unmoved; resumption detects this and finishes the commit.
+
+---
+
+## 9.4.2. Layout Modes: Sibling (Default), In-Place, Hosted
+
+Section 9.4 establishes that sources are immutable and outputs are stable, phase-safe, resumable artifacts. Section 9.4.2 refines *where* those artifacts live. The skill rejects the "invent a new folder next to the source every time the wiki changes" model in favour of a single stable wiki per source with its history recorded in a private git repository (section 9.9). That reshapes the default naming convention and introduces two additional layout modes for situations where a sibling folder is not the right shape.
+
+Every operation (Build, Extend, Rebuild, Fix, Join) accepts `--layout-mode <mode>` with one of three values. Implementations resolve the effective mode via `intent.mjs`; if the mode cannot be uniquely determined from the invocation, the skill refuses to run (see 9.4.3).
+
+### Mode 1 — `sibling` (default)
+
+`<source>.wiki/` lives next to `<source>/`, at the same filesystem level, with no version number in the name. One wiki = one sibling directory, forever. Subsequent Rebuilds update the same sibling in place; every prior state is reachable as a git tag in the private repository (`op/<id>` for the final commit of each operation, `pre-op/<id>` for the snapshot tag taken just before that operation started). The versioned `.llmwiki.v<N>` naming that section 9.4 previously mandated is retired — the private git is the authoritative history substrate, and separate sibling directories are no longer needed to represent prior wiki states.
+
+Sibling mode exists because the user's working mental model is almost always "I want a wiki of this folder, next to this folder" and because the filesystem-local proximity makes discovery trivial for humans and tooling alike. The wiki is a plain directory of plain files the user can commit, tar, rsync, or open in any editor; the only opaque artifact is the private-git metadata under `.llmwiki/`, which the skill hides via an auto-generated `.gitignore` (see "User-repo coexistence" below).
+
+### Mode 2 — `in-place`
+
+The source folder **is** the wiki. `<source>/.llmwiki/git/` is created inside the source itself; the `pre-op/<first-op>` snapshot captures the user's original content byte-for-byte; all subsequent operations mutate the source directory directly. Rollback via `skill-llm-wiki rollback <source> --to pre-op/<first-op>` restores the original tree exactly. The source is still "immutable" in the sense that every change is reversible — but the directory at the source path is the live wiki.
+
+In-place mode only runs when the user explicitly passes `--layout-mode in-place`. It is never chosen by default, never inferred from "the sibling would collide", and never substituted silently. A user who wants to transform a folder into a wiki without adding a sibling has to say so unambiguously.
+
+### Mode 3 — `hosted`
+
+The wiki lives at a user-chosen path that carries an explicit layout contract — a file `.llmwiki.layout.yaml` inside the target directory. The user passes `--layout-mode hosted --target <path>`, and the skill honours that path regardless of whether it is a sibling of the source or not. Hosted mode is the right choice for "my wiki lives at `./memory/knowledge/`, I don't want it next to any source folder", or for shared team wikis assembled from many sources under a central path. The layout contract recognition lives in `scripts/lib/paths.mjs::isWikiRoot`, which accepts both hosted targets and the `.llmwiki/git/` default recognition criterion.
+
+### Collision handling
+
+- `./docs` + `sibling` default → writes to `./docs.wiki/`. If `./docs.wiki/` exists and has `.llmwiki/git/` it is treated as a continuation (extend or rebuild). If it exists and does NOT have `.llmwiki/git/`, the skill refuses and prompts for a disambiguation (pick a new name, convert the foreign directory, or abort). Section 9.4.3 lists the exact scenario under `INT-01`.
+- `./docs` where `./docs/.llmwiki/git/` already exists → the target IS in-place, regardless of whether the user asked for sibling. The skill detects this state, stops, and prompts: "this folder is already a managed wiki — did you mean `extend`, `rebuild`, `fix`, or to build a fresh one at a different name?" (`INT-02`).
+- Any `<source>.llmwiki.v<N>/` legacy wiki encountered by any operation triggers the migration flow in "Legacy auto-migration" below.
+
+### User-repo coexistence
+
+A wiki's filesystem location often sits inside the user's own git repository (`./docs` under a project, `./memory/knowledge/` under a research notebook). Two gits must coexist without interfering with each other: **the user's project git**, which tracks the wiki content as part of the project, and **the skill's private git** under `<wiki>/.llmwiki/git/`, which records the skill's per-operation history. Three mechanisms keep them apart:
+
+1. **Isolation env block.** Every `git` subprocess the skill spawns runs with `GIT_DIR=<wiki>/.llmwiki/git`, `GIT_WORK_TREE=<wiki>`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=<null-device>`, `HOME=<tmpdir()>`, `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`, and per-invocation `-c commit.gpgsign=false -c tag.gpgsign=false -c core.hooksPath=<null-device> -c core.autocrlf=false -c core.fileMode=false -c core.longpaths=true`. System config, user config, hooks from any source, signing keys, commit templates, and credential prompts from the user's environment are completely ignored. The `<null-device>` is `/dev/null` on POSIX and `NUL` on Windows. See 9.9 for the full block.
+2. **Auto-generated wiki-local `.gitignore`.** On first operation, the skill writes `<wiki>/.gitignore` containing `.llmwiki/`, `.work/`, and `.shape/history/*/work/`. This file is a plain tracked wiki file; it hides the skill's internal metadata from any ancestor git repository that tracks the wiki directory. The user is free to edit, extend, or override it; they are encouraged to commit it (and the wiki content it accompanies) into their own project repo as part of the project's history.
+3. **Scope discipline.** All `GIT_*` env vars are set only in the per-subprocess `env` option passed to `spawn()`. They never export to the parent Node process, never leak into the user's shell, never appear in `process.env` after the subprocess returns. All skill-owned env vars use the namespaced `LLM_WIKI_*` prefix (`LLM_WIKI_FIXED_TIMESTAMP`, `LLM_WIKI_NO_PROMPT`, `LLM_WIKI_QUALITY_MODE`, `LLM_WIKI_MOCK_TIER1`) so they cannot collide with unrelated tooling. JSON error output is toggled via the `--json-errors` CLI flag, not an env var.
+
+The result: a user can run `skill-llm-wiki build ./docs` inside a project that already has its own `.git/`, with hostile hooks, signing requirements, or pre-commit checks — and the user's git is byte-identical afterwards. The `tests/e2e/coexistence.test.mjs` suite exercises this with deliberately hostile configurations and verifies byte-equality of the user repo.
+
+### Legacy auto-migration
+
+When an operation targets a `<source>.llmwiki.v<N>/` directory (the pre-9.4.2 sibling-versioned naming), the intent resolver halts with an `INT-04` structured prompt: "this wiki uses the legacy versioned layout; migrate to the new sibling format (recommended: `<source>.wiki/`), or stay on legacy?". On migration acceptance (`skill-llm-wiki migrate <legacy-wiki>`), the skill creates the new sibling, `git init`s it under `.llmwiki/git/`, copies the content of the directory the user named (note: `migrate` does not auto-resolve the highest `v<N>` via the legacy current-pointer — the user passes the exact directory to migrate), commits it as the genesis state with the tag `op/<migrate-op-id>`, and appends a migration entry to `<wiki>/.llmwiki/op-log.yaml`. The old `.llmwiki.v<N>/` directory is left untouched; users prune it manually later. Migration is always explicit and always prompted — it is never automatic.
+
+### Choosing a mode
+
+The default is sibling. In-place is for "convert this folder into a wiki, I do not want a sibling next to it". Hosted is for "the wiki should live at this specific path that is not next to any source". If the user's intent is unclear, the skill prompts rather than guesses (9.4.3). The guide leaves `layout-modes.md` and `in-place-mode.md` explain the user-facing UX; this section is the normative source for the behaviours those leaves document.
+
+---
+
+## 9.4.3. Ask, Don't Guess: User Intent Resolution
+
+The 9.4 safety envelope and the 9.4.2 layout modes both rely on the skill knowing which folder to read, which folder to write, and which operation to run. When a user's invocation is ambiguous — two folders would both plausibly match, two modes are both compatible, or an operation would stomp on existing state — the skill must never guess. This section pins that rule as a hard contract and lists every scenario it covers.
+
+### The rule
+
+**The skill never infers user intent from ambiguous inputs, and Claude operating the skill does the same.** Every ambiguity is resolved by prompting the user before any mutation happens. The skill and its runtime orchestrator enforce this at two layers:
+
+1. **Skill layer (CLI).** `intent.mjs` resolves the raw CLI arguments into a structured plan (`operation`, `layoutMode`, `source`, `target`, `flags`). If any ambiguity remains after applying defaults, the CLI exits with code 2 and emits a structured error body that lists every interpretation the resolver considered and the flag that would disambiguate each. The body is machine-parseable (JSON on stderr when `--json-errors` is passed, numbered-options text otherwise). Every ambiguous scenario has an `INT-NN` code so the error is indexable from test code, from the guide, and from Claude's prompt templates.
+2. **Session layer (Claude).** The guide leaf `guide/user-intent.md` is activated whenever the user's natural-language request contains ambiguity keywords ("convert", "migrate", "update", "fix", "in place"). It instructs Claude to ask before running the skill — to resolve the ambiguity in conversation rather than to let the CLI error out and then paraphrase the error back to the user. The CLI error is a fallback; the first line of defence is Claude catching the ambiguity upstream.
+
+### Scenarios the CLI refuses to guess
+
+The normative code list lives in the `intent.mjs` header; the one below mirrors it. Each code is a stable identifier referenced by guide leaves, test fixtures, and Claude's prompt templates.
+
+- **`INT-01` — default sibling name collision.** `build ./docs` would produce `./docs.wiki/`. If `./docs.wiki/` already exists and is not a skill-managed wiki (no `.llmwiki/git/`), the resolver refuses. Options surfaced: pick a different name, pass `--layout-mode in-place`, or abort.
+- **`INT-01b` — explicit `--target` at a foreign non-empty directory.** `build --target ./some/dir` where the directory exists, is non-empty, and is not a skill-managed wiki. The resolver refuses and asks whether to choose a different target, pass `--accept-foreign-target` to deliberately write into it, or abort.
+- **`INT-02` — source is already a managed wiki (implicit in-place).** `build ./docs` where `./docs/.llmwiki/git/` already exists. The resolver refuses. Prompt: "this is already a wiki — did you mean `extend`, `rebuild`, `fix`, or to `build` a fresh one at a different name?"
+- **`INT-03` — target wiki exists but `build` was used.** The target is an existing skill-managed wiki but the invocation is `build`, which is reserved for fresh creations. The resolver refuses and suggests `extend` or `rebuild`.
+- **`INT-04` — legacy versioned wiki encountered.** Any operation against a `<source>.llmwiki.v<N>/` directory triggers the migration prompt described in 9.4.2 "Legacy auto-migration".
+- **`INT-05` — rollback without `--to`.** `rollback ./docs.wiki` with no `--to`. The resolver prints the op-log and asks which op to roll back to.
+- **`INT-06` — source is a bare file.** `build ./README.md`. The resolver refuses and asks "do you want to treat this single file as a one-entry wiki, or point me at its parent folder?"
+- **`INT-07` — multi-source Build/Extend without explicit canonical.** `build ./docs ./specs` with no canonical-home designation. The resolver refuses and asks which source determines the sibling location and which is being merged in.
+- **`INT-08` — source inside a dirty user git repo.** The source is tracked by a user git that has uncommitted changes. The resolver warns and asks the user to commit or stash, or to pass `--accept-dirty` as a deliberate override.
+- **`INT-09a` — `--layout-mode in-place` combined with `--target`.** Mutually exclusive flags: in-place uses the source path, a `--target` would contradict it. The resolver refuses and asks which the user actually wants.
+- **`INT-09b` — `--layout-mode hosted` invoked without `--target`.** Hosted mode requires an explicit target path. The resolver refuses and asks for one.
+- **`INT-10` — unknown `--layout-mode` value.** Anything other than `sibling`, `in-place`, or `hosted`. The resolver refuses, lists the valid values, and exits.
+- **`INT-11` — unknown CLI flag.** `parseSubArgv` surfaces unknown flags as an `INT-11` error so every "did you mean…?" case funnels through the same structured-error code and can be caught uniformly by scripts and tests.
+- **`INT-12` — ambiguity reached non-TTY interactive resolution.** An earlier ambiguity would normally have been resolved by prompting the user, but stdin is not a TTY (or `LLM_WIKI_NO_PROMPT=1` / `--no-prompt` is set), so the skill refuses to guess. Emitted from `cli.mjs` when `NonInteractiveError` is caught. The resolving "flag" is to re-run the command in an interactive terminal, or to add the disambiguating flag directly.
+- **`INT-13` — unknown `--quality-mode` value.** Anything other than `tiered-fast`, `claude-first`, or `tier0-only`. The resolver refuses, lists the valid values, and exits.
+
+### Non-interactive fallback
+
+When the skill is invoked from CI or a script — `stdin` is not a TTY, or `LLM_WIKI_NO_PROMPT=1` is set, or `--no-prompt` is passed — every ambiguity is a hard error with exit code 2 and no interactive recovery path. There are no silent defaults. This is the contract that makes scripted `skill-llm-wiki` calls safe: a script that invokes the skill with ambiguous arguments fails loudly rather than quietly producing the wrong wiki.
+
+### The Claude-session obligation
+
+The guide's `user-intent.md` and `hidden-git.md` leaves together tell Claude at routing time to resolve intent in conversation, not in CLI errors. The scenarios Claude must catch before running the skill:
+
+- Verbs like "convert", "migrate", "update" without a clear target — ask which folder.
+- Verbs like "fix", "update" without context — ask which wiki and which operation.
+- Ambiguous destinations ("put it in my memory folder") — ask hosted vs. sibling.
+- "Do it in place" literally — confirm the user means `--layout-mode in-place` and accepts that the source directory is mutated.
+- Wiki living inside a user git repo, with the user silent on whether to add `.llmwiki/` to the user's own ignore — ask.
+
+This is the one methodology rule that applies equally to the skill and to the humans (or LLMs) invoking it: when in doubt, ask.
 
 ---
 
@@ -967,38 +1018,35 @@ Every invariant from section 8 is tagged with one of three fix classes:
 
 ### Phases
 
-Fix runs through the common safety envelope with these phases:
+> **Implementation scope note.** The Phase 1–7 orchestrator ships a **minimal forward-port** of the Fix pipeline: it runs preflight, pre-op snapshot, scan, AUTO/AI-ASSIST application, index rebuild, validation, and commit-finalize against the same stable `<source>.wiki/` sibling (or in-place/hosted target). The richer mode surface and the extra phases described below — `--dry-run`, `--batch`, `--interactive`, `--hard-only`, `--with-soft`, a durable `fix-plan.yaml`, a golden-path regression check, and a per-op `.shape/history/<op-id>/` archive — are **scoped as future work** and are not wired through the CLI today. HUMAN-class divergences currently surface as plain validation errors; a dedicated structured-prompt `INT` code is scoped for the full Fix pipeline.
+
+Fix runs through the common safety envelope with these phases (future-scope items marked *):
 
 1. **ingest-wiki** — read the existing wiki state into memory.
 2. **scan-divergences** — run all Validate checks; classify each finding by AUTO / AI-ASSIST / HUMAN.
-3. **plan-fixes** — produce `.work/fix-plan.yaml` listing every proposed repair, its class, and its target. `--dry-run` stops here.
+3. **plan-fixes\*** — *(future work)* produce `.work/fix-plan.yaml` listing every proposed repair, its class, and its target.
 4. **apply-auto** — execute all AUTO fixes deterministically.
-5. **apply-ai-assist** — batch AI-ASSIST items into minimal-round-trip AI calls, apply outputs.
-6. **prompt-human** — for HUMAN-class items, halt with a structured question list. Interactive runs prompt inline; batch runs write `.work/human-decisions-needed.yaml` and exit.
+5. **apply-ai-assist** — emit structured requests that Claude-at-session-time fulfils with the repair content.
+6. **prompt-human** — for HUMAN-class items, surface the finding as a plain validation error today (a dedicated structured-prompt `INT` code is future work). The user either resolves the upstream cause and re-invokes Fix, or rolls back to `pre-op/<id>`.
 7. **regenerate-indices** — rebuild all affected `index.md` files.
-8. **validate-again** — run all hard invariants on the projected fixed tree. If any repair introduced a new violation (rare but possible), halt and report.
-9. **golden-path** — compare retrieval on the old and fixed trees using stored fixtures. Accept only if no regression.
-10. **commit** — atomic move, new version directory, current-pointer updated.
+8. **validate-again** — run all hard invariants on the projected fixed tree. If any repair introduced a new violation, halt and roll back to `pre-op/<id>`.
+9. **golden-path\*** — *(future work)* compare retrieval on the old and fixed trees using stored fixtures.
+10. **commit-finalize** — tag `op/<op-id>`, append to the op-log.
 
-### Modes
+### Modes (future work)
 
-- `skill-llm-wiki fix <wiki> --interactive` — runs through phases, stops at `prompt-human` for each decision, resumes after each answer. Suitable when a user is at a terminal.
-- `skill-llm-wiki fix <wiki> --batch` — runs AUTO and AI-ASSIST only, writes HUMAN items to a decisions file, exits. User fills in the decisions file and re-runs with `--resume`. Suitable for CI or unattended runs.
-- `skill-llm-wiki fix <wiki> --dry-run` — stops after `plan-fixes`, writes the plan, exits. Nothing is mutated. Use to preview before committing.
-- `skill-llm-wiki fix <wiki> --hard-only` — repairs hard-invariant violations only; soft signals are left alone.
-- `skill-llm-wiki fix <wiki> --with-soft` — also addresses soft signals by optionally invoking operator primitives for single-operator-fixable cases.
+A richer mode surface is scoped for a future release: `--dry-run` (plan only, no mutation), `--batch` (apply AUTO + AI-ASSIST, export HUMAN items for later resolution), `--interactive` (inline HUMAN prompts), `--hard-only`, `--with-soft`. None of these are wired today — a current `fix` invocation simply runs the phases above end-to-end, surfacing HUMAN items as plain validation errors.
 
 ### What Fix does not touch
 
-- Any file in the input wiki version directory (source is read-only).
-- Golden-path fixtures themselves (fixes can change what a fixture returns, but not the fixture definitions).
-- Soft signals unless `--with-soft` is passed.
+- Any file in the source tree itself (source remains immutable in `sibling` and `hosted` modes).
+- Golden-path fixtures themselves (when that phase exists).
+- Soft signals (soft signals are addressed by Rebuild, not Fix).
 
 ### What Fix creates
 
-- A new sibling `<name>.llmwiki.v<N+1>/` with the repairs applied.
-- An updated current-pointer on successful commit.
-- A preserved `.shape/history/` lineage from the prior version.
+- New per-phase commits on the same stable `<source>.wiki/` sibling under a fresh `op/<op-id>` tag.
+- Updated `<wiki>/.llmwiki/op-log.yaml` appending the fix op.
 
 ---
 
@@ -1059,6 +1107,250 @@ Wikis produced by Join are regular wikis. A subsequent Join can merge a joined w
 ### Fix and Join together
 
 Not in one invocation. If a source wiki fails `source-validate`, Join halts and the user runs Fix on that source first, then re-runs Join. This separation keeps each operation's failure modes easy to reason about.
+
+---
+
+## 9.9. Scale & Precision: Git-Backed History, Chunked Processing, and the LLM's Use of Git
+
+Section 9.4 made the skill safe at the file level by guaranteeing losslessness under interruption. Section 9.4.2 made the layout stable at the directory level by retiring versioned sibling folders in favour of a single wiki plus a private git. This section makes the skill **scalable** — it explains how the private git is organised, how operator-convergence runs against multi-megabyte corpora without running out of context, how the skill exposes git's own tooling to the runtime LLM, and how the `GIT-01` / `LOSS-01` invariants defined in section 8 are anchored in concrete on-disk artifacts.
+
+### The private git layout
+
+Every wiki owns a private, isolated git repository at `<wiki>/.llmwiki/git/`. The repository is initialised lazily — only top-level operations (Build, Extend, Rebuild, Fix, Join) create it, and only on their first invocation against a given wiki. The hook-mode index rebuild path (`scripts/lib/shape-check.mjs` + `scripts/lib/indices.mjs::rebuildIndex`) never calls into `scripts/lib/git.mjs` at all; initialising a private git from within a filesystem hook would be too expensive for the hot path, so the separation is enforced by module boundaries rather than an explicit runtime assertion. A future refactor that added a git call to shape-check.mjs would need to carry that assertion forward.
+
+The on-disk layout under `<wiki>/.llmwiki/`:
+
+```
+<wiki>/.llmwiki/
+├── git/                          # the bare private repo
+├── provenance.yaml               # byte-range traceability (per-target sources and discarded ranges)
+├── op-log.yaml                   # append-only map of {op_id → base_commit, final_commit, tags, operation, summary, layout_mode}
+├── similarity-cache/<hash>.json  # pairwise similarity memoisation keyed by sorted content-hash pair
+├── embedding-cache/<ns>/<sha>.f32  # per-entry MiniLM embeddings (384 floats = 1.5 KB each)
+└── decisions.yaml                # every non-trivial operator application, with tier/confidence/decision
+```
+
+A wiki-level `config.yaml` for tunable thresholds, remote defaults, and model-revision pinning is **scoped as future work** — it is referenced in §9.10 as a configuration surface but no reader/writer exists yet. All thresholds live in module constants in `scripts/lib/similarity.mjs` / `scripts/lib/tiered.mjs`; the embedding model id is a constant in `scripts/lib/embeddings.mjs`. A future wiki would either ship with the same constants or extend the skill to read the config file.
+
+And at the wiki root (tracked by the private git, visible to the user):
+
+```
+<wiki>/.gitignore                 # auto-generated: .llmwiki/, .work/, .shape/history/*/work/
+```
+
+### The isolation env block
+
+Every `git` subprocess the skill spawns runs through the single `scripts/lib/git.mjs::gitRun` helper with this environment (redacted from parent `process.env`):
+
+```js
+{
+  GIT_DIR:            join(wikiRoot, ".llmwiki/git"),
+  GIT_WORK_TREE:      wikiRoot,
+  GIT_CONFIG_NOSYSTEM: "1",                                // ignore /etc/gitconfig
+  GIT_CONFIG_GLOBAL:  isWindows ? "NUL" : "/dev/null",     // ignore ~/.gitconfig
+  HOME:               tmpdir(),                            // belt-and-braces
+  GIT_TERMINAL_PROMPT: "0",                                // never prompt for credentials
+  GIT_OPTIONAL_LOCKS: "0",                                 // no background index refresh race
+  GIT_AUTHOR_NAME:    "skill-llm-wiki",
+  GIT_AUTHOR_EMAIL:   "noreply@skill-llm-wiki.invalid",
+  GIT_COMMITTER_NAME: "skill-llm-wiki",
+  GIT_COMMITTER_EMAIL:"noreply@skill-llm-wiki.invalid",
+}
+```
+
+Plus the per-invocation flags `-c commit.gpgsign=false -c tag.gpgsign=false -c core.hooksPath=<null-device> -c core.autocrlf=false -c core.fileMode=false -c core.longpaths=true`. The `GIT_*` variable names are dictated by git itself and cannot be renamed. The skill-owned variables use the `LLM_WIKI_*` prefix (see 9.4.2). This is the only place in the codebase that spawns `git`; every other module calls into `git.mjs`. If the env block ever needs to change, it changes in one place and propagates uniformly.
+
+### Operation lifecycle: snapshot → phases → commit-finalize
+
+Every operation runs the same phase sequence against the private git:
+
+1. **preflight** — Node ≥18 and git ≥2.25 are checked, and if the wiki already exists, `git fsck` verifies integrity before anything mutates the tree.
+2. **intent-check** — `intent.mjs` resolves the layout mode, target path, and operation-specific flags; any ambiguity short-circuits with an `INT-NN` error (9.4.3).
+3. **pre-op snapshot** — `git add -A && git commit -m "pre-op <op-id>"`, tag `pre-op/<op-id>`. This commit captures every byte of every tracked wiki file and is the rollback anchor for the entire operation. It exists even for the very first Build on an empty directory; the commit tree is empty, but the tag is there.
+4. **phase commits** — draft-frontmatter / operator-convergence / index-generation produce one commit per phase (and one commit per operator-convergence iteration within that phase). Every phase commit's message follows the pattern `phase <name>: <summary>` so `git log pre-op/<id>..HEAD` reads like an audit trail. See "Per-iteration commits" below for why operator-convergence commits per iteration.
+5. **review** (optional, `rebuild --review` only) — `runReviewCycle` gates commit-finalize on explicit user approval. See §9.5 and `guide/operations/rebuild.md`.
+6. **validation** — runs section 8 invariants against the last committed tree. Hard-invariant failure: `git reset --hard pre-op/<id>` and `git clean -fd`. The phase commits survive in the reflog for post-mortem inspection but the working tree returns to the pre-op state exactly.
+7. **commit-finalize** — tag the final commit `op/<op-id>` (no suffix), append `{op_id, base_commit, final_commit, operation, started, finished, summary, layout_mode}` to `<wiki>/.llmwiki/op-log.yaml`, delete the live `.work/` scratch directory.
+8. **gc** — `git gc --auto --quiet` (a no-op unless git's heuristics trip; never aggressive).
+
+**Future work** (currently scoped but not implemented): a deterministic "golden-path" phase that compares routing-fixture load sets against the prior op before allowing commit-finalize; and an archive step that moves `.work/` into `<wiki>/.shape/history/<op-id>/` instead of deleting it, for post-mortem inspection of past operations.
+
+**Tag namespace.** Pre-op snapshot tags use the `pre-op/<id>` path; finalised operation tags use `op/<id>`. The two namespaces are kept disjoint so the `<id>` portion never sits at two different levels of the git ref hierarchy, and so `git show-ref | grep ^op/` and `git show-ref | grep ^pre-op/` each produce clean enumerations. Legacy wikis migrated from the pre-9.4.2 versioned layout receive a single `op/migrated-from-v<N>` tag as their genesis anchor.
+
+**Rollback.** `skill-llm-wiki rollback <wiki> --to <ref>` runs `git rev-parse --verify <ref>` first, then `git reset --hard <ref>` + `git clean -fd`. The `<ref>` accepts `<op-id>` (state after that op finished), `pre-<op-id>` (state before that op started — the skill maps this to the `pre-op/<op-id>` tag internally), `genesis` (the very first tracked state), or a raw git expression like `HEAD~2`. Rollback never touches the private git metadata; it only rewrites the working tree.
+
+### Losslessness: `GIT-01` + `LOSS-01` + provenance.yaml
+
+Git already guarantees losslessness at the file level: every commit is content-addressed, every tag is retained, every rollback is byte-exact because git objects are immutable. `GIT-01` (invariant 21 in section 8) pins that guarantee into the validator: the private repo must pass `git fsck --no-dangling --no-reflogs` under the isolation env, and — when the op-log has at least one entry — the most recent logged operation's `pre-op/<op-id>` tag must exist and be reachable from `HEAD`. Failure means something corrupted the repo — the operation halts, the user investigates.
+
+Git does **not** track "which bytes of source file X produced which bytes of output file Y". For that, `<wiki>/.llmwiki/provenance.yaml` records byte ranges per target, per source (keyed by target path so the Build / Extend phases can append one entry per drafted leaf):
+
+```yaml
+version: 1
+corpus:
+  root: /abs/path/to/source
+  root_hash: sha256:<...>
+  pre_commit: <sha of pre-op/<first-op-id> in the private git>
+  ingested_at: <ISO-8601 timestamp>
+targets:
+  <target-path>:
+    sources:
+      - source_path: <original source path>
+        source_pre_hash: sha256:<...>
+        source_size: 4900
+        byte_range: [0, 4821]
+        disposition: preserved | split | merged | transformed
+    discarded_ranges:
+      - source_path: <original source path>
+        byte_range: [4821, 4900]
+        reason: "trailing whitespace"
+```
+
+`LOSS-01` (invariant 22) verifies that for every source referenced in `provenance.yaml`, the sum of `sources[].byte_range` lengths on every target plus `discarded_ranges[].byte_range` lengths equals the source size, with no overlapping ranges on the same source. Source sizes come from the manifest's `sources[].source_size` field (recorded at ingest time) so the check runs off the manifest without re-reading the source tree — the source files may have been edited, moved, or deleted since ingest without invalidating the check. This is the *byte-level* losslessness guarantee that sits on top of git's *commit-level* losslessness. Both invariants are guarded on the presence of their underlying artifacts, so free-mode wikis from before this substrate was introduced remain valid under the updated validator.
+
+### Scale: chunked frontmatter iteration
+
+Storage-side scale is handled by git itself: packs, deltas, and `git fsck` are good on hundreds of thousands of files. The orchestrator's memory/context footprint during operator-convergence and draft-frontmatter is the thing that has to shrink to make multi-megabyte corpora feasible. The `scripts/lib/chunk.mjs` module exposes an async generator:
+
+```js
+async function* iterEntries(wikiRoot, { frontmatterOnly }) { ... }
+```
+
+yielding `{ path, data, loadBody }` tuples sorted by path. `data` is the parsed frontmatter; `loadBody` is a thunk that reads the body only when called. Operator-convergence operates frontmatter-only by design (section 3.5/3.6), so its peak memory footprint is bounded by *per-entry frontmatter* (typically a few hundred bytes) rather than *whole-entry content*. Draft-frontmatter reads one source body at a time, produces the entry, writes, and releases. The iterator streams bytes buffer-first so large files do not allocate string-sized intermediates.
+
+**Per-iteration commits.** Operator-convergence emits one git commit per iteration of its fixed-point loop — not per individual operator application (that would flood the log), not per whole operation (that would lose granularity). `git log pre-op/<id>..HEAD` shows iteration-by-iteration progress. `git diff <iter-1>..<iter-2>` shows exactly what one pass of operators did. The review flow in 9.5/Phase 7 uses this commit granularity to let the user drop individual iterations via `git revert --no-edit` without losing unrelated work.
+
+### Claude's use of the hidden git
+
+The whole point of hosting a per-wiki git is that the runtime LLM operating the skill can treat it as a full-power history system. The skill exposes git plumbing directly as subcommands (all running through the isolation env):
+
+- `skill-llm-wiki log <wiki> [--op <id>] [git-log-args...]` — `git log` passthrough.
+- `skill-llm-wiki show <wiki> <ref> [-- <path>]` — `git show` passthrough for historical file content.
+- `skill-llm-wiki diff <wiki> [--op <id>] [git-diff-args...]` — `git diff --find-renames --find-copies` by default; arbitrary `git diff` arguments pass through. Added / removed / renamed / moved / changed file output, byte-identical to native git.
+- `skill-llm-wiki blame <wiki> <path>` — `git blame` passthrough for line-level attribution.
+- `skill-llm-wiki history <wiki> <entry-id>` — higher-level: walks `git log --follow` + the op-log to trace an entry across renames and surface the operator decisions (from commit messages and `decisions.yaml`) that shaped it.
+- `skill-llm-wiki reflog <wiki>` — see even aborted operations. Crucial for debugging a Build that crashed mid-convergence.
+- `skill-llm-wiki remote <wiki> <add|list|remove> [...]` and `skill-llm-wiki sync <wiki> [--remote <name>] [--push-branch <branch>] [--skip-fetch] [--skip-push]` — optional mirroring to a bare remote the user manages. Never auto-pushes; `sync` is always explicit. The default push refspec is **tag-only** (`refs/tags/op/*` and `refs/tags/pre-op/*`), so history never leaks more than the op anchors unless the user opts in with `--push-branch <branch>`. All remote URLs are redacted when echoed to stdout or surfaced in errors, via `redactUrl` / `redactArgs` helpers in `git.mjs`.
+
+The guide leaves `hidden-git.md`, `diff.md`, and `remote-sync.md` teach Claude how to invoke these subcommands and how to interpret their output. The rule codified there: when the user asks "what changed", "why was this split", "previous state", "when did this break", Claude should reach for git plumbing first — the history is already in the repo; there is no need to re-derive it from the current tree.
+
+**Internal use by the orchestrator.** Rebuild's plan-review phase runs `git log --oneline op/<last-build>..HEAD -- <path>` to see what prior operators did to a file before proposing a new move. Fix reads `git blame` on a problematic entry to decide whether the fault came from ingest or a later operator. Validate runs `git fsck` as part of `GIT-01`. Join uses `git log` across source wikis to de-duplicate entries by provenance rather than by content similarity alone. The private git is not decorative — phase code reads from it as part of normal operation.
+
+### Determinism and resumability
+
+- **Deterministic commit SHAs.** Setting `LLM_WIKI_FIXED_TIMESTAMP=<epoch>` pins commit and tag timestamps (via `GIT_AUTHOR_DATE` / `GIT_COMMITTER_DATE` in `gitCommit`) so a same-input build produces byte-identical commit SHAs across runs and across machines. Without the env var, commits inherit the ambient wall clock and SHAs drift between runs; determinism still holds for the *tree* objects (content-addressed) even though the commit objects differ. Reproducible-build workflows should pin the env var explicitly.
+- **AI call cache** (see 9.4) remains the source of determinism for phases that invoke the runtime LLM. Re-runs replay cached responses for zero tokens.
+- **Phase-commit audit trail.** The skill does **not** persist a `.work/progress.yaml` resume manifest — the phase commits in the private git are the durable checkpoint. An interrupted operation is recovered by rolling back to `pre-op/<op-id>` and re-running. A true in-place resume is scoped as future work.
+- **SIGKILL handling.** If a kill hits between phase file writes and the phase's closing commit, re-running the operation starts from scratch (the `pre-op/<op-id>` tag is still intact); the user's first step is `skill-llm-wiki rollback <wiki> --to pre-<op-id>` to drop any uncommitted tree state. If the kill hits *during* a commit, `git fsck` detects the partial state on the next run and `GIT-01` fires; the operator either rolls back or runs `git reset --hard HEAD` manually to drop it.
+
+### Design principle
+
+Everywhere the skill could invent its own audit log, diff format, integrity check, or content-addressed store, it leans on git instead. Git is the content-addressable store, the history database, the diff engine, the rename detector, and the integrity checker. The skill's code handles the parts git genuinely cannot do — byte-range provenance, semantic similarity, structural invariants — and defers everything else. This is the scale-and-precision trade: storage and history are outsourced to git; the skill's own code budget goes into decisions git cannot make.
+
+---
+
+## 9.10. Tiered AI Strategy
+
+Sections 9.4 through 9.9 describe how the skill makes operations safe, structured, and scalable. This section describes how it decides *when to use the runtime LLM at all*. The goal is simple: make the skill usable against multi-megabyte corpora without a token bill that scales with corpus size, and without losing the LLM's judgment where judgment is actually needed.
+
+### The three tiers
+
+- **Tier 0 — lexical, zero cost.** TF-IDF vectors over title + H1 + `covers[]` + tags + filename, with cosine similarity for pair comparisons. Implemented in `scripts/lib/similarity.mjs` in ~120 lines with no external dependency, using scikit-learn's classic IDF formula (`log((1+N)/(1+df)) + 1`) for stability across corpus sizes. Deterministic, instant, perfect for keyword-overlap decisions. Accuracy is high on *same-vocabulary* similarity (two entries that both talk about "Prisma migrations") and low on *paraphrase* similarity (one says "database schema evolution", the other says "Prisma migrations"). Tier 0 is the decisive top and bottom of the confidence distribution and nothing else.
+- **Tier 1 — local semantic embeddings, zero-API cost, ~23 MB one-time model download.** `@xenova/transformers` running `Xenova/all-MiniLM-L6-v2` (384-dimension MiniLM) locally via ONNX runtime. ~50 ms per text on CPU; embeddings are cached by content hash at `<wiki>/.llmwiki/embedding-cache/<ns>/<sha>.f32` (4-byte floats × 384 = 1.5 KB per entry), namespaced by the cache tier so mock and real embeddings never mix. Captures paraphrase similarity. The model id is pinned as a module constant (`MODEL_ID` in `scripts/lib/embeddings.mjs`); a per-wiki `config.yaml` override with pinned revision is scoped as future work — until then, a library upgrade that changes the model behaviour would require a manual cache rebuild. **Tier 1 is an *optional* dependency.** If `@xenova/transformers` is not installed, Tier 1 is skipped and decisions fall through from Tier 0 directly to Tier 2. In an interactive TTY session, first-time fall-through prompts the user "install Tier 1 now? (y/n)". In CI, hook mode, or with `LLM_WIKI_NO_PROMPT=1`, the fall-through is silent.
+- **Tier 2 — Claude (the runtime LLM operating the skill).** Used only for decisions where Tier 0 and Tier 1 are both in the mid-band, or for decisions that fundamentally require natural-language judgment (HUMAN-class Fix items, structural decisions where similarity alone is insufficient, prose-heavy `draft-frontmatter` where heuristic extraction and embedding similarity cannot produce a good `focus` string). Token cost is proportional to *ambiguity*, not to corpus size.
+
+### Confidence bands and escalation
+
+```text
+Tier 0 (TF-IDF cosine):
+  if similarity >= 0.85  → decisive SAME          (no escalation)
+  if similarity <= 0.30  → decisive DIFFERENT     (no escalation)
+  otherwise              → escalate to Tier 1
+
+Tier 1 (embedding cosine):
+  if similarity >= 0.80  → SAME                   (no escalation)
+  if similarity <= 0.45  → DIFFERENT              (no escalation)
+  otherwise              → escalate to Tier 2
+
+Tier 2 (Claude):
+  issue a narrowly-scoped prompt with only the two frontmatters + titles
+  (bodies go to Claude only when explicitly required by the phase)
+  cache the response at .work/ai-cache/<hash>.json keyed by request content
+```
+
+Thresholds live as module constants in `scripts/lib/similarity.mjs` and `scripts/lib/tiered.mjs`. Per-wiki overrides via `<wiki>/.llmwiki/config.yaml` (under `similarity_tiers:`) are scoped as future work. The defaults above are the starting point; the fixture-corpus suite in `tests/unit/similarity.test.mjs` verifies that the defaults produce sane classifications on a representative corpus.
+
+### Per-phase tier assignment
+
+Every phase is explicitly classified. This table is the normative source for implementation and the body of the `guide/tiered-ai.md` leaf.
+
+| Phase                                 | Primary tier            | Escalation path | Why |
+|---------------------------------------|-------------------------|-----------------|-----|
+| `ingest`                              | None (pure FS)          | —               | Walk, hash, size. No judgment. |
+| `classify`                            | Tier 0 → 1 → 2          | Full ladder     | Grouping by similarity is the tier's sweet spot. Claude only for ambiguous edges. |
+| `draft-frontmatter`                   | Heuristic → Tier 2      | Skip Tier 1     | Generation, not similarity. Heuristics for structured sources; Claude for prose. |
+| `layout`                              | None (mechanical)       | —               | Deterministic placement. |
+| `operator-convergence` (all 5)        | Tier 0 → 1 → 2          | Full ladder     | All operators detect via frontmatter similarity. Claude only for mid-band pairs. |
+| `index-generation`                    | None (templated)        | —               | Frontmatter aggregation. |
+| `validation`                          | None (rule-based)       | —               | Deterministic invariants. |
+| `golden-path`                         | None (deterministic)    | —               | Router walks indices; no similarity. |
+| `commit`                              | None (FS ops)           | —               | Atomic moves. |
+| Rebuild `plan-review`                 | Tier 0 → 1 → 2          | Full ladder     | Comparing trees, proposing moves. Same tiering as operator-convergence. |
+| Fix — AUTO class                      | None (script)           | —               | Deterministic repairs. |
+| Fix — AI-ASSIST class                 | Tier 2                  | —               | Content generation. Claude only. |
+| Fix — HUMAN class                     | User prompt             | —               | Always asks the user. |
+| Join — id collision resolution        | Tier 0 → 1 → 2          | Full ladder     | Same-id entries across sources — similarity ladder is perfect. |
+| Join — category merging               | Tier 0 → 1 → 2          | Full ladder     | Same. |
+
+For a typical corpus, >90% of operator applications resolve at Tier 0 or Tier 1. Claude recovers the last 10% where judgment genuinely matters.
+
+### Quality modes
+
+The skill ships three modes, selected via `--quality-mode` or `LLM_WIKI_QUALITY_MODE`:
+
+- **`tiered-fast` (default, recommended).** Full Tier 0 → 1 → 2 ladder. Uses local embeddings when available; falls through to Claude only for mid-band ambiguity. Zero Claude tokens for >90% of operator decisions on typical corpora. The default because it wins on scale, determinism, speed, cost, and (for typical technical corpora) quality.
+- **`claude-first`.** Tier 0 is still consulted for decisive cases (saves tokens on the obvious decisions), but anything in the Tier 0 mid-band goes straight to Claude, skipping Tier 1. Useful when the user values Claude's judgment over speed/cost, when debugging a specific similarity call, or when Tier 1 is unavailable and the user wants better quality than Tier 0 alone.
+- **`tier0-only`.** No embeddings, no Claude, no network, no optional dependencies. Tier 0 decisions only. Mid-band becomes an explicit "undecidable" marker the user resolves via the interactive review flow. Useful for air-gapped environments, hermetic CI jobs, and smoke tests.
+
+### Similarity cache and decision log
+
+- **Similarity cache** at `<wiki>/.llmwiki/similarity-cache/` holds pairwise results keyed by the sorted pair of content hashes: `{hash(a) ⊕ hash(b) → {tier_used, similarity, decision, computed_at}}`. The cache is consulted before any tier computation. Iterative operator-convergence re-checks the same pair across iterations; the cache makes those checks free after the first.
+- **Decision log** at `<wiki>/.llmwiki/decisions.yaml` records every non-trivial operator application: `{op_id, operator, sources, tier_used, similarity, confidence_band, decision, reason}`. Hand-rolled deterministic YAML so the log is stable across reruns. Claude at session-time reads the decision log when a user asks "why was this merged?" and answers from the log rather than re-running the similarity computation. This is the concrete mechanism by which Claude leverages the hidden git + skill metadata together.
+
+### Claude-at-session-time vs. Claude-in-Tier-2
+
+These are different things. **Claude-at-session-time** is the runtime LLM the user is chatting with; it loaded the skill's guide at routing time and is orchestrating the skill, asking clarifying questions, planning Rebuilds, and interpreting diff output. **Claude-in-Tier-2** is when a phase explicitly calls out to a Claude API (or, inside a Claude Code session, emits a structured request the session-level Claude fulfils). Using `tiered-fast` as the default does **not** mean Claude is absent from the workflow — it means Claude is used for user interaction, plan review, and the hard 10% of similarity decisions, not for every pairwise frontmatter comparison in a 10k-entry corpus.
+
+### Claude-in-Tier-2 execution model: dedicated sub-agents at every layer
+
+Neither Claude-at-session-time nor Claude-in-Tier-2 runs wiki operations inline in the user's main chat. The skill's execution model is a strict three-level hierarchy:
+
+1. **Main session (Claude-at-session-time).** Handles user intent resolution (9.4.3), preflight, and the disambiguation of `INT-NN` errors. When the user asks for a wiki operation, the main session **spawns a dedicated wiki-runner sub-agent** to run the CLI. The main session never holds wiki content in its own context window. Ongoing chat with the user remains cheap and lean. This is a hard contract codified in `SKILL.md` under "Agent delegation contract".
+
+2. **Wiki-runner sub-agent.** Owns its own context window for the duration of one operation. Executes the CLI subcommand, streams progress back to the main session in terse summaries, and is responsible for its own context-window hygiene. When remaining budget approaches a safety threshold, the wiki-runner **auto-compacts** between phase boundaries: the most recent phase commit in the private git is the durable checkpoint, so prior-phase conversation history can be summarised and dropped without loss. Auto-compaction is idempotent, runs only at phase boundaries, and verifies state against `skill-llm-wiki log --op <id>` before proceeding. If auto-compaction still cannot fit the remaining work, the wiki-runner either (a) rolls back to `pre-op/<id>` and relaunches itself with a clean context picking up from the last good commit, (b) narrows the Tier 2 fan-out at the cost of a noted quality reduction, or (c) stops and reports to the main session. See `guide/scale.md` "Context-window management in the wiki-runner" for the operational protocol.
+
+3. **Tier 2 per-decision sub-agents.** Every Tier 2 Claude call — whether it's a draft-frontmatter pass for a prose-heavy entry, a mid-band MERGE decision during operator-convergence, a rebuild plan review, a HUMAN-class Fix proposal, or a Join id-collision resolution — spawns its own narrowly-scoped sub-agent. Each such sub-agent receives only the inputs its question needs (two frontmatter blobs, one source file, one plan excerpt) and returns a strict JSON shape the wiki-runner can parse without further chat. The wiki-runner keeps only the final decision; the sub-agent's prompt and response bodies are dropped when the sub-agent returns. Non-conflicting Tier 2 decisions can fan out in parallel. A cache hit at `<wiki>/.llmwiki/similarity-cache/` short-circuits the fan-out entirely — only cache misses reach a Tier 2 sub-agent at all.
+
+This hierarchy means the token and context budgets scale with **ambiguity**, not with **corpus size**. A 10k-entry wiki with 500 mid-band pairs produces 500 Tier 2 sub-agents, but (a) the main session absorbs zero of them, (b) the wiki-runner absorbs 500 one-line decisions plus whatever its phase commits carry, (c) each Tier 2 sub-agent is a short-lived tight-scope request that returns immediately.
+
+**Default model and effort per task** (unless the user overrides):
+
+| Layer | Model class | Effort | Rationale |
+|---|---|---|---|
+| Wiki-runner sub-agent | Generalist with tool-use; 1M-context variant preferred for very large corpora | medium | Orchestrates CLI, auto-compacts, holds whole-operation state. |
+| Tier 2 draft-frontmatter (per entry) | Cheapest capable short-form writing model | minimal | Bounded output, one source file per call. Parallel-safe. |
+| Tier 2 operator-convergence (per pair) | Cost-effective model with strong short-form judgment | minimal | Bounded output, frontmatter only. Parallel-safe. |
+| Tier 2 rebuild plan review | Strong reasoning model | medium | Needs structural judgment across the full plan. |
+| Tier 2 HUMAN-class Fix | Strong reasoning model | medium | Must justify its proposal to the user. |
+| Tier 2 Join id-collision | Strong reasoning model | minimal | Semantic-identity judgment on small input. |
+
+**User overrides propagate to every sub-agent the operation spawns.** If the user says "use sonnet for this build" or "minimal effort everywhere", that instruction flows from the main session into the wiki-runner's prompt, and from the wiki-runner into each Tier 2 sub-agent's prompt, unchanged. A sub-agent never silently upgrades to a stronger model, and never silently downgrades. Conflicting overrides (a model that cannot support the requested effort level) are surfaced to the user in the main session for resolution before the operation starts.
+
+**Why this hierarchy and not a single flat context.** A naive implementation would run the whole build in the main session, with Tier 2 calls happening inline via the chat's own model. That approach collapses under three stresses at once for large corpora: (1) the user's conversation context gets consumed by content they never asked to see, leaving no room for chat; (2) the main session's model may not be the best tool for every Tier 2 decision, but there's no way to swap models per-call; (3) context-window limits on the main session become a hard ceiling on corpus size. The three-level hierarchy eliminates all three: main-session context stays lean, each Tier 2 task picks its own model, and the wiki-runner's auto-compaction absorbs any corpus size up to the storage-level bounds of chunked iteration (§9.9).
+
+### Design principle
+
+**Claude is used for deep-understanding decisions — structural judgments on semantically ambiguous entries, HUMAN-class Fix decisions, prose-heavy `draft-frontmatter`, user-intent resolution, and session-time reasoning about history. Claude is never used for routing, and never for lightweight pairwise similarity when a local tier is decisive.** This principle keeps token cost proportional to *ambiguity* rather than *volume* and preserves determinism everywhere a local tier answers the question.
 
 ---
 

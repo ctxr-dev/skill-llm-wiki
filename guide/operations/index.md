@@ -10,8 +10,8 @@ activation_defaults:
   tag_matches:
     - operation
 shared_covers:
-  - every operation follows a named phase pipeline tracked in .work/progress.yaml
-  - every operation starts with a preflight and ends with an atomic commit
+  - every operation runs a named phase pipeline with one git commit per phase in the private repo
+  - "every operation starts with a preflight and ends with an atomic commit-finalize that tags op/<id>"
   - every operation honours the safety envelope from guide/safety.md
 orientation: |
   One leaf per top-level operation. Exactly one activates per user ask,
@@ -136,8 +136,8 @@ children: []
 
 **Shared across all children:**
 
-- every operation follows a named phase pipeline tracked in .work/progress.yaml
-- every operation starts with a preflight and ends with an atomic commit
+- every operation runs a named phase pipeline with one git commit per phase in the private repo
+- every operation starts with a preflight and ends with an atomic commit-finalize that tags op/<id>
 - every operation honours the safety envelope from guide/safety.md
 
 ## Children

@@ -28,6 +28,22 @@ export function siblingRoot(sourcePath) {
   return dirname(resolve(sourcePath));
 }
 
+// The default sibling target for any source is `<source>.wiki` — NOT
+// `<source>.llmwiki.v1`. History lives in the private git repo inside
+// the wiki directory (see Phase 1 `snapshot.mjs`), so we never need
+// version-numbered folder names. Trailing slashes on the source path
+// are normalised away by `resolve`.
+//
+// Examples:
+//   defaultSiblingPath("./docs")       → "/abs/cwd/docs.wiki"
+//   defaultSiblingPath("./docs/")      → "/abs/cwd/docs.wiki"
+//   defaultSiblingPath("/tmp/fluffy")  → "/tmp/fluffy.wiki"
+//   defaultSiblingPath(".")            → "/abs/cwd.wiki"   (basename of cwd)
+export function defaultSiblingPath(sourcePath) {
+  const base = wikiBaseName(sourcePath);
+  return join(siblingRoot(sourcePath), `${base}.wiki`);
+}
+
 export function currentPointerPath(sourcePath) {
   const base = wikiBaseName(sourcePath);
   return join(siblingRoot(sourcePath), `${base}.llmwiki.current`);
@@ -106,31 +122,31 @@ export function shapeDir(wikiPath) {
 // A directory is a wiki root iff:
 //   (a) it contains an `index.md`
 //   (b) that `index.md`'s frontmatter declares `generator: skill-llm-wiki/v<N>`
-//   (c) AND EITHER:
-//       - its name matches `*.llmwiki.v<N>` (classic sibling-versioned mode), OR
+//   (c) AND AT LEAST ONE of:
+//       - it has a `.llmwiki/git/HEAD` file (new default — private-git managed)
+//       - its name matches `*.llmwiki.v<N>` (legacy sibling-versioned mode)
 //       - it has a `.llmwiki.layout.yaml` file at its root (hosted mode)
 //
 // The generator marker (b) is the core safety check — it positively
-// identifies a directory the skill itself built. Name matching (c-left)
-// handles free-mode sibling outputs like `./docs.llmwiki.v1/`. Layout
-// contract presence (c-right) handles hosted-mode targets with arbitrary
-// names like `./memory/` or `./docs-wiki/` where the user (or another
-// skill) has declared a contract to govern the directory structure in
-// place. Both paths require the marker — that's non-negotiable.
+// identifies a directory the skill itself built. Private-git presence
+// (c-top) is the recognition the new default sibling layout `<source>.wiki/`
+// relies on. Name matching (c-middle) keeps old sibling-versioned wikis
+// recognisable during auto-migration. Layout contract presence (c-bottom)
+// handles hosted-mode targets with arbitrary names like `./memory/`.
 //
-// This means the first Build of a wiki MUST write `generator:` into the
-// root frontmatter; `indices.rebuildIndex` does that when it detects the
-// directory is a wiki root.
+// Phase 1 only adds the private-git branch; Phase 2's migrate.mjs uses it
+// to decide whether a target is already managed.
 export function isWikiRoot(dirPath) {
   const indexMd = join(dirPath, "index.md");
   if (!existsSync(indexMd)) return false;
 
   const base = basename(dirPath);
+  const hasPrivateGit = existsSync(join(dirPath, ".llmwiki", "git", "HEAD"));
   const hasVersionedName = /\.llmwiki\.v\d+$/.test(base);
   const hasLayoutContract = existsSync(join(dirPath, ".llmwiki.layout.yaml"));
 
   // Must satisfy at least one structural recognition rule.
-  if (!hasVersionedName && !hasLayoutContract) return false;
+  if (!hasPrivateGit && !hasVersionedName && !hasLayoutContract) return false;
 
   // Frontmatter probe: cheap, bounded, no YAML parse required for the
   // marker check — we just look for the line within the fence.
@@ -140,6 +156,22 @@ export function isWikiRoot(dirPath) {
   } catch {
     return false;
   }
+}
+
+// Cheap existence check used by Phase 2's intent resolution to detect
+// "this folder is already a skill-managed wiki" without parsing index.md.
+// Unlike isWikiRoot, this returns true even when the directory has a
+// private git repo but no index.md yet (partially-initialised state).
+export function hasPrivateGit(dirPath) {
+  return existsSync(join(dirPath, ".llmwiki", "git", "HEAD"));
+}
+
+// Legacy format detection — a folder whose basename matches `*.llmwiki.v<N>`.
+// Used by Phase 2's auto-migration to prompt the user before operating on
+// a legacy wiki. Intentionally lightweight: no filesystem reads beyond the
+// basename, no frontmatter probe.
+export function isLegacyVersionedWiki(dirPath) {
+  return /\.llmwiki\.v\d+$/.test(basename(dirPath));
 }
 
 function hasGeneratorMarker(raw) {

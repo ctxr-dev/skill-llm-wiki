@@ -89,6 +89,27 @@ function parseYaml(lines, filePath) {
   return parseMap(p, 0);
 }
 
+// Keys that can poison the parsed object's prototype. These are refused
+// at parse time so adversarial frontmatter (e.g. from a shared wiki a
+// user received from a third party) cannot plant properties on
+// Object.prototype or swap the instance's [[Prototype]] via the
+// `__proto__` setter. See `tests/unit/frontmatter-pollution.test.mjs`.
+const POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function safeAssign(out, key, value, p, tok) {
+  if (POLLUTION_KEYS.has(key)) {
+    p.error(`forbidden YAML key "${key}"`, tok?.raw ?? key);
+  }
+  // Defence in depth: always write via defineProperty so the __proto__
+  // setter cannot fire even if the key check above is ever loosened.
+  Object.defineProperty(out, key, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+}
+
 function parseMap(p, baseIndent) {
   const out = {};
   while (true) {
@@ -106,24 +127,24 @@ function parseMap(p, baseIndent) {
     p.advance();
 
     if (rest === "|" || rest === ">") {
-      out[key] = parseBlockScalar(p, baseIndent, rest === "|");
+      safeAssign(out, key, parseBlockScalar(p, baseIndent, rest === "|"), p, tok);
       continue;
     }
     if (rest !== "") {
-      out[key] = parseScalarInline(rest);
+      safeAssign(out, key, parseScalarInline(rest), p, tok);
       continue;
     }
 
     // Nested structure — peek indent to decide.
     const next = p.peek();
     if (!next || next.indent <= baseIndent) {
-      out[key] = null;
+      safeAssign(out, key, null, p, tok);
       continue;
     }
     if (next.text.startsWith("- ") || next.text === "-") {
-      out[key] = parseSeq(p, next.indent);
+      safeAssign(out, key, parseSeq(p, next.indent), p, tok);
     } else {
-      out[key] = parseMap(p, next.indent);
+      safeAssign(out, key, parseMap(p, next.indent), p, tok);
     }
   }
 }

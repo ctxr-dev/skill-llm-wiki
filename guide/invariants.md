@@ -6,7 +6,7 @@ focus: "hard validation invariants and soft shape signals for LLM wikis"
 parents:
   - index.md
 covers:
-  - "21 hard invariants checked by `cli.mjs validate` — including id/filename match, narrowing chain, DAG acyclicity, canonical-parent consistency, parent-file contract, size caps, and generator marker"
+  - "22 hard invariants checked by `cli.mjs validate` — including id/filename match, narrowing chain, DAG acyclicity, canonical-parent consistency, parent-file contract, size caps, GIT-01 private-git integrity, and LOSS-01 byte-range coverage"
   - "soft shape signals reported by `cli.mjs shape-check` (DECOMPOSE, NEST, MERGE, LIFT, DESCEND candidates, coverage holes, golden-path regressions)"
   - "hosted-mode layering: contract global_invariants add to the methodology defaults"
   - "how to read the validate report (TAG, CODE, path, severity)"
@@ -61,7 +61,10 @@ All of these are hard errors and block commit:
 18. Stale-index detection — no leaf mtime newer than its containing index's mtime.
 19. Source integrity — if `source.hash` is set, current upstream hash must match.
 20. Cross-reference coherence — every soft-parent cross-reference resolves to a real canonical entry.
-21. Root index carries `generator: skill-llm-wiki/v1`.
+21. **`GIT-01` — private-git integrity.** Guarded on `<wiki>/.llmwiki/git/HEAD`. Requires `git fsck --no-dangling --no-reflogs` to succeed under the isolation env; when the op-log has at least one entry, the most recent logged op's `pre-op/<op-id>` tag must exist and be reachable from HEAD.
+22. **`LOSS-01` — byte-range coverage.** Guarded on `<wiki>/.llmwiki/provenance.yaml`. For every source file in the manifest, the sum of `sources[].byte_range` lengths across every target plus `discarded_ranges[].byte_range` lengths must equal the manifest-recorded `source_size`, with no overlapping ranges. Source sizes come from the manifest (captured at ingest time) so the check runs without needing the original source tree.
+
+Pre-Phase-2 wikis that never ran through git-backed history remain valid — both `GIT-01` and `LOSS-01` are guarded on the presence of their underlying artifacts and silently skip when those artifacts are absent. The root `generator: skill-llm-wiki/v1` check is enforced as part of `isWikiRoot` rather than as a numbered invariant (the validator refuses to run against a non-wiki target at all).
 
 In hosted mode, add the contract's `global_invariants` to this list. See `guide/layout-contract.md`.
 

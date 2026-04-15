@@ -8,8 +8,17 @@ on:
 
 jobs:
   check:
-    name: Build, Lint, Validate & Test
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Ubuntu is the full-coverage job (runs every test).
+        # Windows is the Phase 7 parity probe — runs the Windows-
+        # tagged smoke tests only, so a platform-specific regression
+        # (path separators, NUL device, CRLF line endings) shows up
+        # in CI instead of in production.
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -20,6 +29,7 @@ jobs:
           cache: npm
 
       - name: Install dependencies
+        shell: bash
         run: |
           if [ -f package-lock.json ]; then
             npm ci
@@ -31,6 +41,7 @@ jobs:
       # Add `lint`, `validate`, and/or `test` scripts and they will be
       # exercised automatically — no workflow edits required.
       - name: Run checks
+        shell: bash
         run: |
           FAILED=0
           for check in lint validate test; do

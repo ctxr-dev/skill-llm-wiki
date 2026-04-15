@@ -49,7 +49,7 @@ activation:
 - **Narrowing chain** — the sequence of `focus` strings obtained by walking an entry's canonical `parents[0]` chain up to the root. A well-formed wiki has strictly-narrowing chains.
 - **Operator** — one of four transformations (DECOMPOSE, NEST, MERGE/LIFT, DESCEND) that reshape the tree toward a token-minimal normal form.
 - **Layout contract** — a YAML file at a hosted-mode target describing the required directory structure and rules.
-- **Work manifest** — `<wiki>/.work/progress.yaml`, the durable progress record that makes every long-running operation resumable from interruption.
+- **Phase-commit audit trail** — every long-running operation commits once per phase (and once per operator-convergence iteration) into the private git at `<wiki>/.llmwiki/git/`, so the complete history is introspectable via `skill-llm-wiki log --op <id>` and recoverable via `rollback --to pre-<op-id>`. The `.work/` directory is scratch space used by phases that stage intermediate artifacts; it is ephemeral and deleted at commit-finalize. True mid-phase resume is scoped as future work — today an interrupted operation is handled by rollback + re-run.
 
 ## Static structure rules
 

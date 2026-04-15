@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync,
 import { basename, dirname, join, relative } from "node:path";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
 import { WIKI_GENERATOR_MARKER } from "./paths.mjs";
+import { readFrontmatterStreaming } from "./chunk.mjs";
 
 const AUTO_BEGIN = "<!-- BEGIN AUTO-GENERATED NAVIGATION -->";
 const AUTO_END = "<!-- END AUTO-GENERATED NAVIGATION -->";
@@ -63,6 +64,12 @@ export function readIndex(dirPath) {
 // Walk a directory and return a list of child entries (leaves) and child
 // index directories (subcategories). Leaves are any .md file that is not
 // the directory's own index.md and has frontmatter.
+//
+// Scale note: this function reads ONLY each leaf's frontmatter bytes via
+// `readFrontmatterStreaming`. It never pulls the body into memory, so a
+// directory with 10,000 × 50 KB leaves costs ~40 MB of frontmatter (at
+// the 4 KB-per-leaf typical case) instead of 500 MB of full files. This
+// is what makes `rebuildAllIndices` scalable at Phase 5 targets.
 export function listChildren(dirPath) {
   const out = { leaves: [], subdirs: [] };
   if (!existsSync(dirPath)) return out;
@@ -79,13 +86,16 @@ export function listChildren(dirPath) {
     if (!e.name.endsWith(".md")) continue;
     if (e.name === "index.md") continue;
     try {
-      const raw = readFileSync(full, "utf8");
-      const { data } = parseFrontmatter(raw, full);
+      const captured = readFrontmatterStreaming(full);
+      if (captured === null) continue; // no frontmatter — skip silently
+      const { data } = parseFrontmatter(captured.frontmatterText, full);
       if (data && typeof data === "object" && data.id) {
         out.leaves.push({ path: full, data });
       }
     } catch {
-      // Skip malformed
+      // Skip malformed — `runShapeCheck` / `rebuildIndex` both tolerate
+      // leaves whose frontmatter fails to parse. The strict validator
+      // catches them separately.
     }
   }
   return out;
@@ -94,11 +104,16 @@ export function listChildren(dirPath) {
 // Rebuild the index.md for a single directory. Idempotent. Never modifies
 // children. Preserves authored content in the existing index.md.
 //
-// depth is computed from the directory's position relative to the wiki root.
-export function rebuildIndex(dirPath, wikiRoot) {
+// depth is computed from the directory's position relative to the wiki
+// root. If `preloadedChildren` is provided it is used instead of calling
+// `listChildren` again — `rebuildAllIndices` takes advantage of this to
+// avoid reading every leaf's frontmatter twice per rebuild (once during
+// the walk that discovers directories, once during per-directory index
+// regeneration). At 10k leaves the savings are meaningful.
+export function rebuildIndex(dirPath, wikiRoot, preloadedChildren = null) {
   const p = join(dirPath, "index.md");
   const existing = existsSync(p) ? parseFrontmatter(readFileSync(p, "utf8"), p) : null;
-  const { leaves, subdirs } = listChildren(dirPath);
+  const { leaves, subdirs } = preloadedChildren ?? listChildren(dirPath);
 
   const depth = computeDepth(dirPath, wikiRoot);
   const isRoot = dirPath === wikiRoot;
@@ -185,8 +200,16 @@ export function rebuildIndex(dirPath, wikiRoot) {
   if (isRoot) {
     if (data.rebuild_needed === undefined) data.rebuild_needed = false;
     if (!data.rebuild_reasons) data.rebuild_reasons = [];
+    // The rebuild_command field uses a placeholder path instead of
+    // the absolute wikiRoot so that byte-identical wiki content
+    // produces a byte-identical tracked file across machines and
+    // install locations. The user substitutes the placeholder with
+    // their actual wiki path when they run the command. This is the
+    // determinism fix from the Phase 8 sweep finding that two
+    // identical builds into different tmp dirs were producing
+    // different HEAD tree SHAs.
     if (!data.rebuild_command) {
-      data.rebuild_command = `skill-llm-wiki rebuild ${wikiRoot} --plan`;
+      data.rebuild_command = "skill-llm-wiki rebuild <wiki> --plan";
     }
     data.generator = WIKI_GENERATOR_MARKER;
   }
@@ -200,27 +223,48 @@ export function rebuildIndex(dirPath, wikiRoot) {
 
 export function rebuildAllIndices(wikiRoot) {
   // Rebuild bottom-up so parent `shared_covers[]` computations see fresh
-  // child frontmatter.
-  const dirs = [];
-  collectDirs(wikiRoot, dirs);
+  // child frontmatter. The wiki root is ALWAYS included even when it
+  // has no leaves of its own, so `isWikiRoot` can find the generator
+  // marker in its regenerated frontmatter.
+  //
+  // Scale: each directory's `listChildren` result is cached during the
+  // walk and threaded into `rebuildIndex` so every leaf's frontmatter is
+  // read exactly once per rebuild. The naive implementation walked twice
+  // (once to collect directories, once during per-directory aggregation),
+  // which doubled I/O for no reason.
+  const cache = new Map(); // dirPath → { leaves, subdirs }
+  const rootChildren = listChildren(wikiRoot);
+  cache.set(wikiRoot, rootChildren);
+  const dirs = [wikiRoot];
+  collectDirs(wikiRoot, wikiRoot, dirs, cache);
   // Sort by depth descending so deepest directories rebuild first.
   dirs.sort((a, b) => depthOf(b, wikiRoot) - depthOf(a, wikiRoot));
   const out = [];
   for (const d of dirs) {
-    out.push(rebuildIndex(d, wikiRoot));
+    out.push(rebuildIndex(d, wikiRoot, cache.get(d) ?? null));
   }
   return out;
 }
 
-function collectDirs(dirPath, acc) {
+function collectDirs(dirPath, wikiRoot, acc, cache) {
   if (!existsSync(dirPath)) return;
   try {
-    const { leaves, subdirs } = listChildren(dirPath);
-    // Only include dirs that have at least one leaf or subdir with an index.
-    if (leaves.length > 0 || subdirs.length > 0 || dirPath === acc[0]) {
+    // Reuse the cached result when the caller (rebuildAllIndices)
+    // has already paid for it; otherwise compute and stash it so
+    // the rebuild pass can reuse.
+    let children = cache.get(dirPath);
+    if (!children) {
+      children = listChildren(dirPath);
+      cache.set(dirPath, children);
+    }
+    const { leaves, subdirs } = children;
+    // Include every non-root directory that carries at least one leaf
+    // or indexed subdir. The wiki root was already added by the
+    // caller; we skip adding it again to avoid duplicates.
+    if (dirPath !== wikiRoot && (leaves.length > 0 || subdirs.length > 0)) {
       acc.push(dirPath);
     }
-    for (const s of subdirs) collectDirs(s, acc);
+    for (const s of subdirs) collectDirs(s, wikiRoot, acc, cache);
   } catch {
     /* skip */
   }

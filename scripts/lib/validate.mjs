@@ -6,6 +6,9 @@ import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { parseFrontmatter } from "./frontmatter.mjs";
 import { readIndex } from "./indices.mjs";
 import { isWikiRoot } from "./paths.mjs";
+import { gitFsck, gitRefExists, gitRevParse, gitRun } from "./git.mjs";
+import { provenancePath, readProvenance, verifyCoverage } from "./provenance.mjs";
+import { readOpLog } from "./history.mjs";
 
 export function validateWiki(wikiRoot) {
   const findings = [];
@@ -16,6 +19,16 @@ export function validateWiki(wikiRoot) {
     push("error", "WIKI-01", wikiRoot, "path is not a valid wiki root (no index.md or wrong naming)");
     return findings;
   }
+
+  // GIT-01 — guarded: only fires when the private git repo exists.
+  // When it fires, git fsck must pass with no non-dangling errors AND
+  // the most recent operation's pre-op tag must be reachable from HEAD.
+  runGit01(wikiRoot, push);
+
+  // LOSS-01 — guarded: only fires when .llmwiki/provenance.yaml exists.
+  // Every source byte must be accounted for via target sources[] or
+  // discarded_ranges[], with no gaps or overlaps.
+  runLoss01(wikiRoot, push);
 
   const allEntries = collectAll(wikiRoot, push);
 
@@ -176,6 +189,164 @@ function extractAuthoredZone(body) {
   const end = body.indexOf("<!-- END AUTHORED ORIENTATION -->");
   if (start === -1 || end === -1) return "";
   return body.slice(start + "<!-- BEGIN AUTHORED ORIENTATION -->".length, end);
+}
+
+// GIT-01 — private git repo integrity.
+//
+// Guarded: only runs when `.llmwiki/git/HEAD` exists. When it runs, it
+// requires `git fsck --no-dangling --no-reflogs` to exit cleanly AND
+// the pre-op tag of the most recent logged operation to be reachable
+// from HEAD (git ancestor check). Unreachable pre-op tags indicate
+// either a tampered tree or a bug in the orchestrator's rollback path.
+function runGit01(wikiRoot, push) {
+  if (!existsSync(join(wikiRoot, ".llmwiki", "git", "HEAD"))) return;
+  const fsck = gitFsck(wikiRoot);
+  if (!fsck.ok) {
+    push(
+      "error",
+      "GIT-01",
+      wikiRoot,
+      `git fsck failed: ${(fsck.stderr || fsck.stdout || "").trim()}`,
+    );
+    return;
+  }
+  // Find the most recent op's pre-op tag from the op-log. Empty log is
+  // a legitimate "freshly initialised wiki, no ops yet" — skip ancestor
+  // check in that case.
+  let opLog = [];
+  try {
+    opLog = readOpLog(wikiRoot);
+  } catch (err) {
+    push(
+      "error",
+      "GIT-01",
+      join(wikiRoot, ".llmwiki", "op-log.yaml"),
+      `unreadable op-log: ${err.message}`,
+    );
+    return;
+  }
+  if (opLog.length === 0) return;
+  const latest = opLog[opLog.length - 1];
+  const preTag = `pre-op/${latest.op_id}`;
+  if (!gitRefExists(wikiRoot, preTag)) {
+    push(
+      "error",
+      "GIT-01",
+      wikiRoot,
+      `pre-op tag ${preTag} for latest logged op not found in the private repo`,
+    );
+    return;
+  }
+  const headSha = gitRevParse(wikiRoot, "HEAD");
+  const preSha = gitRevParse(wikiRoot, preTag);
+  if (!headSha || !preSha) {
+    push(
+      "error",
+      "GIT-01",
+      wikiRoot,
+      `unable to resolve HEAD or ${preTag}`,
+    );
+    return;
+  }
+  // Ancestor check: pre-op/<latest> must be reachable from HEAD. Use
+  // `git merge-base --is-ancestor`, which exits 0 when preSha is an
+  // ancestor of headSha and exit 1 when it is not — O(log N) walk
+  // without materialising the full ancestry. Equality short-circuits
+  // for the common post-rollback case where HEAD === pre-op.
+  if (headSha === preSha) return;
+  try {
+    const r = gitRun(wikiRoot, [
+      "merge-base",
+      "--is-ancestor",
+      preSha,
+      headSha,
+    ]);
+    if (r.status === 0) return;
+    if (r.status === 1) {
+      push(
+        "error",
+        "GIT-01",
+        wikiRoot,
+        `pre-op/${latest.op_id} (${preSha.slice(0, 12)}) is not an ancestor of HEAD (${headSha.slice(0, 12)})`,
+      );
+      return;
+    }
+    push(
+      "error",
+      "GIT-01",
+      wikiRoot,
+      `merge-base --is-ancestor exited ${r.status}: ${(r.stderr || "").trim()}`,
+    );
+  } catch (err) {
+    push("error", "GIT-01", wikiRoot, `ancestor check failed: ${err.message}`);
+  }
+}
+
+// LOSS-01 — provenance coverage of every source byte.
+//
+// Guarded: only runs when `.llmwiki/provenance.yaml` exists. Walks the
+// manifest's target entries, computes the reverse source → ranges
+// index, and asserts that every byte is covered by either a target's
+// preserved/split/merged/transformed range or an explicit discarded
+// range. Source sizes come from the manifest's `source_size` field
+// (authoritative at ingest time) so the check does NOT depend on the
+// source file still being available at validation time.
+function runLoss01(wikiRoot, push) {
+  if (!existsSync(provenancePath(wikiRoot))) return;
+  let doc;
+  try {
+    doc = readProvenance(wikiRoot);
+  } catch (err) {
+    push(
+      "error",
+      "LOSS-01",
+      provenancePath(wikiRoot),
+      `unreadable provenance manifest: ${err.message}`,
+    );
+    return;
+  }
+  // Build an in-memory lookup from the source_size fields recorded by
+  // recordSource at ingest time.
+  const sizeIndex = new Map();
+  for (const entry of Object.values(doc.targets)) {
+    for (const s of entry.sources || []) {
+      if (typeof s.source_size === "number") {
+        sizeIndex.set(s.source_path, s.source_size);
+      }
+    }
+  }
+  const result = verifyCoverage(wikiRoot, (path) => {
+    if (sizeIndex.has(path)) return sizeIndex.get(path);
+    return null;
+  });
+  if (result.ok) return;
+  for (const u of result.uncovered) {
+    const rangeDesc = u.byte_range
+      ? ` bytes ${u.byte_range[0]}..${u.byte_range[1]}`
+      : "";
+    push(
+      "error",
+      "LOSS-01",
+      join(wikiRoot, u.source_path || "<unknown-source>"),
+      `${u.source_path ?? "<unknown>"}${rangeDesc}: ${u.reason}`,
+    );
+  }
+  for (const o of result.overlaps) {
+    push(
+      "error",
+      "LOSS-01",
+      join(wikiRoot, o.source_path),
+      `${o.source_path} bytes ${o.byte_range[0]}..${o.byte_range[1]} claimed by ${o.target} AND another target`,
+    );
+  }
+  for (const ob of result.out_of_bounds || []) {
+    push(
+      "error",
+      "LOSS-01",
+      join(wikiRoot, ob.source_path),
+      `${ob.source_path} bytes ${ob.byte_range[0]}..${ob.byte_range[1]} exceed source_size ${ob.source_size} (target ${ob.target})`,
+    );
+  }
 }
 
 export function summariseFindings(findings) {

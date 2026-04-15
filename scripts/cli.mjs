@@ -22,18 +22,22 @@
 //   --help                           — print usage
 
 // ───────────────────────────────────────────────────────────────────────────
-// Runtime Node version guard (defense-in-depth).
+// Runtime preflight guard (defense-in-depth).
 //
 // The primary preflight is a Bash check Claude runs BEFORE invoking this CLI
 // (see SKILL.md "Preflight: verify Node.js is installed"). This guard is the
-// second layer: if Node is present but below our minimum, we abort cleanly
-// with a user-friendly message instead of crashing later inside some library
-// call with a cryptic error.
+// second layer.
 //
-// Kept intentionally before the real imports so the failure mode is: exit 4
-// with a short stderr message pointing the user at SKILL.md's Preflight
-// section. Exit codes used by this CLI are: 0 (ok), 1 (usage), 2 (validation
-// errors), 3 (resolve-wiki miss), 4 (Node too old).
+// The inline Node-major check here runs BEFORE any `import` statement so
+// that even on an ancient Node that rejects our modern syntax, we abort
+// cleanly with a short stderr message instead of a cryptic parse error.
+// The richer preflight (full semver, git version, wiki fsck) runs inside
+// main() after imports have resolved — it cannot be earlier without
+// creating a circular dependency between cli.mjs and preflight.mjs.
+//
+// Exit codes used by this CLI are:
+//   0 ok · 1 usage · 2 validation · 3 resolve-wiki miss ·
+//   4 Node too old · 5 git missing/too old · 6 wiki corrupt
 // ───────────────────────────────────────────────────────────────────────────
 const REQUIRED_NODE_MAJOR = 18;
 const _nodeVersionRaw = (process && process.version) || "";
@@ -50,7 +54,7 @@ if (!Number.isFinite(_nodeMajor) || _nodeMajor < REQUIRED_NODE_MAJOR) {
   process.exit(4);
 }
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { ingestSource } from "./lib/ingest.mjs";
 import { draftLeafFrontmatter, draftCategory } from "./lib/draft.mjs";
@@ -63,6 +67,29 @@ import {
   resolveLiveWiki,
   writeCurrentPointer,
 } from "./lib/paths.mjs";
+import {
+  formatAmbiguityJson,
+  formatAmbiguityText,
+  resolveIntent,
+} from "./lib/intent.mjs";
+import { rollbackOperation } from "./lib/rollback.mjs";
+import { defaultMigrationTarget, migrateLegacyWiki } from "./lib/migrate.mjs";
+import { NonInteractiveError } from "./lib/interactive.mjs";
+import {
+  ReviewAbortedError,
+  runOperation,
+  ValidationError,
+} from "./lib/orchestrator.mjs";
+import {
+  cmdBlame,
+  cmdDiff,
+  cmdHistory,
+  cmdLog,
+  cmdReflog,
+  cmdShow,
+} from "./lib/git-commands.mjs";
+import { cmdRemote } from "./commands/remote.mjs";
+import { cmdSync } from "./commands/sync.mjs";
 
 // Hard-coded because @ctxr/kit strips package.json from installed artifacts
 // (see installers/folder.js: package.json is always-dropped metadata). Bump
@@ -73,12 +100,38 @@ function getPackageVersion() {
   return CLI_VERSION;
 }
 
-function printUsage() {
-  console.error(`skill-llm-wiki CLI v${getPackageVersion()}
+// Write usage to the appropriate stream. `--help` is a success path and
+// must go to stdout so shells can pipe it (e.g. `cli --help | grep ...`);
+// an unknown/malformed invocation is a failure path and goes to stderr.
+function printUsage(stream = process.stdout) {
+  stream.write(`skill-llm-wiki CLI v${getPackageVersion()}
 
-Usage: node scripts/cli.mjs <subcommand> [args]
+Usage: node scripts/cli.mjs <subcommand> [args] [flags]
 
-Subcommands:
+Top-level operations:
+  build <source>                   Build a new wiki from a source folder
+  extend <wiki>                    Add new entries from a source
+  rebuild <wiki>                   Optimise structure in place
+  fix <wiki>                       Repair methodology divergences
+  join <wiki-a> <wiki-b>           Merge two wikis into one
+  rollback <wiki> --to <ref>       Restore a previous committed state
+  migrate <legacy-wiki>            Migrate a legacy .llmwiki.v<N> folder
+
+Hidden-git plumbing (Claude reads these to reason about history):
+  diff <wiki> [--op <id>] [...]    Git-style diff (default --find-renames --find-copies)
+  log <wiki> [...]                 git log passthrough (default --oneline --all)
+  show <wiki> <ref> [-- <path>]    git show passthrough
+  blame <wiki> <path>              git blame passthrough
+  reflog <wiki>                    git reflog passthrough
+  history <wiki> <entry-id>        Op-log + git-log walk for one entry
+
+Remote mirroring (explicit user-invoked only, never auto-pushes):
+  remote <wiki> add <name> <url>   Register a remote URL
+  remote <wiki> remove <name>      Delete a configured remote
+  remote <wiki> list               List configured remotes
+  sync <wiki> [--remote <name>]    Fetch + push tag refs explicitly
+
+Low-level script helpers (deterministic, called by Claude):
   ingest <source>                  Walk source, emit candidate JSON
   draft-leaf <candidate-file>       Script-first frontmatter draft for one candidate
   draft-category <candidate-file>   Deterministic category assignment
@@ -90,16 +143,129 @@ Subcommands:
   next-version <source>            Print next version tag for a source
   list-versions <source>           List all existing versions for a source
   set-current <source> <version>   Update the current-pointer for a source
+
+Layout-mode flags (build/extend/rebuild/fix/join):
+  --layout-mode sibling|in-place|hosted
+  --target <path>                  Explicit destination (required for hosted)
+
+Tiered-AI flags:
+  --quality-mode tiered-fast|claude-first|tier0-only
+                                   Default: tiered-fast (TF-IDF → embeddings
+                                   → Claude ladder). See guide/tiered-ai.md.
+
+UX flags:
+  --no-prompt                      Never prompt; fail loud on ambiguity
+  --json-errors                    Emit ambiguity errors as JSON
+  --accept-dirty                   Operate on a dirty user git repo
+
+Rollback flags:
+  --to <ref>                       genesis | <op-id> | pre-<op-id> | HEAD~N
+
+Global:
   --version                        Print CLI version
   --help, -h                       Show this help
+
+Exit codes: 0 ok · 1 usage · 2 ambiguous intent · 3 resolve-wiki miss ·
+            4 Node too old · 5 git missing/too old · 6 wiki corrupt
 `);
+}
+
+// Parse a subcommand's remaining argv into { positionals, flags } for
+// delegation to resolveIntent. Unknown flags bubble up as a structured
+// error so we never silently swallow a typo.
+const FLAG_WITH_VALUE = new Set([
+  "--layout-mode",
+  "--target",
+  "--to",
+  "--canonical",
+  "--quality-mode",
+]);
+const FLAG_BOOLEAN = new Set([
+  "--no-prompt",
+  "--json-errors",
+  "--accept-dirty",
+  "--accept-foreign-target",
+  "--review",
+]);
+
+function parseSubArgv(raw) {
+  const positionals = [];
+  const flags = {};
+  for (let i = 0; i < raw.length; i++) {
+    const tok = raw[i];
+    if (!tok.startsWith("--")) {
+      positionals.push(tok);
+      continue;
+    }
+    // Accept both `--flag value` and `--flag=value`.
+    let name = tok;
+    let inlineValue = null;
+    const eq = tok.indexOf("=");
+    if (eq !== -1) {
+      name = tok.slice(0, eq);
+      inlineValue = tok.slice(eq + 1);
+    }
+    if (FLAG_WITH_VALUE.has(name)) {
+      const value = inlineValue !== null ? inlineValue : raw[++i];
+      if (value === undefined || value === "" || value.startsWith("--")) {
+        return { error: `flag ${name} requires a non-empty value` };
+      }
+      const key = name.slice(2).replace(/-/g, "_");
+      flags[key] = value;
+      continue;
+    }
+    if (FLAG_BOOLEAN.has(name)) {
+      if (inlineValue !== null) {
+        return { error: `flag ${name} does not take a value` };
+      }
+      const key = name.slice(2).replace(/-/g, "_");
+      flags[key] = true;
+      continue;
+    }
+    return { error: `unknown flag: ${name}` };
+  }
+  return { positionals, flags };
+}
+
+// Emit an ambiguity or parse error through the configured formatter and
+// exit 2. Never throws — returns through process.exit.
+function emitIntentError(error, jsonMode) {
+  const body = jsonMode
+    ? formatAmbiguityJson(error)
+    : formatAmbiguityText(error);
+  process.stderr.write(body);
+  process.exit(2);
+}
+
+// Generate a stable op-id for a new top-level operation. Format:
+//   <operation>-<YYYYMMDD-HHMMSS>-<random>
+// The wall-clock component is replaced by LLM_WIKI_FIXED_TIMESTAMP when
+// set, so deterministic reruns produce identical op-ids.
+function newOpId(operation) {
+  const now = process.env.LLM_WIKI_FIXED_TIMESTAMP
+    ? new Date(Number(process.env.LLM_WIKI_FIXED_TIMESTAMP) * 1000)
+    : new Date();
+  const y = now.getUTCFullYear();
+  const m = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(now.getUTCDate()).padStart(2, "0");
+  const hh = String(now.getUTCHours()).padStart(2, "0");
+  const mm = String(now.getUTCMinutes()).padStart(2, "0");
+  const ss = String(now.getUTCSeconds()).padStart(2, "0");
+  const rand = process.env.LLM_WIKI_FIXED_TIMESTAMP
+    ? "deterministic"
+    : Math.random().toString(36).slice(2, 8);
+  return `${operation}-${y}${m}${d}-${hh}${mm}${ss}-${rand}`;
 }
 
 async function main() {
   const argv = process.argv.slice(2);
-  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
-    printUsage();
-    process.exit(argv.length === 0 ? 1 : 0);
+  if (argv[0] === "--help" || argv[0] === "-h") {
+    printUsage(process.stdout);
+    process.exit(0);
+  }
+  if (argv.length === 0) {
+    printUsage(process.stderr);
+    process.exit(1);
   }
   if (argv[0] === "--version") {
     console.log(getPackageVersion());
@@ -108,6 +274,292 @@ async function main() {
 
   const cmd = argv[0];
   const args = argv.slice(1);
+
+  // ─── Remote + sync subcommands (Phase 7) ────────────────────────────
+  // Both take <wiki> as the first positional. `remote` takes a
+  // subcommand (add/remove/list); `sync` accepts --remote <name>
+  // and --push-branch <ref> flags.
+  if (cmd === "remote") {
+    if (args.length < 1) {
+      usageError("remote requires <wiki> as its first argument");
+    }
+    const wiki = resolve(args[0]);
+    const subcommand = args[1];
+    const subArgs = args.slice(2);
+    process.exit(cmdRemote(wiki, { subcommand, args: subArgs }));
+  }
+  if (cmd === "sync") {
+    if (args.length < 1) {
+      usageError("sync requires <wiki> as its first argument");
+    }
+    const wiki = resolve(args[0]);
+    // Parse --remote / --push-branch / --skip-fetch / --skip-push.
+    // Both `--flag value` and `--flag=value` are accepted to match
+    // the rest of the CLI's flag conventions. Empty values and
+    // leading-dash values are rejected loudly.
+    const rest = args.slice(1);
+    const opts = {};
+    for (let i = 0; i < rest.length; i++) {
+      const tok = rest[i];
+      // Accept --flag=value form.
+      let name = tok;
+      let inlineValue = null;
+      const eq = tok.indexOf("=");
+      if (tok.startsWith("--") && eq !== -1) {
+        name = tok.slice(0, eq);
+        inlineValue = tok.slice(eq + 1);
+      }
+      const readValue = (flagName) => {
+        const v = inlineValue !== null ? inlineValue : rest[++i];
+        if (v === undefined || v === "" || v.startsWith("--")) {
+          usageError(`sync: ${flagName} requires a non-empty value`);
+        }
+        return v;
+      };
+      if (name === "--remote") {
+        opts.remote = readValue("--remote");
+      } else if (name === "--push-branch") {
+        opts.pushBranch = readValue("--push-branch");
+      } else if (name === "--skip-fetch") {
+        if (inlineValue !== null) usageError("sync: --skip-fetch does not take a value");
+        opts.skipFetch = true;
+      } else if (name === "--skip-push") {
+        if (inlineValue !== null) usageError("sync: --skip-push does not take a value");
+        opts.skipPush = true;
+      } else {
+        usageError(`sync: unknown argument "${tok}"`);
+      }
+    }
+    process.exit(cmdSync(wiki, opts));
+  }
+
+  // ─── Hidden-git passthrough subcommands ─────────────────────────────
+  // These wrap scripts/lib/git.mjs with the full isolation env so
+  // Claude (or a user) can inspect history without ever touching the
+  // user's own git repo. Every hidden-git command takes <wiki> as its
+  // first positional; remaining args pass through to git.
+  const HIDDEN_GIT_SUBCOMMANDS = new Set([
+    "diff",
+    "log",
+    "show",
+    "blame",
+    "reflog",
+    "history",
+  ]);
+  if (HIDDEN_GIT_SUBCOMMANDS.has(cmd)) {
+    if (args.length < 1) {
+      usageError(`${cmd} requires <wiki> as its first argument`);
+    }
+    const wiki = resolve(args[0]);
+    // Parse a minimal set of our own flags; everything else passes
+    // through to the underlying git command.
+    const rest = args.slice(1);
+    const opIdx = rest.indexOf("--op");
+    let op = null;
+    let passthrough = rest.slice();
+    if (opIdx !== -1) {
+      op = rest[opIdx + 1];
+      passthrough = rest.slice(0, opIdx).concat(rest.slice(opIdx + 2));
+    }
+    let code = 0;
+    switch (cmd) {
+      case "diff":
+        code = cmdDiff(wiki, { op, args: passthrough });
+        break;
+      case "log":
+        code = cmdLog(wiki, { op, args: passthrough });
+        break;
+      case "show": {
+        const ref = passthrough[0];
+        const showArgs = passthrough.slice(1);
+        code = cmdShow(wiki, { ref, args: showArgs });
+        break;
+      }
+      case "blame": {
+        const path = passthrough[0];
+        const blameArgs = passthrough.slice(1);
+        code = cmdBlame(wiki, { path: path && resolve(path), args: blameArgs });
+        break;
+      }
+      case "reflog":
+        code = cmdReflog(wiki, { args: passthrough });
+        break;
+      case "history": {
+        const entryId = passthrough[0];
+        code = cmdHistory(wiki, { entryId });
+        break;
+      }
+    }
+    process.exit(code);
+  }
+
+  // ─── Top-level operations routed through intent.mjs ─────────────────
+  // build / extend / rebuild / fix / join share the same intent-
+  // resolution → dispatch flow. rollback and migrate have tiny bespoke
+  // paths (still routed through intent for the ambiguity surface).
+  // Phase 2 wires the plumbing; Phase 3 will extend the handlers with
+  // full phased orchestration.
+  const INTENT_SUBCOMMANDS = new Set([
+    "build",
+    "extend",
+    "rebuild",
+    "fix",
+    "join",
+    "rollback",
+    "migrate",
+  ]);
+  if (INTENT_SUBCOMMANDS.has(cmd)) {
+    const parsed = parseSubArgv(args);
+    if (parsed.error) {
+      const jsonMode = args.includes("--json-errors");
+      emitIntentError(
+        {
+          code: "INT-11",
+          message: parsed.error,
+          options: [],
+          resolving_flag: "correct the flag",
+        },
+        jsonMode,
+      );
+    }
+    const { positionals, flags } = parsed;
+    const jsonMode = Boolean(flags.json_errors);
+
+    // `migrate` has its own resolution path — the intent resolver would
+    // reject the legacy folder shape as ambiguous.
+    if (cmd === "migrate") {
+      if (positionals.length !== 1) {
+        emitIntentError(
+          {
+            code: "INT-06",
+            message: "migrate requires exactly one <legacy-wiki> positional",
+            options: [
+              {
+                description: "specify the legacy wiki",
+                flag: "migrate <legacy-path>",
+              },
+            ],
+            resolving_flag: "positional legacy path",
+          },
+          jsonMode,
+        );
+      }
+      const legacyPath = resolve(positionals[0]);
+      const target = flags.target
+        ? resolve(flags.target)
+        : defaultMigrationTarget(legacyPath);
+      try {
+        const opId = newOpId("migrate");
+        const r = migrateLegacyWiki(legacyPath, target, { opId });
+        process.stdout.write(
+          `migrated ${legacyPath} (v${r.version}) → ${target}\n` +
+            `  op-id: ${r.opId}\n` +
+            `  sha:   ${r.sha}\n`,
+        );
+        return;
+      } catch (err) {
+        if (err && err.message && /already exists/.test(err.message)) {
+          emitIntentError(
+            {
+              code: "INT-01",
+              message: err.message,
+              options: [
+                {
+                  description: "write to a different target",
+                  flag: "--target <other-path>",
+                },
+              ],
+              resolving_flag: "--target",
+            },
+            jsonMode,
+          );
+        }
+        throw err;
+      }
+    }
+
+    const intent = resolveIntent({
+      subcommand: cmd,
+      args: positionals,
+      flags,
+      cwd: process.cwd(),
+    });
+    if (intent.status === "ambiguous") {
+      emitIntentError(intent.error, jsonMode);
+    }
+    const plan = intent.plan;
+
+    if (cmd === "rollback") {
+      const result = rollbackOperation(plan.target, flags.to);
+      process.stdout.write(
+        `rolled back ${plan.target} to ${result.ref} (${result.sha ?? "n/a"})\n`,
+      );
+      return;
+    }
+
+    // build / extend / rebuild / fix / join: Phase 3 runs the full
+    // phased orchestrator. The orchestrator handles snapshot → ingest
+    // → draft-frontmatter → index-generation → validation →
+    // commit-finalize, with automatic rollback on validation failure.
+    if (plan.is_new_wiki) {
+      mkdirSync(plan.target, { recursive: true });
+    }
+    const opId = newOpId(cmd);
+    const startedIso = new Date().toISOString();
+    let result;
+    try {
+      result = await runOperation(plan, {
+        opId,
+        source: plan.source,
+        startedIso,
+      });
+    } catch (err) {
+      if (err instanceof NonInteractiveError) {
+        emitIntentError(
+          {
+            code: "INT-12",
+            message: err.message,
+            options: [
+              {
+                description: "run with stdin attached to a TTY",
+                flag: "(interactive terminal)",
+              },
+            ],
+            resolving_flag: "explicit flag set",
+          },
+          jsonMode,
+        );
+      }
+      if (err instanceof ValidationError) {
+        process.stderr.write(
+          `${cmd}: validation failed — working tree rolled back to pre-op state\n` +
+            err.message +
+            "\n",
+        );
+        process.exit(2);
+      }
+      if (err instanceof ReviewAbortedError) {
+        process.stderr.write(
+          `${cmd}: ${err.message}\n` +
+            "No changes were committed to the wiki.\n",
+        );
+        process.exit(2);
+      }
+      throw err;
+    }
+    process.stdout.write(
+      `${cmd}: complete\n` +
+        `  target: ${plan.target}\n` +
+        `  mode:   ${plan.layout_mode}\n` +
+        `  op-id:  ${opId}\n` +
+        `  sha:    ${result.final_sha ?? "n/a"}\n` +
+        `  phases: ${result.phases.length}\n`,
+    );
+    for (const p of result.phases) {
+      process.stdout.write(`    • ${p.name}: ${p.summary}\n`);
+    }
+    return;
+  }
 
   switch (cmd) {
     case "ingest": {
@@ -216,8 +668,8 @@ async function main() {
 }
 
 function usageError(msg) {
-  console.error(`error: ${msg}`);
-  printUsage();
+  process.stderr.write(`error: ${msg}\n`);
+  printUsage(process.stderr);
   process.exit(1);
 }
 
