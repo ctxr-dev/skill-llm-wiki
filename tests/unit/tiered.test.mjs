@@ -31,6 +31,10 @@ import {
   decide,
   resolveQualityMode,
 } from "../../scripts/lib/tiered.mjs";
+import {
+  _isTier1LoaderTouched,
+  _resetTier1LoadState,
+} from "../../scripts/lib/embeddings.mjs";
 
 process.env.LLM_WIKI_MOCK_TIER1 = "1";
 
@@ -391,6 +395,101 @@ test("decide: missing operator throws", async () => {
     await assert.rejects(
       () => decide({ id: "a" }, { id: "b" }, [], { wikiRoot: wiki }),
       /requires \{ operator \}/,
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+// ── Tier 1 lazy-load regression (3a) ───────────────────────────────
+//
+// `tiered.decide()` used to call `ensureTier1()` eagerly in its Tier 0 →
+// Tier 1 escalation branch BEFORE even touching the embedding cache.
+// On a warm cache (the common case on any non-cold build cycle) that
+// eager call dynamic-imported `@xenova/transformers` for nothing:
+// every similarity decision reused the on-disk cache, so the loader
+// should have stayed dormant. The `LLM_WIKI_TIER1_DEBUG=1` breadcrumb
+// made this visible in live builds — cycles 1..N all printed the
+// "loading Tier 1 model" line even though `embed-computes=0`.
+//
+// Invariants these tests lock in:
+//   1. Similarity-cache hit → decide() returns without touching the
+//      Tier 1 loader promise slot.
+//   2. Decisive Tier 0 (both SAME and DIFFERENT) → decide() returns at
+//      tier=0 without touching the Tier 1 loader promise slot.
+//   3. Mid-band escalation that DOES need Tier 1 vectors will, of
+//      course, touch the loader — covered by the existing
+//      "tiered-fast mid-band escalates to Tier 1" test.
+
+test("decide: similarity cache hit leaves the Tier 1 loader dormant", async () => {
+  const wiki = tmpWiki("warm-cache-no-load");
+  try {
+    _resetTier1LoadState();
+    assert.equal(
+      _isTier1LoaderTouched(),
+      false,
+      "precondition: loader must start dormant",
+    );
+    // Plant a cache entry for the pair the test is about to decide
+    // on. The REAL Tier 0 answer would be "escalate" for mid-band
+    // pairs, which is the slot that used to eagerly load Tier 1.
+    // A pre-planted cache entry is the exact scenario a warm resume
+    // cycle exercises.
+    const a = midBandA();
+    const b = midBandB();
+    const { createHash } = await import("node:crypto");
+    const textHash = (x) =>
+      "sha256:" +
+      createHash("sha256")
+        .update(
+          (x.focus + " ").repeat(2) +
+            (x.covers || []).join(" ") + " " +
+            (x.tags || []).join(" "),
+        )
+        .digest("hex");
+    writeCached(wiki, textHash(a), textHash(b), {
+      tier: 1,
+      similarity: 0.82,
+      decision: "same",
+      confidence_band: "decisive-same",
+    });
+    const r = await decide(a, b, midBandContext(), {
+      wikiRoot: wiki,
+      opId: "op-warm",
+      operator: "MERGE",
+      qualityMode: "tiered-fast",
+    });
+    assert.equal(r.decision, "same", "cache hit must be honoured");
+    assert.equal(r.reason, "cached");
+    assert.equal(
+      _isTier1LoaderTouched(),
+      false,
+      "decide() must not touch the Tier 1 loader on a cache hit",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("decide: decisive Tier 0 leaves the Tier 1 loader dormant", async () => {
+  const wiki = tmpWiki("decisive-no-load");
+  try {
+    _resetTier1LoadState();
+    assert.equal(_isTier1LoaderTouched(), false);
+    // A clearly-different pair resolves at Tier 0 with
+    // decisive-different — no escalation, no embedding compute.
+    const r = await decide(unrelatedA(), unrelatedB(), [unrelatedA(), unrelatedB()], {
+      wikiRoot: wiki,
+      opId: "op-tier0-diff",
+      operator: "MERGE",
+      qualityMode: "tiered-fast",
+    });
+    assert.equal(r.tier, 0);
+    assert.equal(r.decision, "different");
+    assert.equal(
+      _isTier1LoaderTouched(),
+      false,
+      "decide() must not touch the Tier 1 loader when Tier 0 is decisive",
     );
   } finally {
     rmSync(wiki, { recursive: true, force: true });

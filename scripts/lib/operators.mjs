@@ -821,19 +821,67 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
     return countPendingRequests(wikiRoot) > 0 ? "pending-tier2" : "none";
   }
 
-  // Apply proposals in confidence order. For each proposal:
-  //   1. Ensure indices are current (so the pre-metric reflects
-  //      the real routing graph, not a stale / missing one).
-  //   2. Compute pre-metric.
-  //   3. Apply nest.
-  //   4. Rebuild indices so the routing path sees the change.
-  //   5. Compute post-metric.
-  //   6. If post < pre, keep; else roll back and try the next.
+  // Apply proposals in confidence order. v6-multi-NEST: we now
+  // apply a SET of non-conflicting proposals in a single iteration
+  // instead of only the highest-confidence one. This collapses a
+  // guide/-style 9-NEST convergence from ~9 iterations (= 8 exit-7
+  // cycles on the Tier 2 fixture path) into 1–2 iterations and
+  // fixes the novel-corpus partial-cluster bug where a second
+  // cluster ("frontend/") was orphaned because its parent was
+  // re-shaped by the first applied NEST before the re-scan.
   //
-  // Priority ordering:
-  //   1. `source="both"` clusters (Tier 2 AND math agree) first.
-  //   2. `source="tier2"` clusters next.
-  //   3. `source="math"` clusters last, sorted by average_affinity.
+  // Selection rule for "non-conflicting":
+  //
+  //   - DISJOINT member sets. Two proposals that would move the
+  //     same leaf into two different subdirs are obviously in
+  //     conflict — whichever applied second would either fail in
+  //     the applier or silently clobber the first.
+  //
+  //   Same parent_dir is ALLOWED when members are disjoint. The
+  //   root-level 8-subcategory layout on guide/ is the canonical
+  //   example: every NEST proposal targets `.` as its parent, but
+  //   each carves out a disjoint subset of leaves, so applying
+  //   them in sequence within one iteration is safe. NEST #1 moves
+  //   its members + rewrites the parent index; NEST #2 takes a
+  //   fresh snapshot of the parent index (captured at apply time)
+  //   and moves its disjoint members on top of NEST #1's state.
+  //   A regression-triggered rollback on NEST #2 restores the
+  //   post-NEST-#1 snapshot, not the pre-NEST-#1 state, so
+  //   NEST #1's effects survive a NEST #2 rollback.
+  //
+  //   The stricter "different parent_dir" rule is NOT enforced
+  //   because enforcing it would serialise the guide/ nesting pass
+  //   into 8 iterations = 7 exit-7 cycles — exactly the pre-v6
+  //   pain point we're fixing.
+  //
+  // Ordering: sort by confidence (source rank then avg affinity),
+  // then greedily pick each candidate that doesn't conflict with
+  // any already-picked one. The greedy pick preserves the original
+  // tie-break: a higher-ranked proposal blocks a lower-ranked one
+  // that overlaps with it.
+  //
+  // Per-apply gates: every picked candidate gets its own pre/post
+  // routing_cost measurement and its own rollback snapshot. The
+  // same math-strict / tier2-tolerance policy applies per apply.
+  // A rolled-back pick does NOT cancel subsequent picks in the
+  // same iteration — each is judged on its own metric delta
+  // against the tree state AFTER previous picks have landed.
+  //
+  // Re-freshness check: before each apply, re-run
+  // `mathCandidateIsFresh` on the candidate. If a prior pick in
+  // this iteration invalidated the candidate's member set
+  // (members moved out of parent_dir into a new subdir), the
+  // stale candidate is dropped via `dropStaleMathCandidate`,
+  // which writes a `rejected-stale` audit entry. This is the
+  // subtle case the 3b audit-log path was built for — before v6
+  // it was latent because single-NEST-per-iteration never
+  // produced stale candidates; with multi-NEST it's reachable.
+  //
+  // Commit topology: one commit per applied NEST. The iteration
+  // count stays the same across all picks in a single iteration
+  // (they share the outer `iteration` value) but each apply fires
+  // `commitBetweenIterations` so the private git history shows
+  // one commit per rewrite, matching pre-v6 behaviour.
   const sourceRank = (s) => (s === "both" ? 2 : s === "tier2" ? 1 : 0);
   resolvedProposals.sort((a, b) => {
     const ra = sourceRank(a.source);
@@ -841,6 +889,26 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
     if (ra !== rb) return rb - ra;
     return (b.average_affinity ?? 0) - (a.average_affinity ?? 0);
   });
+
+  // Non-conflict selection — greedy pick sorted by confidence.
+  // Only disjoint member sets are required; same-parent picks are
+  // allowed (see the block comment above for why).
+  const picked = [];
+  const takenMembers = new Set();
+  for (const proposal of resolvedProposals) {
+    const memberIds = proposal.leaves.map((l) => l.data?.id).filter(Boolean);
+    let overlap = false;
+    for (const m of memberIds) {
+      if (takenMembers.has(m)) {
+        overlap = true;
+        break;
+      }
+    }
+    if (overlap) continue;
+    picked.push(proposal);
+    for (const m of memberIds) takenMembers.add(m);
+  }
+
   // Ensure the routing graph exists before we measure the
   // baseline. Without this, the very first iteration would see
   // a non-existent root index.md (returns cost=0) and treat the
@@ -854,7 +922,19 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
   } catch {
     /* best effort: indices may not be set up yet on a fresh wiki */
   }
-  for (const proposal of resolvedProposals) {
+
+  let appliedCount = 0;
+  for (const proposal of picked) {
+    // Re-check freshness RIGHT BEFORE apply. An earlier pick in the
+    // same iteration may have moved leaves out of this candidate's
+    // parent (e.g. an ancestor-directory cluster swept up members
+    // that were also part of a descendant-directory candidate). A
+    // stale pick would otherwise fail inside applyNest or produce
+    // garbage state, and the audit trail would lose the reason.
+    if (proposal.source === "math" && !mathCandidateIsFresh(proposal)) {
+      dropStaleMathCandidate(wikiRoot, proposal, opId, suggestions);
+      continue;
+    }
     const confBand =
       proposal.source === "both"
         ? "tier2-and-math"
@@ -974,9 +1054,10 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
     // recursively sub-cluster it in later iterations of the
     // same run.
     nestedParents.add(result.target_dir);
-    return "applied"; // one per iteration
+    appliedCount++;
   }
 
+  if (appliedCount > 0) return "applied";
   return countPendingRequests(wikiRoot) > 0 ? "pending-tier2" : "none";
 }
 

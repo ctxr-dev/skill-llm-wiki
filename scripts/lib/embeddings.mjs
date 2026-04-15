@@ -100,6 +100,17 @@ export function _resetTier1LoadState() {
   _extractor = null;
 }
 
+// Test-only introspection: has anything triggered the Tier 1
+// module loader in this process yet? A `false` return guarantees
+// neither `ensureTier1`, `isAvailable`, nor `embed()`'s cache-miss
+// path has fired — the loader's promise slot is still empty. Used
+// by the `tiered.decide()` warm-cache regression tests to prove the
+// escalation path never touches the loader when the similarity
+// cache already carries the answer.
+export function _isTier1LoaderTouched() {
+  return _tier1LoadPromise !== null;
+}
+
 export function isMockMode() {
   return (
     process.env.LLM_WIKI_MOCK_TIER1 === "1" ||

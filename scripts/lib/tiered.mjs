@@ -43,7 +43,6 @@
 import { createHash } from "node:crypto";
 import { appendDecision } from "./decision-log.mjs";
 import {
-  ensureTier1,
   embed,
   embeddingCosine,
   TIER1_DECISIVE_DIFFERENT,
@@ -266,19 +265,20 @@ export async function decide(
     );
   }
 
-  // tiered-fast — try Tier 1. With the required dep this must
-  // always succeed; if it doesn't, surface a hard error rather than
-  // silently falling through to Tier 2 (which would make every
-  // build exit 7 on the first mid-band pair — a hidden regression).
-  const t1Available = await ensureTier1(wikiRoot);
-  if (!t1Available.available) {
-    throw new Error(
-      `tiered.decide: Tier 1 embeddings unavailable (${t1Available.reason}). ` +
-        "Tier 1 is a required dependency — run `npm install` in the skill directory. " +
-        "For test isolation set LLM_WIKI_MOCK_TIER1=1.",
-    );
-  }
-
+  // tiered-fast — try Tier 1. We USED to eagerly call `ensureTier1`
+  // here before the embed() Promise.all, but that triggered the
+  // @xenova/transformers dynamic import (and its `[tier1-debug]
+  // loading Tier 1 model` breadcrumb) on every mid-band pair even
+  // when BOTH embeddings were already warm in the on-disk cache.
+  // `embed()` already short-circuits on a cache hit without touching
+  // the loader, and also raises a clear "Tier 1 failed to load"
+  // error on a cache miss when the module can't import, so the
+  // eager precheck was pure overhead. Drop it and let `embed()`
+  // surface the same hard error on the actual miss path.
+  //
+  // Net effect: a resume cycle with a warm embedding cache now
+  // never loads the Tier 1 model at all, matching the Tier 1 lazy-
+  // load contract documented in `guide/tiered-ai.md`.
   const textA = entryText(a);
   const textB = entryText(b);
   const [vecA, vecB] = await Promise.all([

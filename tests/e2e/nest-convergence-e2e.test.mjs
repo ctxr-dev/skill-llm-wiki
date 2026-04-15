@@ -284,6 +284,51 @@ test("nest-convergence e2e: synthetic clustered corpus nests into subcategories"
     const metric = computeRoutingCost(wiki);
     assert.ok(metric.cost > 0);
     assert.ok(metric.queries_matched >= 0); // may be 0 if queries don't match this corpus' tags
+
+    // v6 multi-NEST-per-iteration (Rec 3c): the two disjoint
+    // clusters in this corpus should land in a SINGLE convergence
+    // iteration rather than two, since their member sets never
+    // overlap. Read the metric trajectory from decisions.yaml and
+    // verify both applied NESTs carry the same iteration value.
+    // Pre-v6 this test produced NESTs at iter-1 AND iter-2;
+    // post-v6 both land at iter-1.
+    const decisionsYaml = readFileSync(
+      join(wiki, ".llmwiki", "decisions.yaml"),
+      "utf8",
+    );
+    const trajectoryLines = decisionsYaml
+      .split("\n")
+      .filter((l) => l.match(/^\s+- iter-\d+$/))
+      .map((l) => l.trim());
+    // Filter to the NEST event iterations (skip baseline iter-0).
+    // The test corpus always produces at least 2 NEST applies, all
+    // of which must share the same iteration number now that
+    // multi-NEST per iteration is enabled.
+    const nestIters = new Set();
+    // Find lines adjacent to `confidence_band: NEST`.
+    const lines = decisionsYaml.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      if (/^\s+confidence_band:\s*NEST\s*$/.test(lines[i])) {
+        // Walk back to the nearest iter-N source line.
+        for (let j = i - 1; j >= 0 && j >= i - 6; j--) {
+          const m = /^\s+-\s*iter-(\d+)\s*$/.exec(lines[j]);
+          if (m) {
+            nestIters.add(Number(m[1]));
+            break;
+          }
+        }
+      }
+    }
+    assert.ok(
+      nestIters.size >= 1,
+      `expected at least one NEST metric-trajectory entry, got ${nestIters.size}`,
+    );
+    assert.equal(
+      nestIters.size,
+      1,
+      `expected all NEST applies in a single iteration (v6 multi-NEST), ` +
+        `instead saw distinct iterations: ${[...nestIters].sort((a, b) => a - b).join(", ")}`,
+    );
   } finally {
     if (!process.env.LLM_WIKI_KEEP_TMP) rmSync(parent, { recursive: true, force: true });
     else console.error("[KEEP_TMP]", parent);

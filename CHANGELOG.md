@@ -4,6 +4,42 @@ All notable changes to `skill-llm-wiki` are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-04-15
+
+Engine refinements closing three v0.4.0 loose ends. No substrate change; the output shape of `build` / `rebuild` is byte-identical to v0.4.0. The observable difference is cycle count (fewer exit-7 round trips), Tier 1 load count (lazy on all cycles when the similarity cache is warm), and — importantly — a **bug fix** for partial multi-cluster application in the convergence loop.
+
+### Fixed
+
+- **Multi-NEST per iteration** in `scripts/lib/operators.mjs::tryClusterNestIteration`. Previously the convergence loop applied at most one NEST per iteration and returned, forcing N iterations for N NEST applications. This caused the `web-frameworks/{backend,frontend}` orphan bug observed in the v0.4.0 novel-corpus validation: the skill proposed both subcategories in one `propose_structure` response, but only `backend/` applied before the next iteration re-asked on the re-shaped state where the 2-leaf `frontend/` was now orphaned. The fix greedily selects non-conflicting candidates (disjoint member sets) and applies them all in the same iteration with per-pick rollback + metric gating. Same-parent picks are safe because `snapshotForRollback` captures the current parent index content at apply time, so NEST #2's rollback preserves NEST #1's effects. Synthetic `nest-convergence-e2e` test now completes in 1 iteration instead of 2 on its 2-cluster corpus.
+- **Tier 1 lazy load now covers all cycles**, not just terminal ones. `scripts/lib/tiered.mjs::decide()` previously called `ensureTier1(wikiRoot)` eagerly before the similarity cache check in the Tier 0 → Tier 1 escalation branch. The call was pure overhead on cache hits because `embed()`'s `existsSync(cachePath)` short-circuit already handles cache hits without touching the loader. The eager call has been removed. Warm-cache resume cycles now skip the dynamic `import("@xenova/transformers")` entirely, shaving ~1-2 seconds per cycle (and ~30s on a cold HuggingFace cache first-ever build).
+- **Stale-candidate audit log** hook wiring is now reachable via the multi-NEST path. The v0.4.0 helper `dropStaleMathCandidate` had unit test coverage but was never called in live builds because single-NEST-per-iteration made every math candidate trivially fresh. With multi-NEST per iteration, applying one picked candidate can invalidate a later candidate's member set within the same iteration; the re-freshness check at the top of the apply loop now routes stale drops through `dropStaleMathCandidate` + `appendNestDecision`, producing observable `decision: rejected-stale, confidence_band: math-gated` entries in `decisions.yaml`.
+
+### Added
+
+- `scripts/lib/embeddings.mjs::_isTier1LoaderTouched` — test-only seam exposing whether the module-level `_tier1LoadPromise` has been initialized, enabling precise assertions that `tryLoadTier1` was not called.
+- Two regression unit tests in `tests/unit/tiered.test.mjs`: `decide: similarity cache hit leaves the Tier 1 loader dormant` and `decide: decisive Tier 0 leaves the Tier 1 loader dormant`. Both assert the loader slot is untouched after calling `tiered.decide()` with a pre-populated cache.
+- Multi-NEST iteration assertion in `tests/e2e/nest-convergence-e2e.test.mjs` — parses `decisions.yaml`'s metric trajectory, collects the iteration number of every applied NEST, and asserts they all share a single iteration number. Pre-v0.4.1 this would fail (iter-1 and iter-2); post-v0.4.1 it passes (all at iter-1).
+
+### Changed
+
+- `scripts/lib/operators.mjs::tryClusterNestIteration` apply loop rewritten. Sort proposals by source rank + affinity (unchanged), greedily pick non-conflicting ones (disjoint member sets), re-check `mathCandidateIsFresh` before each apply (for `source === "math"` picks), apply in sequence with per-pick rollback + metric gating, return `"applied"` iff any pick landed. One git commit per applied NEST (unchanged commit topology). Approximately +40 lines net.
+- `scripts/lib/tiered.mjs` no longer imports `ensureTier1`. The Tier 1 escalation branch goes directly from the Tier 0 mid-band decision to `Promise.all([embed(a), embed(b)])`, relying on `embed()`'s cache-hit short-circuit and its own cache-miss error handling for the "Tier 1 can't load" case.
+
+### Tests
+
+- Suite grew from 458 to 460+ passing (+2 from the new loader-dormancy tests, +1 assertion on the existing nest-convergence-e2e test). 3 skipped (opt-in gates unchanged from v0.4.0). 0 fail.
+
+### Performance (incremental v0.4.0 → v0.4.1)
+
+- `guide/` rebuild: same tree, same byte count. Cycle count unchanged for the fully-converged `guide/` case because it's already at fixed point. For a from-scratch rebuild simulating the v0.4.0 workflow, multi-NEST per iteration would cut the 9-NEST → 9-iteration cadence to ~4-5 iterations (observable on fresh corpora, e.g., the novel-corpus test).
+- `nest-convergence-e2e` synthetic corpus: iteration count dropped from 2 to 1 NEST iterations (both applied NESTs now land together).
+- Tier 1 model loads per build (warm-cache resume path): all cycles skip, not just terminal ones. Incremental ~3-5s wall-clock saving per build vs v0.4.0.
+
+### Known remaining gaps (unchanged from v0.4.0)
+
+- Stale-candidate audit log path is still rare in practice because the greedy disjoint-members selection usually prevents stale candidates from forming. It IS observable when a specific partial-overlap scenario occurs (a Tier 2 proposal's member set overlaps with a math proposal's member set in a way the greedy rule doesn't catch). Not a new issue — just a honest note.
+- Novel-corpus validation of the multi-NEST fix on the actual `skill-code-review/reviewers/` + `overlays/` corpus (where v0.4.0 observed the `frontend/` orphan bug) is deferred. The synthetic nest-convergence-e2e test confirms multi-NEST works; live novel-corpus verification is the main session's call.
+
 ## [0.4.0] — 2026-04-15
 
 Major substrate change: the routing procedure is now **semantic**, parent indices no longer aggregate `activation_defaults`, Tier 1 embeddings and Tier 2 sub-agent dispatch are required and real, and the cluster detector drives an applying NEST operator with a quality-metric gate. Ships with a runtime dependency preflight so fresh installs surface missing deps gracefully instead of crashing on an `ERR_MODULE_NOT_FOUND`.
