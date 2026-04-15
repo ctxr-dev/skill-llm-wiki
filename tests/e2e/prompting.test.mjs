@@ -21,7 +21,12 @@ const CLI = join(
 function runCli(args, opts = {}) {
   const r = spawnSync("node", [CLI, ...args], {
     encoding: "utf8",
-    env: { ...process.env, LLM_WIKI_NO_PROMPT: "1", ...(opts.env || {}) },
+    env: {
+      ...process.env,
+      LLM_WIKI_NO_PROMPT: "1",
+      LLM_WIKI_SKIP_CLUSTER_NEST: "1",
+      ...(opts.env || {}),
+    },
     cwd: opts.cwd,
   });
   return { status: r.status, stdout: r.stdout || "", stderr: r.stderr || "" };

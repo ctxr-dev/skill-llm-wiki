@@ -37,6 +37,7 @@ function runCli(args, opts = {}) {
     env: {
       ...process.env,
       LLM_WIKI_NO_PROMPT: "1",
+      LLM_WIKI_SKIP_CLUSTER_NEST: "1",
       LLM_WIKI_MOCK_TIER1: "1",
       ...(opts.env || {}),
     },
@@ -113,8 +114,9 @@ test("rollback across Build→Rebuild to the first op's pre-op anchor restores p
     // `.gitignore` that `snapshot.mjs::preOpSnapshot` writes
     // BEFORE taking the snapshot commit.
     assert.ok(!existsSync(join(wiki, "index.md")));
-    assert.ok(!existsSync(join(wiki, "general", "alpha.md")));
-    assert.ok(!existsSync(join(wiki, "general", "beta.md")));
+    // Flat sources land at the wiki root, not under a `general/` bucket.
+    assert.ok(!existsSync(join(wiki, "alpha.md")));
+    assert.ok(!existsSync(join(wiki, "beta.md")));
     // The pre-op commit itself tracks the .gitignore (see
     // snapshot.mjs) so it IS reachable in the working tree after
     // the reset.

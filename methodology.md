@@ -17,7 +17,7 @@ When an LLM is given a large body of knowledge to work with, it typically faces 
 1. **Load everything.** Simple, loses context budget to irrelevant content, and collapses completely once the corpus exceeds the model's window.
 2. **Load blindly.** Fast and cheap, but the model has no way to tell which files are relevant to the current question until it has already read them — so it either guesses (and misses) or retrieves by semantic similarity (which is imprecise and non-deterministic).
 
-An LLM wiki solves this by encoding **explicit activation signals** in structured metadata. A router reads a tiny index, matches signals against the current task, and loads only the entries whose signals matched. The process is deterministic, cheap, and scales with the corpus's organisation rather than its size.
+An LLM wiki solves this by encoding each entry's **scope in a one-line `focus` string** plus a small set of optional hint tags, and routing semantically. A router (Claude) reads a tiny index, compares each entry's `focus` against the current task, and descends only into branches whose `focus` is relevant. Leaf files may carry optional per-leaf `activation` hints (glob patterns, keywords, tags) that Claude can consult when the semantic match alone is ambiguous, but the primary routing signal is the `focus` string. The process is cheap, scales with the corpus's organisation rather than its size, and is reproducible because `focus` strings are stable and deterministic to read.
 
 ### Domain universality
 
@@ -59,12 +59,12 @@ These terms appear throughout the rest of the document. They are defined once he
 - **Entry.** A single knowledge unit — usually one `.md` file — with YAML frontmatter plus a body.
 - **Frontmatter.** The YAML header on an entry file. The sole source of truth for metadata about the entry.
 - **Index.** A file (`index.md`) that aggregates metadata from the entries in a directory. Derived from frontmatter, never hand-edited in its derived parts. Every directory holding entries has one.
-- **Primary entry.** A leaf-type entry that the router loads into the assembled context as a top-level content block when its activation matches.
-- **Overlay entry.** A leaf-type entry that is appended to one or more primary entries' contexts when the overlay's own activation matches. Overlays are scope modifiers — they enrich other entries' context with situationally-relevant content.
+- **Primary entry.** A leaf-type entry that the router loads into the assembled context as a top-level content block when its `focus` (and optionally its `activation` hints) make it relevant to the task.
+- **Overlay entry.** A leaf-type entry that is appended to one or more primary entries' contexts when the overlay is judged relevant by its own `focus` and `activation` hints. Overlays are scope modifiers — they enrich other entries' context with situationally-relevant content.
 - **Index entry.** The per-directory file (`index.md`) itself. It has `type: index` and holds navigation metadata plus shared context for its children.
-- **Activation signal.** A matchable pattern (file glob, import string, keyword, tag, semantic hint, explicit escalation reference) that the router uses to decide whether to load an entry.
-- **Context profile.** A small structured summary the router builds before consulting any index. Activation signals are matched against the profile, not against the raw query.
-- **Router.** The component (typically an orchestrator prompt, a small script, or a library function) that reads indices and decides what to load. The router is deterministic: same profile, same tree, same output.
+- **Focus string.** The one-line `focus` field on every entry. Describes the entry's scope in concrete vocabulary. For non-root entries, strictly narrower than every ancestor's `focus` in the canonical chain. This is the primary routing signal: the router reads `focus` semantically and decides whether a branch is worth descending.
+- **Activation hint (leaf only).** An optional per-leaf `activation` block carrying file globs, import patterns, keyword matches, tag matches, structural signals, or escalation references. Hints are advisory — they help the router disambiguate when `focus` alone is underdetermined. Leaves without an `activation` block are still routable from `focus` and leaf-level `covers[]`. Parent indices do **not** aggregate activation data from their children; per-leaf hints stay per-leaf.
+- **Router.** The component that reads indices and decides what to load. In the current substrate the router is the runtime LLM (Claude) reading each index's frontmatter and choosing branches to descend by reading `focus` and `tags` semantically. A purely mechanical walker can still be bolted on for deterministic fixtures, but the first-class router is semantic.
 - **Hook.** A filesystem event handler that keeps derived indices in sync with frontmatter whenever a file is edited.
 - **Validator.** A script that enforces structural invariants on the wiki — id matches filename, required fields present, files referenced by indices exist, links resolve, size caps honored, DAG acyclic, etc.
 - **Depth.** How many directory levels a file lives beneath the wiki root. Depth 0 is the root; deeper means more specific.
@@ -85,9 +85,9 @@ This section defines what a well-formed wiki looks like at rest. Section 3.5 des
 
 - **Depth 0 — the root.** Contains a single `index.md` (the root index) and a `.shape/` subdirectory for rewrite plans, suggestions, and history. No primary or overlay entry files live at depth 0. Every top-level category is a subdirectory.
 
-- **Depth 1 — categories.** Each subdirectory of the root is a top-level category. Its `index.md` declares the category's focus, lists its children (either subcategories or leaf entries), and holds category-wide activation defaults and shared context.
+- **Depth 1 — categories.** Each subdirectory of the root is a top-level category. Its `index.md` declares the category's focus, lists its children (either subcategories or leaf entries), and holds shared context for the subtree.
 
-- **Depth 2 and deeper — subcategories.** Each level narrows further. The `focus` string at depth N+1 must be strictly narrower than the `focus` at depth N. Children inherit activation defaults from the parent's `activation_defaults` block via AND-narrowing: a child activates only if the parent's defaults match AND the child's own signals match.
+- **Depth 2 and deeper — subcategories.** Each level narrows further. The `focus` string at depth N+1 must be strictly narrower than the `focus` at depth N. The router descends by reading each child's `focus` and deciding whether it is relevant to the current task; there is no AND-filter on subcategory descent. Leaf-level `activation` hints, when present, are consulted only at leaves — they are not aggregated upward into parents and they do not act as a mandatory narrowing gate on the walk.
 
 - **Leaves.** Primary and overlay entry files live at whatever depth is most specific for their scope. If a leaf could be made more specific by introducing a new child directory around it, the NEST operator (section 3.5) will eventually do so; at rest, leaves are at their maximally-specific home.
 
@@ -117,17 +117,17 @@ Each `focus` at each depth is strictly narrower than its parent. A query about "
 
 ### Inheritance semantics
 
-- **Activation narrowing.** A child entry's effective activation is `parent.activation_defaults ∧ child.activation`. If the parent's defaults restrict to `.py` files and the child's own signals match `*/migrations/*`, the child effectively matches `.py` files in any migrations directory. Narrowing compounds down the chain.
+- **Semantic descent.** The router decides whether to descend into a child branch by reading the child's `focus` string and comparing it semantically to the current task. No AND-filter on activation signals is applied during descent; each child is evaluated on its own `focus` (and, for leaves, its `covers[]` and optional `activation` hints). Narrowing compounds down the chain via the focus-narrowing invariant below, not via activation aggregation.
 
 - **Shared context.** A parent index may declare `shared_covers[]` — concerns that all its children have in common. When the router loads any descendant leaf, it prepends the ancestor chain's accumulated `shared_covers[]`, so the leaf body never repeats the common material. This is how the DECOMPOSE operator (section 3.5) can split an entry without duplicating its shared background.
 
-- **Focus narrowing.** Every child's `focus` must be a strict narrowing of every parent's `focus` in the canonical ancestor chain. The validator enforces this textually (the child's focus should mention vocabulary that is a subset or refinement of the parent's scope) and structurally (the parent chain resolves without cycles).
+- **Focus narrowing.** Every child's `focus` must be a strict narrowing of every parent's `focus` in the canonical ancestor chain. The validator enforces this textually (the child's focus should mention vocabulary that is a subset or refinement of the parent's scope) and structurally (the parent chain resolves without cycles). Because the router routes on `focus`, a strictly-narrowing chain is exactly what makes progressive disclosure possible.
 
 ### Parent file contract
 
 Every directory has exactly one `index.md`. This file's purpose is navigation, orientation, and shared-context inheritance — **not** holding domain knowledge itself. Specifically:
 
-- The frontmatter holds machine routing metadata (entries, children, shared_covers, focus, activation defaults, parents, type, depth_role).
+- The frontmatter holds routing metadata — `focus`, `parents`, `type`, `depth_role`, `shared_covers`, and per-entry routing summaries in `entries[]` (each entry carries its own `id`/`file`/`type`/`focus`/`tags`, nothing else). Parent indices do not aggregate child-level activation data.
 - The body holds human and LLM orientation — a title, a rendered navigation table, optionally a short authored prose paragraph explaining what the subtree contains and how to choose between its children.
 - The body **must not** contain substantive leaf-level content: no checklist items, no code fences, no multi-paragraph domain exposition, no extensive examples. If such content needs to exist in this part of the tree, it belongs in a leaf entry under the parent, not in the parent's index.
 - The validator enforces this contract as a hard invariant. Violations are errors, not warnings. This is the contractual enforcement of the gravity-toward-leaves principle (section 3.5, DESCEND operator).
@@ -143,7 +143,7 @@ Every directory has exactly one `index.md`. This file's purpose is navigation, o
 
 ### Why hierarchy instead of flat tags
 
-Tags alone cannot provide progressive disclosure. A flat tag system loads the full set of tag-matching entries in one shot, regardless of how specific the match is. A hierarchical index allows the router to check the root index (one file, tiny), descend only into matched branches, and stop at the precise depth where the query's specificity is satisfied. Tags remain useful as a cross-cutting filter (section 11), but they complement the tree rather than replace it.
+Tags alone cannot provide progressive disclosure. A flat tag system loads the full set of tag-matching entries in one shot, regardless of how specific the match is. A hierarchical index allows the router to read the root index (one file, tiny), descend only into branches whose `focus` strings match the task, and stop at the precise depth where the query's specificity is satisfied. Tags remain useful as a cross-cutting filter (section 11) — they appear alongside `focus` in each entry's summary for the same branch-choice decision — but they complement the tree rather than replace it.
 
 ---
 
@@ -167,8 +167,8 @@ Each principle becomes one operator below.
 **Detection — frontmatter-first.** An entry is a DECOMPOSE candidate when one or more of:
 
 - Its `covers[]` clusters into ≥2 disjoint topic groups by tag or keyword similarity.
-- Its `activation.file_globs` contain patterns with no common prefix or suffix — indicating the entry fires for unrelated content.
-- Its body has ≥2 H2 sections where each section has independent activation signals and its own internal cohesion.
+- Its `activation.file_globs` contain patterns with no common prefix or suffix — indicating the entry's own leaf-level hints point at unrelated content.
+- Its body has ≥2 H2 sections where each section has its own internal cohesion and a distinct set of concerns.
 - Its `covers[]` exceeds the per-entry bullet count cap while the entry itself isn't otherwise oversized (suggesting breadth rather than depth).
 
 **Application.**
@@ -202,7 +202,7 @@ When both could apply, the tie-break ordering in "Priority" below decides.
 
 1. Create a new directory `<entry-id>/` alongside the original file.
 2. For each narrowing section, extract it to `<entry-id>/<specialization-id>.md`, carrying the section's content as the new leaf's body and drafting frontmatter for it (focus narrower, covers extracted from the section's bullets).
-3. The original entry file is replaced by `<entry-id>/index.md`: a proper index entry with the same id as the original, `type: index`, `shared_covers[]` computed from the extracted leaves' common material, and the original's activation rules as `activation_defaults` for the new subtree.
+3. The original entry file is replaced by `<entry-id>/index.md`: a proper index entry with the same id as the original, `type: index`, and `shared_covers[]` computed from the extracted leaves' common material. The original's per-leaf `activation` rules (if any) stay with whichever extracted leaf carries the matching section's content; they are never promoted onto the new index.
 4. Any references to the original entry's id continue to resolve — the id now belongs to the new index entry, and the narrowing chain is strictly monotonic through it.
 
 **Post-condition.** The narrowing chain from root through the new index to each new leaf is strictly monotonic; the original entry's id lives on as the parent index id; no content is lost.
@@ -215,14 +215,14 @@ Two sub-operators sharing a goal: remove structure that doesn't earn its keep.
 
 - Their `focus` strings have similarity above a configurable threshold.
 - Their `covers[]` overlap by more than a configurable fraction (default 70%).
-- Their activation signals are compatible (no mutually-exclusive matches).
+- Their per-leaf `activation` hints, if both carry them, are compatible (no mutually-exclusive globs or keywords).
 - Their `parents[]` lists are compatible (MERGE preserves the union of soft parents).
 
 **MERGE — application.**
 
 1. Compute the merged `covers[]` as the union of both entries' items.
 2. Compute the merged `focus` as the more general of the two (the one whose scope includes the other).
-3. Compute the merged activation as the union of both entries' signals.
+3. Compute the merged per-leaf `activation` as the union of both entries' hints (if either side has a block).
 4. Compute the merged `parents[]` as the union (first element is the shared canonical parent; additional soft parents from either side survive).
 5. Write the merged entry to disk under the canonical parent's directory, with both original ids listed in `aliases[]`.
 6. Delete the two source files.
@@ -362,25 +362,26 @@ The frontmatter is the sole source of truth for all metadata about an entry. Der
 ### Fields specific to leaf entries (`type: primary | overlay`)
 
 - **`covers`** (required, string[], 3–15 bullets). Specific concerns this entry addresses, granular enough that an LLM can decide relevance without reading the body. Each bullet is a short, concrete statement of a concern — not a restatement of the focus.
-- **`activation`** (required for conditional primary entries and all overlays). Object with any of:
-  - `file_globs[]` — glob patterns against file paths in the profile.
-  - `import_patterns[]` — strings to match against imports or dependencies.
-  - `tag_matches[]` — tags the profile carries.
-  - `keyword_matches[]` — keywords to find in the profile's text.
-  - `structural_signals[]` — semantic patterns the profile includes.
-  - `escalation_from[]` — ids of other entries; if any of them activate, this one activates too.
+- **`activation`** (optional on leaves — advisory hint data only). Object with any of:
+  - `file_globs[]` — glob patterns that point at file paths Claude might encounter in the task.
+  - `import_patterns[]` — strings Claude can look for in imports or dependencies.
+  - `tag_matches[]` — tags Claude can look for in the task context.
+  - `keyword_matches[]` — keywords Claude can look for in the task text.
+  - `structural_signals[]` — semantic patterns Claude can look for in the task.
+  - `escalation_from[]` — ids of other entries; when one of those entries is already loaded, this entry is a natural companion.
+
+  The router uses `activation` hints as disambiguation signals when `focus` alone is ambiguous. They are not a mandatory filter — a leaf whose `focus` clearly matches the task is loadable even if it has no `activation` block at all, and a leaf whose `focus` is clearly off-topic is skipped even if one of its keyword hints happens to appear in the task. Hints are never aggregated upward into parent indices.
 - **`applies_to`** (optional, `"all"` or string[]). Languages, platforms, or other dimensions this entry applies to.
 
 ### Fields specific to overlay entries (`type: overlay`)
 
-- **`overlay_targets`** (required, string[]). Ids or aliases of primary entries this overlay attaches to. When both the overlay's activation matches and one of its targets is loaded, the overlay's body is appended to that target's assembled context.
+- **`overlay_targets`** (required, string[]). Ids or aliases of primary entries this overlay attaches to. When the overlay is deemed relevant (its own `focus` + optional `activation` hints match the task) and one of its targets is loaded, the overlay's body is appended to that target's assembled context.
 
 ### Fields specific to index entries (`type: index`)
 
 - **`shared_covers`** (required, string[]). Concerns that all children of this index share. Loaded by the router alongside any matching descendant, implementing DECOMPOSE inheritance. Auto-computed by the hook as the intersection of children's `covers[]`; authors may hand-augment for semantic concerns the heuristic misses.
-- **`activation_defaults`** (optional, activation-shaped object). Defaults that AND-narrow with each child's own activation. Children inherit these implicitly.
 - **`orientation`** (optional, string). A short paragraph of human and LLM orientation describing what lives under this subtree and how to choose between its children. Authored-preserved across regenerations.
-- **`entries`** (auto-generated, array). Aggregated metadata for each direct child entry file (leaf or child index). Recomputed on every index rebuild from children's frontmatter.
+- **`entries`** (auto-generated, array). One summary per direct child entry. Each element carries only `id`, `file`, `type`, `focus`, and `tags` — just enough for Claude to decide whether to descend. Per-leaf `activation` blocks are **not** aggregated into the parent's `entries[]`; they stay on the leaf files and are consulted only when Claude loads a leaf's own frontmatter.
 - **`children`** (auto-generated, string[]). Relative paths to child `index.md` files of nested subdirectories.
 
 ### Fields specific to the root `index.md` only
@@ -417,17 +418,17 @@ shared_covers:
   - "prerequisite checks: disk, memory, network"
   - "post-install validation"
   - "common uninstall procedure"
-activation_defaults:
-  file_globs: ["**/*install*", "**/*setup*"]
 entries:
   - id: linux
     file: linux/index.md
     type: index
     focus: "installing on Linux distributions"
+    tags: [linux]
   - id: macos
     file: macos.md
     type: primary
     focus: "installing on macOS"
+    tags: [macos]
 children:
   - linux/index.md
 # ===== end auto-generated =====
@@ -482,7 +483,7 @@ The hook's build-index step parses the existing `index.md`, extracts the authore
 - **No duplication.** One file per directory, one source of truth, one hook target. Editing `index.md` manually (to tweak orientation) is natural and safe.
 - **No efficiency loss.** Parsing frontmatter from markdown is a one-pass operation in every mainstream markdown library. The router reads only the frontmatter section and skips the body unless orientation is explicitly requested.
 - **No determinism loss.** YAML in frontmatter is the same YAML it would be in a separate file.
-- **No richness loss.** Every field that would have been in a machine-only file lives in frontmatter: depth, focus, parents, shared_covers, activation_defaults, entries, children. Nothing is dropped.
+- **No richness loss.** Every field that would have been in a machine-only file lives in frontmatter: depth, focus, parents, shared_covers, entries, children. Per-leaf activation hints live on the leaves themselves. Nothing is dropped.
 - **Strictly better for readers.** The body renders as a real markdown page with a title, a navigation table, and optional orientation — superior to raw YAML for both humans and LLMs browsing the wiki directly.
 
 ### Leaf entries
@@ -495,37 +496,41 @@ Every `index.md` knows its own depth, its parents, its children, and its focus. 
 
 ---
 
-## 6. Activation & Routing Flow
+## 6. Semantic Routing Flow
 
-The router is the component that assembles the load set for a given task. It is deterministic: given the same tree and the same context profile, it produces the same load set. It never calls an LLM to make routing decisions — the LLM consuming the assembled context is the router's caller, not its helper.
+The router walks the tree from the root down, loading only the indices and leaves that its semantic reading of each `focus` string says are relevant. In the current substrate the router is the runtime LLM (Claude) operating the skill — `focus` strings are short natural-language phrases and Claude decides relevance the same way a human would. The walk touches only frontmatter until the final leaf-body-read step; unmatched subtrees are never opened.
 
 ### Flow
 
-1. **Build the context profile.** The router scans the current task and its environment for signals — file paths, imports, dependencies, tags the user supplied, domain keywords, explicit hints. It produces a small structured profile (a few hundred bytes).
+1. **Read the task.** The router reads the user's current task (command, question, or context). No separate "context profile" is built up front — Claude compares each `focus` string to the task in natural language as it walks.
 
 2. **Load the root `index.md`.** Parse frontmatter only. This is cheap. Check the `rebuild_needed` flag; if set, capture `rebuild_reasons` and `rebuild_command` for inclusion in the final response (see section 9.5). Routing proceeds regardless.
 
-3. **Match categories.** Walk each entry in the root index's `children[]`. For each child, check whether any `activation_defaults` (inherited up the chain) or entry-level activation signal intersects the profile. Mark matching children for descent.
+3. **Choose branches to descend.** Walk each record in the root index's `entries[]`. Each record carries `id`, `file`, `type`, `focus`, and `tags` — nothing else. For each child, Claude reads the `focus` string (and tags, if they help) and decides whether the branch is relevant to the task. There is no AND-filter on activation signals; each child is evaluated on its own `focus`. Irrelevant branches are skipped entirely; relevant ones are queued for descent.
 
-4. **Descend matched branches.** For each matching child, load its `index.md` frontmatter. Apply AND-narrowing: a child branch activates only if the profile matches its own signals AND matched the parent's. Accumulate ancestor `shared_covers[]` as descent proceeds. Repeat recursively into deeper indices.
+4. **Descend matched branches.** For each relevant child that is an index, load its `index.md` frontmatter and repeat step 3 on its `entries[]`. Accumulate ancestor `shared_covers[]` as descent proceeds. Repeat recursively into deeper indices. Focus-narrowing (section 3) guarantees that a child's scope is strictly narrower than its parent's, so each descent step is a real refinement rather than a restatement.
 
-5. **Collect leaf primaries.** At every depth where leaf entries exist, evaluate their activation against the profile. Matching leaves become candidates for the load set. Each candidate inherits the accumulated ancestor `shared_covers[]`.
+5. **Collect leaf primaries.** When descent reaches a leaf entry in an index's `entries[]`, the leaf is added to the candidate load set iff its own `focus` (and, optionally, its per-leaf `activation` hints — globs, keywords, tag matches, escalation references — when the semantic decision is ambiguous) is relevant to the task. Leaf-level `activation` data stays on the leaf; it is never aggregated upward. Each candidate inherits the accumulated ancestor `shared_covers[]`.
 
 6. **Dedupe across DAG paths.** When a leaf is reached via a non-canonical parent (it is listed with `canonical_parent: <path>` in the non-canonical index), record the id but do not count it twice. The router's load set is deduplicated by `id` — the same entry cannot be loaded twice even when two different ancestor chains reached it. Soft parents affect retrieval only in the sense that descending the soft parent's branch still surfaces the entry; they do not multiply it in the final context.
 
-7. **Collect overlays.** Independently of the primary walk, for every overlay entry whose activation matches the profile, resolve its `overlay_targets` (via id or alias) and attach its body to those targets' contexts at load time. Overlays never load standalone — only attached.
+7. **Collect overlays.** Independently of the primary walk, any overlay entry whose own `focus` + `activation` hints make it relevant to the task resolves its `overlay_targets` (via id or alias) and attaches its body to those targets' contexts at load time. Overlays never load standalone — only attached.
 
 8. **Load file bodies.** Only now are leaf bodies read from disk. Everything up to this point was frontmatter parsing.
 
-9. **Assemble context.** For each loaded primary, prepend the ancestor chain's accumulated `shared_covers[]`, append any attached overlays, and emit. The caller receives: the assembled load set, the original profile, and any `rebuild_needed` banner captured in step 2.
+9. **Assemble context.** For each loaded primary, prepend the ancestor chain's accumulated `shared_covers[]`, append any attached overlays, and use the result. The caller — the same Claude session that was routing — now has the narrow slice it needs and any `rebuild_needed` banner captured in step 2.
 
 ### Token accounting
 
 At every step above, the router has loaded only the minimum needed: indices walked to reach matched leaves, leaf bodies for matched entries, overlay bodies for matched overlays. Unmatched subtrees are never touched. In a well-shaped wiki, most of the corpus is never read for most queries. The token cost of a single routing decision is dominated by the bodies of matched leaves, not the size of the wiki.
 
-### The router is stateless
+### Why `focus`, not aggregated signals
 
-The router holds no state between queries. It re-parses `index.md` files from disk each time. On modern filesystems this is cheap, and it means two concurrent routers never race. Stateful caching can be added as an implementation optimisation, but the methodology assumes stateless routing as the baseline.
+An earlier version of this methodology aggregated per-leaf `activation` signals upward into each parent index's `activation_defaults` block and treated routing as an AND-filter over those aggregations. That design was retired because (a) it made parent indices larger without improving routing precision — the aggregated signals were almost always the union of children's signals, which is what the `focus` string already expresses in natural language, and (b) keyword/glob intersection is strictly weaker than semantic reading of a one-line scope string by an LLM. The substrate now carries `focus` + per-entry `tags` in parents and keeps per-leaf `activation` as optional disambiguation hints on the leaves. Parent indices are smaller, routing is more accurate, and the convergence loop has one fewer thing to keep in sync.
+
+### The router is replayable
+
+The router holds no state between queries; it re-reads `index.md` files from disk each time. Because `focus` strings are stable wiki artifacts and Claude's semantic judgments on them are reproducible under the same prompt, the same task against the same tree produces the same load set on repeat invocations. Stateful caching can be layered on as an optimisation, but the methodology assumes re-walking from the root as the baseline.
 
 ---
 
@@ -957,7 +962,7 @@ Script-first phases produce each output with a confidence score derived from how
 - Operator detection and application — deterministic frontmatter comparison.
 - Validation — rule-based.
 - Commit — filesystem moves.
-- Routing at query time — the router is a deterministic walker over `index.md` frontmatter. It never calls an LLM to decide activation. (The LLM consuming the assembled context is the caller, not the router itself.)
+- Routing at query time — the runtime LLM (Claude) *is* the router, walking `index.md` frontmatter and reading `focus` strings semantically. This is cheap: the router reads only frontmatter until the final leaf-body-read step, and the semantic walk terminates at the narrowest relevant leaf. Deterministic mechanical walkers remain useful for test fixtures but are not the primary routing substrate.
 
 ### Caching guarantees determinism
 
@@ -1308,9 +1313,9 @@ For a typical corpus, >90% of operator applications resolve at Tier 0 or Tier 1.
 
 The skill ships three modes, selected via `--quality-mode` or `LLM_WIKI_QUALITY_MODE`:
 
-- **`tiered-fast` (default, recommended).** Full Tier 0 → 1 → 2 ladder. Uses local embeddings when available; falls through to Claude only for mid-band ambiguity. Zero Claude tokens for >90% of operator decisions on typical corpora. The default because it wins on scale, determinism, speed, cost, and (for typical technical corpora) quality.
-- **`claude-first`.** Tier 0 is still consulted for decisive cases (saves tokens on the obvious decisions), but anything in the Tier 0 mid-band goes straight to Claude, skipping Tier 1. Useful when the user values Claude's judgment over speed/cost, when debugging a specific similarity call, or when Tier 1 is unavailable and the user wants better quality than Tier 0 alone.
-- **`tier0-only`.** No embeddings, no Claude, no network, no optional dependencies. Tier 0 decisions only. Mid-band becomes an explicit "undecidable" marker the user resolves via the interactive review flow. Useful for air-gapped environments, hermetic CI jobs, and smoke tests.
+- **`tiered-fast` (default, recommended).** Full Tier 0 → 1 → 2 ladder. Tier 1 is now a REQUIRED dependency (`@xenova/transformers` in `dependencies`, not optional) — the overhaul discovered Tier 0 alone was too weak on terse technical frontmatter to leave every mid-band pair for Tier 2 to resolve. Tier 2 runs in a dedicated sub-agent per decision via the **exit-7 handshake**: the CLI writes a pending batch to `<wiki>/.work/tier2/` and exits 7; the wiki-runner spawns sub-agents, writes responses, and re-invokes the CLI. Zero Claude tokens for >90% of operator decisions on typical corpora once embeddings are warm.
+- **`claude-first`.** Tier 0 is still consulted for decisive cases (saves tokens on the obvious decisions), but anything in the Tier 0 mid-band goes straight to Tier 2 (exit-7 handshake), skipping Tier 1. Useful when the user values sub-agent judgment over speed/cost or when debugging a specific similarity call.
+- **`tier0-only`.** No embeddings, no Tier 2, no network. Tier 0 decisions only. Mid-band becomes an explicit "undecidable" marker the user resolves via the interactive review flow. Useful for air-gapped environments, hermetic CI jobs, and smoke tests. Note: Tier 1 is still a required install-time dependency even in this mode; `tier0-only` controls runtime behaviour, not dependency resolution.
 
 ### Similarity cache and decision log
 
@@ -1368,7 +1373,7 @@ The deeper and better-shaped the tree, the closer to the best case. The rewrite 
 
 ### Why the shape rules save tokens
 
-- **DECOMPOSE reduces over-loading.** Before decomposition, a single oversized entry covering N concerns is loaded whenever any one concern matches. After, only the concerns whose activation matched are loaded. An entry covering three concerns where most queries need one saves roughly two-thirds of its per-query load.
+- **DECOMPOSE reduces over-loading.** Before decomposition, a single oversized entry covering N concerns is loaded whenever any one concern is relevant. After, only the peer entry whose `focus` matches the task is loaded. An entry covering three concerns where most queries need one saves roughly two-thirds of its per-query load.
 - **NEST enables progressive disclosure.** Before nesting, a loaded entry carries its full specialisation set. After, the router can stop descent at the parent when no narrower leaf matches. A narrow-miss becomes an index lookup instead of a full-body read.
 - **MERGE and LIFT reduce overhead.** Each collapsed structure is one fewer index entry the router must consider and one fewer cache line. The absolute savings per operator application are small, but they compound.
 - **DESCEND concentrates weight at the leaves.** Content at shallow positions is loaded on every descent through the branch; content at leaves is loaded only when the leaf is selected. Every byte pushed from parent to leaf is a byte saved on queries that don't need that leaf.
@@ -1392,9 +1397,9 @@ A reader of this methodology can evaluate any proposed structural change by aski
 
 - A rename does not change fitness.
 - A DESCEND always reduces fitness (weight moves deeper).
-- A NEST reduces fitness when the nested leaves have distinct activations (fewer queries load the whole subtree).
+- A NEST reduces fitness when the nested leaves have distinct `focus` strings so the router can stop at the parent for miss-cases (fewer queries load the whole subtree).
 - A MERGE reduces fitness when the merged entry is not loaded more often than either original would have been.
-- A DECOMPOSE reduces fitness when the resulting peer entries have genuinely disjoint activations.
+- A DECOMPOSE reduces fitness when the resulting peer entries have genuinely disjoint `focus` strings.
 
 This gives every automated and manual decision a deterministic yardstick, rather than a bag of heuristics.
 
@@ -1416,7 +1421,7 @@ Use DAGs for facts whose belonging is genuinely multi-dimensional — for exampl
 
 ### Overlays: many-to-many modifier content
 
-Overlay entries (`type: overlay`) attach to one or more primary entries via `overlay_targets`. When the overlay's activation matches and the primary is loaded, the overlay's body is appended to the primary's assembled context. Overlays are scope modifiers — they add situationally-relevant content without creating new primary homes for the material.
+Overlay entries (`type: overlay`) attach to one or more primary entries via `overlay_targets`. When the overlay is judged relevant (its own `focus` + optional `activation` hints match the task) and the primary is loaded, the overlay's body is appended to the primary's assembled context. Overlays are scope modifiers — they add situationally-relevant content without creating new primary homes for the material.
 
 Use overlays when content only makes sense as an augmentation of another entry: framework-specific guidance that applies to a base checklist, jurisdiction-specific clauses that modify a policy template, language-specific notes that enrich a general patterns document.
 
@@ -1451,7 +1456,7 @@ A correct implementation of this methodology exhibits all of the following chara
 - **The narrowing chain is a hard invariant.** Every non-root entry's `focus` is strictly narrower than every ancestor's in its canonical parent chain.
 - **`parents[]` is required and DAG-first.** First element is canonical (determines filesystem location); additional elements are soft parents cross-referenced from other indices. Cycle detection runs on every validate.
 - **A single `index.md` per directory** carries machine routing metadata in frontmatter and human orientation in the body. Parent files hold no leaf content — the parent-file contract is a hard invariant.
-- **Activation signals** (file globs, import patterns, keyword matches, structural signals, escalation) drive lazy-load routing. The router reads only index frontmatter at navigation time; leaf bodies are loaded only at the end.
+- **Semantic routing on `focus`** drives lazy-load retrieval. Parent indices carry only `id`/`file`/`type`/`focus`/`tags` per entry; Claude reads each `focus` string and descends only into relevant branches. Per-leaf `activation` hints (file globs, import patterns, keyword matches, structural signals, escalation) stay on the leaves as optional disambiguation data and are never aggregated into parents. Leaf bodies are loaded only at the end of the walk.
 - **Four rewrite operators** (DECOMPOSE, NEST, MERGE/LIFT, DESCEND) shape the tree toward a token-minimal normal form. They are applied in fixed priority order and converge under the information-density and weighted-content metrics.
 - **Five top-level operations** — Build, Extend, Validate, Rebuild, Fix, Join — all share one safety envelope: sources are immutable, outputs are sibling-versioned, pipelines are phased and resumable, and commits are atomic.
 - **Deterministic replay.** Same inputs plus same seed produces byte-identical output. AI calls are cached by request hash so interrupted runs replay cached responses for free.

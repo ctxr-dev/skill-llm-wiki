@@ -52,6 +52,7 @@ function runCli(args, opts = {}) {
     env: {
       ...process.env,
       LLM_WIKI_NO_PROMPT: "1",
+      LLM_WIKI_SKIP_CLUSTER_NEST: "1",
       LLM_WIKI_MOCK_TIER1: "1",
       ...(opts.env || {}),
     },
@@ -82,8 +83,10 @@ function setupLiftScenario(tag) {
   const wiki = join(parent, "corpus.wiki");
 
   // Set up a LIFT scenario: move alpha.md into its own subfolder.
+  // Flat sources now land at the wiki root (no `general/` bucket),
+  // so the fresh leaf is at `<wiki>/alpha.md`.
   mkdirSync(join(wiki, "alpha-solo"));
-  const alphaSrc = join(wiki, "general", "alpha.md");
+  const alphaSrc = join(wiki, "alpha.md");
   const alphaDst = join(wiki, "alpha-solo", "alpha.md");
   writeFileSync(alphaDst, readFileSync(alphaSrc, "utf8"));
   rmSync(alphaSrc);

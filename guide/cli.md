@@ -14,7 +14,7 @@ covers:
   - "tiered-AI flags (--quality-mode tiered-fast|claude-first|tier0-only)"
   - "UX flags (--no-prompt, --json-errors, --accept-dirty, --accept-foreign-target, --review)"
   - "internal helpers: ingest, draft-leaf, draft-category, index-rebuild, index-rebuild-one, shape-check"
-  - "exit code summary (0 ok, 1 usage, 2 validation/ambiguity/review-abort, 3 resolve miss, 4 node too old, 5 git missing/too old, 6 wiki corrupt)"
+  - "exit code summary (0 ok, 1 usage, 2 validation/ambiguity/review-abort, 3 resolve miss, 4 node too old, 5 git missing/too old, 6 wiki corrupt, 7 NEEDS_TIER2 suspend-and-resume, 8 DEPS_MISSING runtime dependency missing)"
 tags:
   - cli
   - commands
@@ -53,7 +53,12 @@ activation:
     - rebuild
     - fix
     - join
+source:
+  origin: file
+  path: cli.md
+  hash: "sha256:d26a2c5e19a7257aa7febd2f04f26db8df89debf44e7ea20a9be0db9136c7f7c"
 ---
+
 
 # CLI subcommand reference
 
@@ -247,3 +252,5 @@ Print the CLI version string or a condensed command list.
 - **4** — Node.js is present but below the required minimum (defence-in-depth runtime guard)
 - **5** — `git` binary missing or older than 2.25 (preflight)
 - **6** — existing wiki's private git is corrupt (`git fsck` failed during preflight)
+- **7** — `NEEDS_TIER2` — the operator-convergence phase accumulated Tier 2 requests (cluster naming, mid-band merge decisions, …) that must be resolved by the wiki-runner sub-agent before the operation can continue. **Exit 7 is NOT a failure.** It is the suspend-and-resume signal of the Tier 2 exit-7 handshake. The CLI writes every pending batch to `<wiki>/.work/tier2/pending-<batch-id>.json` before exiting; the wiki-runner spawns one `Agent` sub-agent per request, writes responses to `<wiki>/.work/tier2/responses-<batch-id>.json` next to the pending file, and re-invokes the CLI with the same positional args. See `guide/tiered-ai.md` "The exit-7 handshake" for details.
+- **8** — `DEPS_MISSING` — a required runtime dependency (`gray-matter` or `@xenova/transformers`) could not be resolved from the skill's `node_modules/` and the install attempt was either declined (interactive `[Y/n]` answered `n`) or failed (`npm install` non-zero exit, or the deps were still missing after a successful install). The dependency preflight runs at the start of every subcommand except `--version` and `--help`; in non-interactive sessions (`!process.stdin.isTTY` or `LLM_WIKI_NO_PROMPT=1`) it attempts `npm install --silent` automatically before giving up. See `guide/ux/preflight.md` Case E for the full user-facing message and recovery steps.

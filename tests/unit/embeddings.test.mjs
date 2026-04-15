@@ -1,30 +1,26 @@
-// embeddings.test.mjs — Tier 1 mock-mode tests.
+// embeddings.test.mjs — Tier 1 mock-mode unit tests.
 //
-// Real-model tests are gated on LLM_WIKI_REAL_TIER1=1 in a separate
-// file so CI never fetches model weights. Here we exercise the
-// contract in deterministic mock mode.
+// Tier 1 is now a REQUIRED dependency. The legacy "optional install
+// prompt" paths (runInstaller, tier1ConfigPath, user-declined marker,
+// skipInstall) were deleted as part of the optimization overhaul —
+// see the overhaul notes in scripts/lib/embeddings.mjs. This file
+// exercises the remaining contract:
 //
-// Edge cases:
-//   - Mock mode produces deterministic vectors
-//   - Identical text → cosine 1 (within float ε)
-//   - Different text → cosine < 1
-//   - Empty string handled
-//   - Cache is a deterministic function of text hash
-//   - Cache survives process boundary (read back after write)
-//   - Float32Array serialisation round-trip
-//   - ensureTier1 in mock mode returns { available: true, reason: "mock" }
-//   - ensureTier1 user-declined is persistent
-//   - ensureTier1 non-interactive → silent fallthrough when absent
-//   - ensureTier1 forceInstall bypasses the prompt
+//   - Deterministic mock vectors (for hermetic CI)
+//   - Cache round-trip
+//   - Cosine edge cases
+//   - ensureTier1 return shape
+//   - Namespace separation between mock and real caches
+//
+// Real-model tests live in tests/unit/embeddings-real.test.mjs and
+// are gated on LLM_WIKI_TIER1_REAL=1.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   existsSync,
   mkdirSync,
-  readFileSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -37,8 +33,6 @@ import {
   ensureTier1,
   isAvailable,
   isMockMode,
-  runInstaller,
-  tier1ConfigPath,
 } from "../../scripts/lib/embeddings.mjs";
 
 function tmpWiki(tag) {
@@ -91,7 +85,6 @@ test("embed is deterministic: same input → same vector", async () => {
   const wiki = tmpWiki("determinism");
   try {
     const a = await embed(wiki, "react hooks");
-    // Clear cache to force re-compute.
     rmSync(join(wiki, ".llmwiki"), { recursive: true, force: true });
     const b = await embed(wiki, "react hooks");
     assert.equal(a.length, b.length);
@@ -109,11 +102,9 @@ test("embed caches: second call reads from disk", async () => {
   try {
     const text = "prisma schema migrations";
     const v1 = await embed(wiki, text);
-    // Verify a cache file exists.
     const { createHash } = await import("node:crypto");
     const hash = createHash("sha256").update(text).digest("hex");
     assert.ok(existsSync(embeddingCachePath(wiki, hash)));
-    // Second call returns the same vector.
     const v2 = await embed(wiki, text);
     for (let i = 0; i < v1.length; i++) {
       assert.equal(v1[i], v2[i]);
@@ -172,61 +163,7 @@ test("embed handles the empty string (returns a valid vector)", async () => {
   }
 });
 
-test("ensureTier1: persistent decline is honoured across calls", async () => {
-  _resetTier1LoadState();
-  // Force the normal (non-mock) path via a temporary env override so
-  // the prompt logic is exercised. We then set the marker manually.
-  const wiki = tmpWiki("decline");
-  try {
-    // Pre-plant the decline marker.
-    mkdirSync(join(wiki, ".llmwiki"), { recursive: true });
-    writeFileSync(
-      tier1ConfigPath(wiki),
-      "declined: true\nasked_at: 2026-04-15T00:00:00Z\n",
-    );
-    // Disable mock temporarily so the real import branch runs.
-    delete process.env.LLM_WIKI_MOCK_TIER1;
-    _resetTier1LoadState();
-    try {
-      const r = await ensureTier1(wiki, { interactive: true, noPrompt: false });
-      // Since we're not mocking and @xenova/transformers isn't
-      // installed, and the decline marker is present, the result
-      // must be user-declined.
-      assert.equal(r.available, false);
-      assert.equal(r.reason, "user-declined");
-    } finally {
-      process.env.LLM_WIKI_MOCK_TIER1 = "1";
-      _resetTier1LoadState();
-    }
-  } finally {
-    rmSync(wiki, { recursive: true, force: true });
-  }
-});
-
-test("ensureTier1: non-interactive + absent dep → silent non-interactive", async () => {
-  const wiki = tmpWiki("noninteractive");
-  try {
-    delete process.env.LLM_WIKI_MOCK_TIER1;
-    _resetTier1LoadState();
-    try {
-      const r = await ensureTier1(wiki, { interactive: false, noPrompt: true });
-      // Without the dependency installed this resolves to non-interactive.
-      assert.equal(r.available, false);
-      assert.equal(r.reason, "non-interactive");
-    } finally {
-      process.env.LLM_WIKI_MOCK_TIER1 = "1";
-      _resetTier1LoadState();
-    }
-  } finally {
-    rmSync(wiki, { recursive: true, force: true });
-  }
-});
-
 test("embeddingCachePath: mock and real modes use separate namespaces", async () => {
-  // Regression for the cache namespace collision. A mock-mode cache
-  // entry and a real-mode cache entry for the SAME text hash must
-  // resolve to DIFFERENT paths. If they share a path, a CI run
-  // under mock mode would silently poison a later real-model build.
   const wiki = tmpWiki("ns");
   try {
     process.env.LLM_WIKI_MOCK_TIER1 = "1";
@@ -256,98 +193,26 @@ test("embed caches under the mock namespace when in mock mode", async () => {
   }
 });
 
-test("runInstaller: reports ENOENT (npm not on PATH) via spawn error", async () => {
-  // Exercise the `r.error` branch — spawnSync returns a result with
-  // `.error` set when the binary can't be found. We stub the
-  // spawner to simulate ENOENT without actually missing npm.
-  delete process.env.LLM_WIKI_MOCK_TIER1;
+// Regression: `tryLoadTier1` used to flip a boolean flag synchronously
+// BEFORE awaiting the dynamic import. Concurrent callers (e.g., the 17+
+// parallel `embed()` calls cluster-detect fires via Promise.all) would
+// see "loaded=true" but read the module reference before the import
+// settled, and throw "Tier 1 failed to load" even though the import
+// was in flight and would have succeeded. The fix is to cache the
+// in-flight promise instead of a bare boolean, so every concurrent
+// caller awaits the same resolution. This test guarantees the race is
+// gone by kicking off N parallel embed calls immediately after a
+// reset and asserting they all return valid vectors.
+test("concurrent embed() calls after reset all resolve (no TOCTOU race)", async () => {
+  const wiki = tmpWiki("concurrent-load");
   try {
-    const r = await runInstaller({
-      spawnFn: () => ({
-        error: Object.assign(new Error("spawn npm ENOENT"), { code: "ENOENT" }),
-        status: null,
-      }),
-    });
-    assert.equal(r.ok, false);
-    assert.match(r.error, /npm could not start.*ENOENT/);
-  } finally {
-    process.env.LLM_WIKI_MOCK_TIER1 = "1";
     _resetTier1LoadState();
-  }
-});
-
-test("runInstaller: reports signal kill via r.signal", async () => {
-  delete process.env.LLM_WIKI_MOCK_TIER1;
-  try {
-    const r = await runInstaller({
-      spawnFn: () => ({ status: null, signal: "SIGKILL" }),
-    });
-    assert.equal(r.ok, false);
-    assert.match(r.error, /killed by signal SIGKILL/);
-  } finally {
-    process.env.LLM_WIKI_MOCK_TIER1 = "1";
-    _resetTier1LoadState();
-  }
-});
-
-test("runInstaller: reports non-zero exit with stderr", async () => {
-  delete process.env.LLM_WIKI_MOCK_TIER1;
-  try {
-    const r = await runInstaller({
-      spawnFn: () => ({
-        status: 1,
-        stderr: "npm ERR! Could not resolve dependency\n",
-      }),
-    });
-    assert.equal(r.ok, false);
-    assert.match(r.error, /Could not resolve dependency/);
-  } finally {
-    process.env.LLM_WIKI_MOCK_TIER1 = "1";
-    _resetTier1LoadState();
-  }
-});
-
-test("runInstaller: reports success on status 0", async () => {
-  delete process.env.LLM_WIKI_MOCK_TIER1;
-  try {
-    const r = await runInstaller({
-      spawnFn: () => ({ status: 0 }),
-    });
-    assert.equal(r.ok, true);
-  } finally {
-    process.env.LLM_WIKI_MOCK_TIER1 = "1";
-    _resetTier1LoadState();
-  }
-});
-
-test("runInstaller: mock mode short-circuits without spawning", async () => {
-  process.env.LLM_WIKI_MOCK_TIER1 = "1";
-  let spawnCalled = false;
-  const r = await runInstaller({
-    spawnFn: () => {
-      spawnCalled = true;
-      return { status: 1 };
-    },
-  });
-  assert.equal(r.ok, true);
-  assert.equal(spawnCalled, false);
-});
-
-test("ensureTier1: skipInstall + absent dep → non-interactive", async () => {
-  const wiki = tmpWiki("skip");
-  try {
-    delete process.env.LLM_WIKI_MOCK_TIER1;
-    _resetTier1LoadState();
-    try {
-      const r = await ensureTier1(wiki, {
-        interactive: true,
-        skipInstall: true,
-      });
-      assert.equal(r.available, false);
-      assert.equal(r.reason, "non-interactive");
-    } finally {
-      process.env.LLM_WIKI_MOCK_TIER1 = "1";
-      _resetTier1LoadState();
+    const texts = Array.from({ length: 20 }, (_, i) => `concurrent text ${i}`);
+    const vectors = await Promise.all(texts.map((t) => embed(wiki, t)));
+    assert.equal(vectors.length, 20);
+    for (const v of vectors) {
+      assert.ok(v instanceof Float32Array);
+      assert.equal(v.length, EMBEDDING_DIMS);
     }
   } finally {
     rmSync(wiki, { recursive: true, force: true });

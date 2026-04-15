@@ -49,8 +49,8 @@
 // the caller based on the returned structured error.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   defaultSiblingPath,
   hasPrivateGit,
@@ -101,6 +101,72 @@ function isFile(p) {
   } catch {
     return false;
   }
+}
+
+// True when a managed wiki target carries an in-progress build that
+// the exit-7 handshake parked. The signal is conservative on purpose:
+// either there is at least one `pending-*.json` waiting in
+// `<target>/.work/tier2/`, or the work area carries a `build-*` op
+// folder with no matching final tag in the op-log. Both shapes are
+// produced exclusively by a build that exited 7 (or crashed mid-way)
+// and there is no other production code path that creates them, so
+// allowing INT-03 to short-circuit when this returns true cannot
+// silently overwrite a healthy wiki.
+//
+// Pure filesystem probe — no git calls.
+function hasIncompleteBuild(targetDir) {
+  if (!isDir(targetDir)) return false;
+  // Signal A: pending Tier 2 batches waiting to be re-fed.
+  const tier2Dir = join(targetDir, ".work", "tier2");
+  if (isDir(tier2Dir)) {
+    try {
+      for (const name of readdirSync(tier2Dir)) {
+        if (name.startsWith("pending-") && name.endsWith(".json")) {
+          return true;
+        }
+      }
+    } catch {
+      /* fall through to signal B */
+    }
+  }
+  // Signal B: a `build-*` workdir exists with `candidates.json` but
+  // its op-id has no entry in the op-log (i.e. commit-finalize never
+  // ran). Read the op-log via a string substring match so we do not
+  // pull in the YAML parser at intent time — this module is meant to
+  // stay free of orchestrator/library imports.
+  const workRoot = join(targetDir, ".work");
+  if (!isDir(workRoot)) return false;
+  let workEntries;
+  try {
+    workEntries = readdirSync(workRoot, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  let opLogText = "";
+  try {
+    opLogText = readFileSync(join(targetDir, ".llmwiki", "op-log.yaml"), "utf8");
+  } catch {
+    opLogText = "";
+  }
+  for (const entry of workEntries) {
+    if (!entry.isDirectory()) continue;
+    if (!entry.name.startsWith("build-")) continue;
+    const candidatesPath = join(workRoot, entry.name, "candidates.json");
+    if (!isFile(candidatesPath)) continue;
+    // If the op-log mentions this op-id, the build finalised — not a
+    // resume candidate. The op-log emitter (history.mjs) writes the
+    // op-id unquoted unless it would round-trip ambiguously, but the
+    // hyphen-separated form we generate never trips needsQuoting; for
+    // safety we check both quoted and unquoted forms with a
+    // surrounding-character anchor so a substring of a longer op-id
+    // does not accidentally match.
+    const idLine = `op_id: ${entry.name}`;
+    const idLineQuoted = `op_id: "${entry.name}"`;
+    if (!opLogText.includes(idLine) && !opLogText.includes(idLineQuoted)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // True if a directory is foreign-to-us: it exists, is non-empty, and has
@@ -580,6 +646,15 @@ export function resolveIntent(ctx) {
   }
 
   // INT-03: target exists, is ours, but subcommand is `build`.
+  //
+  // Resume escape hatch: if the target carries an in-progress build
+  // (pending Tier 2 batches and/or a `build-*` workdir whose op-id
+  // never appeared in the op-log), the user is RESUMING — typically
+  // after the wiki-runner wrote responses for an exit-7 batch and
+  // re-invoked us. Treat this as a normal sibling build so the
+  // orchestrator's idempotent ingest path takes over. We only allow
+  // the bypass when the target shows a build-shaped incomplete state;
+  // a healthy completed wiki still trips INT-03.
   if (
     !explicitTarget &&
     subcommand === "build" &&
@@ -587,16 +662,19 @@ export function resolveIntent(ctx) {
     hasPrivateGit(target) &&
     !f.layout_mode
   ) {
-    return ambiguous(
-      "INT-03",
-      `${target} is already a managed wiki; choose an operation`,
-      [
-        { description: "add new entries from the source", flag: `extend ${rawInput}` },
-        { description: "optimise structure in place", flag: `rebuild ${rawInput}` },
-        { description: "repair methodology divergences", flag: `fix ${rawInput}` },
-      ],
-      "pick extend / rebuild / fix",
-    );
+    if (!hasIncompleteBuild(target)) {
+      return ambiguous(
+        "INT-03",
+        `${target} is already a managed wiki; choose an operation`,
+        [
+          { description: "add new entries from the source", flag: `extend ${rawInput}` },
+          { description: "optimise structure in place", flag: `rebuild ${rawInput}` },
+          { description: "repair methodology divergences", flag: `fix ${rawInput}` },
+        ],
+        "pick extend / rebuild / fix",
+      );
+    }
+    // Fall through to the happy path so the orchestrator resumes.
   }
 
   // Happy path: a plain sibling build/extend/rebuild/fix.

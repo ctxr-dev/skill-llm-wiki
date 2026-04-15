@@ -153,6 +153,81 @@ export function appendDecision(wikiRoot, entry) {
   renameSync(tmp, path);
 }
 
+// Convenience helper for cluster-NEST outcomes. The convergence
+// loop calls this for every math-only proposal (with its
+// Tier 2 gate decision) and for every Tier-2-proposed cluster
+// (with decision="tier2-approved" or "rejected-by-metric"). The
+// entry lands in the same entries[] list as pairwise decisions
+// so the audit trail for one op is queryable as a single stream.
+//
+// Schema translation:
+//
+//   op_id, operator="NEST"                — as-is
+//   sources                               — leaf ids in the cluster
+//   tier_used                             — 2 (every NEST decision
+//                                           touches Tier 2 either
+//                                           via propose_structure
+//                                           or nest_decision)
+//   similarity                            — average_affinity
+//   confidence_band                       — one of:
+//                                           "tier2-proposed",
+//                                           "math-gated",
+//                                           "empty-partition",
+//                                           "rejected-by-metric",
+//                                           "rejected-by-gate"
+//   decision                              — one of:
+//                                           "applied",
+//                                           "rejected-by-metric",
+//                                           "rejected-by-gate",
+//                                           "pending-tier2"
+//   reason                                — free text
+//
+// Coercion: average_affinity may be undefined for Tier-2-proposed
+// clusters; we coerce to 0 so the finite-number validator does
+// not reject the entry.
+export function appendNestDecision(wikiRoot, entry) {
+  const similarity =
+    Number.isFinite(entry.similarity)
+      ? entry.similarity
+      : (Number.isFinite(entry.average_affinity) ? entry.average_affinity : 0);
+  appendDecision(wikiRoot, {
+    op_id: entry.op_id,
+    operator: "NEST",
+    sources: Array.isArray(entry.sources) ? entry.sources : [],
+    tier_used: 2,
+    similarity,
+    confidence_band: entry.confidence_band ?? null,
+    decision: entry.decision,
+    reason: entry.reason ?? null,
+  });
+}
+
+// Append the per-iteration metric trajectory for an op. Writes
+// one entry per trajectory point with operator="METRIC_TRAJECTORY"
+// so readers can recover the full cost curve for each op by
+// filtering the entries[] list. `trajectory` is the
+// metric_trajectory array produced by runConvergence: an array of
+// `{ iteration, cost, event }` records. Writes even a single-
+// point baseline trajectory so the log carries evidence that the
+// convergence loop ran (rather than being silently skipped).
+export function appendMetricTrajectory(wikiRoot, opId, trajectory) {
+  if (!Array.isArray(trajectory)) return;
+  for (const point of trajectory) {
+    const cost = Number.isFinite(point.cost) ? point.cost : 0;
+    const iteration = Number.isInteger(point.iteration) ? point.iteration : 0;
+    appendDecision(wikiRoot, {
+      op_id: opId,
+      operator: "METRIC_TRAJECTORY",
+      sources: [`iter-${iteration}`],
+      tier_used: 0,
+      similarity: cost,
+      confidence_band: point.event ?? "unknown",
+      decision: "measured",
+      reason: point.reason ?? null,
+    });
+  }
+}
+
 // Lightweight reader — we parse only what we need for tests and the
 // `skill-llm-wiki history` subcommand. Errors out loudly on any line
 // the parser doesn't recognise.

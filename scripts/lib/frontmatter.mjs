@@ -331,10 +331,63 @@ function findKeyColon(text) {
 
 // ─── Renderer ────────────────────────────────────────────────────────────
 
+// Canonical top-level key order. Hand-tuned to match the authored shape
+// in `guide/` — field order is a stable convention so that rebuilt
+// frontmatter diffs cleanly against authored frontmatter. Keys not in
+// this list retain insertion order after all known keys have been
+// emitted, so unknown fields land at the bottom rather than scrambling
+// the known ones.
+const CANONICAL_KEY_ORDER = [
+  "id",
+  "type",
+  "depth_role",
+  "depth",
+  "focus",
+  "parents",
+  "shared_covers",
+  "covers",
+  "tags",
+  "domains",
+  "aliases",
+  "overlay_targets",
+  "nests_into",
+  "activation",
+  "activation_defaults",
+  "links",
+  "source",
+  "orientation",
+  "generator",
+  "mode",
+  "layout_contract_path",
+  "rebuild_needed",
+  "rebuild_reasons",
+  "rebuild_command",
+  "entries",
+  "children",
+];
+
+function orderedKeys(data, canonical) {
+  const known = new Set(canonical);
+  const present = new Set(Object.keys(data));
+  const out = [];
+  for (const key of canonical) {
+    if (present.has(key)) out.push(key);
+  }
+  for (const key of Object.keys(data)) {
+    if (!known.has(key)) out.push(key);
+  }
+  return out;
+}
+
 function renderYaml(data, indent) {
   if (data == null || typeof data !== "object") return "";
   let out = "";
-  for (const key of Object.keys(data)) {
+  // Only the top level (indent 0) is reordered canonically. Nested
+  // objects (e.g. activation.keyword_matches) keep insertion order so
+  // authored ordering inside complex values is never rewritten.
+  const keys =
+    indent === 0 ? orderedKeys(data, CANONICAL_KEY_ORDER) : Object.keys(data);
+  for (const key of keys) {
     out += renderKey(key, data[key], indent);
   }
   return out;
@@ -426,7 +479,15 @@ function renderScalar(v) {
   if (v === "") return '""';
   if (v === "null" || v === "true" || v === "false" || v === "~") return `"${v}"`;
   if (/^-?\d+(\.\d+)?$/.test(v)) return `"${v}"`;
+  // YAML-unsafe chars — must be quoted for correctness.
   if (/[:#\[\]{}&*!|>'"`%@\t]/.test(v)) {
+    return `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  }
+  // Defensive quoting: strings containing parens or slashes are quoted
+  // even when YAML does not strictly require it. Matches the hand-
+  // authored style in `guide/` and keeps rebuilt frontmatter textually
+  // close to authored frontmatter so diffs stay clean across rebuilds.
+  if (/[\/()]/.test(v)) {
     return `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
   }
   if (/^\s|\s$/.test(v) || /^[-?]/.test(v)) {

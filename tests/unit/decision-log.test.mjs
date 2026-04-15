@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   appendDecision,
+  appendMetricTrajectory,
+  appendNestDecision,
   readDecisions,
 } from "../../scripts/lib/decision-log.mjs";
 
@@ -210,6 +212,83 @@ test("parser handles negative fractional similarity round-trip", () => {
     const back = readDecisions(wiki);
     assert.equal(typeof back[0].similarity, "number");
     assert.equal(back[0].similarity, -0.5);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("appendMetricTrajectory: writes one entry per trajectory point", () => {
+  const wiki = tmpWiki("trajectory");
+  try {
+    appendMetricTrajectory(wiki, "rebuild-1", [
+      { iteration: 0, cost: 1.23, event: "baseline" },
+      { iteration: 1, cost: 0.98, event: "NEST" },
+      { iteration: 2, cost: 0.85, event: "NEST" },
+    ]);
+    const back = readDecisions(wiki);
+    const traj = back.filter((e) => e.operator === "METRIC_TRAJECTORY");
+    assert.equal(traj.length, 3);
+    assert.equal(traj[0].op_id, "rebuild-1");
+    assert.ok(Math.abs(traj[0].similarity - 1.23) < 1e-9);
+    assert.equal(traj[0].confidence_band, "baseline");
+    assert.equal(traj[1].confidence_band, "NEST");
+    assert.ok(Math.abs(traj[2].similarity - 0.85) < 1e-9);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("appendMetricTrajectory: single-point baseline writes one entry", () => {
+  const wiki = tmpWiki("traj-single");
+  try {
+    appendMetricTrajectory(wiki, "rebuild-1", [
+      { iteration: 0, cost: 0.5, event: "baseline" },
+    ]);
+    const back = readDecisions(wiki);
+    assert.equal(back.length, 1);
+    assert.equal(back[0].operator, "METRIC_TRAJECTORY");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("appendNestDecision: records applied NEST with sources + band", () => {
+  const wiki = tmpWiki("nest-dec");
+  try {
+    appendNestDecision(wiki, {
+      op_id: "build-xyz",
+      sources: ["leaf-a", "leaf-b", "leaf-c"],
+      similarity: 0.72,
+      confidence_band: "tier2-proposed",
+      decision: "applied",
+      reason: "slug=alpha",
+    });
+    const back = readDecisions(wiki);
+    assert.equal(back.length, 1);
+    assert.equal(back[0].operator, "NEST");
+    assert.equal(back[0].tier_used, 2);
+    assert.equal(back[0].confidence_band, "tier2-proposed");
+    assert.equal(back[0].decision, "applied");
+    assert.deepEqual(back[0].sources, ["leaf-a", "leaf-b", "leaf-c"]);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("appendNestDecision: records rejected-by-metric with regression reason", () => {
+  const wiki = tmpWiki("nest-rej");
+  try {
+    appendNestDecision(wiki, {
+      op_id: "rebuild-abc",
+      sources: ["leaf-a", "leaf-b"],
+      similarity: 0.5,
+      confidence_band: "math-gated",
+      decision: "rejected-by-metric",
+      reason: "metric 1.0 -> 1.2 regression",
+    });
+    const back = readDecisions(wiki);
+    assert.equal(back[0].decision, "rejected-by-metric");
+    assert.equal(back[0].confidence_band, "math-gated");
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }

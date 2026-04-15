@@ -26,6 +26,7 @@ function runCliFixed(args, opts = {}) {
     env: {
       ...process.env,
       LLM_WIKI_NO_PROMPT: "1",
+      LLM_WIKI_SKIP_CLUSTER_NEST: "1",
       LLM_WIKI_MOCK_TIER1: "1",
       LLM_WIKI_FIXED_TIMESTAMP: "1700000000",
       ...(opts.env || {}),

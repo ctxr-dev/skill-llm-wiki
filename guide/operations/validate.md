@@ -2,14 +2,14 @@
 id: validate
 type: primary
 depth_role: leaf
-focus: "Validate operation — read-only correctness check against a wiki"
+focus: Validate operation — read-only correctness check against a wiki
 parents:
   - index.md
 covers:
   - "invokes `node scripts/cli.mjs validate <wiki>` and reports every finding verbatim"
   - "exit codes: 0 clean, 2 errors; warnings do not change exit code"
-  - "does not auto-fix; if repairs are wanted the user must explicitly invoke Fix"
-  - "lowest-risk operation, always run before structural changes"
+  - does not auto-fix; if repairs are wanted the user must explicitly invoke Fix
+  - lowest-risk operation, always run before structural changes
 tags:
   - operations
   - validate
@@ -23,7 +23,12 @@ activation:
   tag_matches:
     - operation
     - validating
+source:
+  origin: file
+  path: "operations/validate.md"
+  hash: "sha256:8b710cbe390c57c46a4bcc5fea6d3df886b9d9ba6352f365fd05dacdb1e094b1"
 ---
+
 
 # Validate
 

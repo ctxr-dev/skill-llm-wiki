@@ -1,0 +1,4 @@
+# skill-llm-wiki internal metadata — safe to gitignore in your own project
+.llmwiki/
+.work/
+.shape/history/*/work/

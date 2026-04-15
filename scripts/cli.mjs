@@ -37,7 +37,11 @@
 //
 // Exit codes used by this CLI are:
 //   0 ok · 1 usage · 2 validation · 3 resolve-wiki miss ·
-//   4 Node too old · 5 git missing/too old · 6 wiki corrupt
+//   4 Node too old · 5 git missing/too old · 6 wiki corrupt ·
+//   7 NEEDS_TIER2 (suspend — wiki-runner must resolve pending
+//     tier2 requests and re-invoke; NOT a failure path) ·
+//   8 DEPS_MISSING (required runtime dependency missing and the
+//     auto-install attempt was either declined or failed)
 // ───────────────────────────────────────────────────────────────────────────
 const REQUIRED_NODE_MAJOR = 18;
 const _nodeVersionRaw = (process && process.version) || "";
@@ -54,47 +58,194 @@ if (!Number.isFinite(_nodeMajor) || _nodeMajor < REQUIRED_NODE_MAJOR) {
   process.exit(4);
 }
 
-import { readFileSync, mkdirSync } from "node:fs";
-import { resolve } from "node:path";
-import { ingestSource } from "./lib/ingest.mjs";
-import { draftLeafFrontmatter, draftCategory } from "./lib/draft.mjs";
-import { rebuildAllIndices, rebuildIndex } from "./lib/indices.mjs";
-import { validateWiki, summariseFindings } from "./lib/validate.mjs";
-import { runShapeCheck } from "./lib/shape-check.mjs";
-import {
-  listVersions,
-  nextVersionTag,
-  resolveLiveWiki,
-  writeCurrentPointer,
-} from "./lib/paths.mjs";
-import {
-  formatAmbiguityJson,
-  formatAmbiguityText,
-  resolveIntent,
-} from "./lib/intent.mjs";
-import { rollbackOperation } from "./lib/rollback.mjs";
-import { defaultMigrationTarget, migrateLegacyWiki } from "./lib/migrate.mjs";
-import { NonInteractiveError } from "./lib/interactive.mjs";
-import {
-  ReviewAbortedError,
-  runOperation,
-  ValidationError,
-} from "./lib/orchestrator.mjs";
-import {
-  cmdBlame,
-  cmdDiff,
-  cmdHistory,
-  cmdLog,
-  cmdReflog,
-  cmdShow,
-} from "./lib/git-commands.mjs";
-import { cmdRemote } from "./commands/remote.mjs";
-import { cmdSync } from "./commands/sync.mjs";
+// ───────────────────────────────────────────────────────────────────────────
+// Dependency preflight (defence-in-depth, runs BEFORE the static imports
+// that would otherwise pull in `gray-matter`).
+//
+// The static import chain below transitively loads `gray-matter` via
+// scripts/lib/source-frontmatter.mjs. If that package is missing from
+// node_modules, the import throws ERR_MODULE_NOT_FOUND with no
+// actionable context. By doing a synchronous resolve + prompt/install
+// loop here — using only Node built-ins — we either fix the install or
+// exit 8 cleanly before the failing import is reached.
+//
+// `--version` and `--help` deliberately bypass this check so an operator
+// debugging a broken install can still sanity-check the binary. They are
+// handled by an early-exit branch a few lines down.
+// ───────────────────────────────────────────────────────────────────────────
+import { createRequire as _createRequireDP } from "node:module";
+import { spawnSync as _spawnSyncDP } from "node:child_process";
+import { fileURLToPath as _fileURLToPathDP } from "node:url";
+import { dirname as _dirnameDP, resolve, join as _joinDP } from "node:path";
+import { readSync as _readSyncDP, readFileSync, mkdirSync } from "node:fs";
+
+const _SKILL_ROOT_DP = _dirnameDP(_dirnameDP(_fileURLToPathDP(import.meta.url)));
+const _REQUIRED_DEPS_DP = ["gray-matter", "@xenova/transformers"];
+
+function _depPreflightCheck() {
+  // Test-only override: lets the e2e suite exercise the missing-dep
+  // path without renaming files inside the live node_modules tree
+  // (which would race with parallel test files sharing the same
+  // skill root). The value is a comma-separated list of dep names to
+  // pretend are missing.
+  const forced = process.env.LLM_WIKI_TEST_FORCE_DEPS_MISSING;
+  if (forced) {
+    return forced
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  let req;
+  try {
+    req = _createRequireDP(_joinDP(_SKILL_ROOT_DP, "package.json"));
+  } catch {
+    return _REQUIRED_DEPS_DP.slice();
+  }
+  const missing = [];
+  for (const d of _REQUIRED_DEPS_DP) {
+    try {
+      req.resolve(d);
+    } catch {
+      missing.push(d);
+    }
+  }
+  return missing;
+}
+
+function _depPreflightFailMessage(missing) {
+  return (
+    "skill-llm-wiki: required runtime dependencies are missing:\n" +
+    missing.map((d) => `  - ${d}`).join("\n") +
+    "\n" +
+    "Run `npm install` in the skill directory to install them, or see " +
+    "guide/ux/preflight.md Case E.\n"
+  );
+}
+
+// Skip the dep check entirely for --version and --help so an operator
+// debugging a broken install can still get version/usage output. Every
+// other invocation (including `--help` placed AFTER another arg, which
+// is a malformed invocation we don't need to coddle) runs the check.
+const _argvDP = process.argv.slice(2);
+const _isVersionOrHelpDP =
+  _argvDP[0] === "--version" || _argvDP[0] === "--help" || _argvDP[0] === "-h";
+
+if (!_isVersionOrHelpDP) {
+  let _missingDP = _depPreflightCheck();
+  if (_missingDP.length > 0) {
+    process.stderr.write(_depPreflightFailMessage(_missingDP));
+    const _interactiveDP =
+      Boolean(process.stdin && process.stdin.isTTY) &&
+      process.env.LLM_WIKI_NO_PROMPT !== "1";
+    let _proceedDP = true;
+    if (_interactiveDP) {
+      process.stderr.write("Install now? [Y/n] ");
+      let _ans = "";
+      try {
+        const buf = Buffer.alloc(64);
+        const n = _readSyncDP(process.stdin.fd, buf, 0, buf.length, null);
+        _ans = buf.subarray(0, n).toString("utf8").trim().toLowerCase();
+      } catch {
+        _ans = "";
+      }
+      if (_ans === "n" || _ans === "no") {
+        process.stderr.write("Cannot proceed without dependencies. Exit.\n");
+        process.exit(8);
+      }
+      _proceedDP = true;
+    }
+    if (_proceedDP) {
+      // Test-only knob: when LLM_WIKI_TEST_NO_AUTOINSTALL=1 is set,
+      // we skip the auto-install attempt entirely and exit 8
+      // immediately. This lets the e2e test exercise the failure
+      // path without ever risking a live npm install against the
+      // shared node_modules used by parallel test files.
+      if (process.env.LLM_WIKI_TEST_NO_AUTOINSTALL === "1") {
+        process.stderr.write(
+          "skill-llm-wiki: auto-install disabled by test harness. Exit.\n",
+        );
+        process.exit(8);
+      }
+      process.stderr.write(
+        `skill-llm-wiki: running \`npm install --silent\` in ${_SKILL_ROOT_DP}\n`,
+      );
+      const _ins = _spawnSyncDP("npm", ["install", "--silent"], {
+        cwd: _SKILL_ROOT_DP,
+        stdio: ["ignore", "inherit", "inherit"],
+      });
+      if (_ins.error || _ins.status !== 0) {
+        process.stderr.write(
+          "skill-llm-wiki: `npm install` failed. Cannot proceed without " +
+            "dependencies. Exit.\n",
+        );
+        process.exit(8);
+      }
+      _missingDP = _depPreflightCheck();
+      if (_missingDP.length > 0) {
+        process.stderr.write(_depPreflightFailMessage(_missingDP));
+        process.stderr.write(
+          "skill-llm-wiki: dependencies are still missing after `npm install`. " +
+            "Exit.\n",
+        );
+        process.exit(8);
+      }
+    }
+  }
+}
+
+// All skill-internal modules are loaded via dynamic `import()` inside
+// `main()` so that the dependency preflight above this line gets a
+// chance to run BEFORE any module that transitively imports
+// `gray-matter` or `@xenova/transformers` is evaluated. ESM static
+// imports are hoisted to the top of the file regardless of source
+// position, so the only way to defer them past the preflight is to use
+// dynamic import. The list of imported names is identical to the
+// previous static block.
+let ingestSource;
+let draftLeafFrontmatter, draftCategory;
+let rebuildAllIndices, rebuildIndex;
+let validateWiki, summariseFindings;
+let runShapeCheck;
+let listVersions, nextVersionTag, resolveLiveWiki, writeCurrentPointer;
+let formatAmbiguityJson, formatAmbiguityText, resolveIntent;
+let rollbackOperation;
+let defaultMigrationTarget, migrateLegacyWiki;
+let NonInteractiveError;
+let NeedsTier2Error, ReviewAbortedError, runOperation, ValidationError;
+let TIER2_EXIT_CODE, listBatches;
+let cmdBlame, cmdDiff, cmdHistory, cmdLog, cmdReflog, cmdShow;
+let cmdRemote, cmdSync;
+
+async function loadSkillModules() {
+  ({ ingestSource } = await import("./lib/ingest.mjs"));
+  ({ draftLeafFrontmatter, draftCategory } = await import("./lib/draft.mjs"));
+  ({ rebuildAllIndices, rebuildIndex } = await import("./lib/indices.mjs"));
+  ({ validateWiki, summariseFindings } = await import("./lib/validate.mjs"));
+  ({ runShapeCheck } = await import("./lib/shape-check.mjs"));
+  ({ listVersions, nextVersionTag, resolveLiveWiki, writeCurrentPointer } =
+    await import("./lib/paths.mjs"));
+  ({ formatAmbiguityJson, formatAmbiguityText, resolveIntent } = await import(
+    "./lib/intent.mjs"
+  ));
+  ({ rollbackOperation } = await import("./lib/rollback.mjs"));
+  ({ defaultMigrationTarget, migrateLegacyWiki } = await import(
+    "./lib/migrate.mjs"
+  ));
+  ({ NonInteractiveError } = await import("./lib/interactive.mjs"));
+  ({ NeedsTier2Error, ReviewAbortedError, runOperation, ValidationError } =
+    await import("./lib/orchestrator.mjs"));
+  ({ TIER2_EXIT_CODE, listBatches } = await import("./lib/tier2-protocol.mjs"));
+  ({ cmdBlame, cmdDiff, cmdHistory, cmdLog, cmdReflog, cmdShow } = await import(
+    "./lib/git-commands.mjs"
+  ));
+  ({ cmdRemote } = await import("./commands/remote.mjs"));
+  ({ cmdSync } = await import("./commands/sync.mjs"));
+}
 
 // Hard-coded because @ctxr/kit strips package.json from installed artifacts
 // (see installers/folder.js: package.json is always-dropped metadata). Bump
 // this on every release alongside package.json.
-const CLI_VERSION = "0.1.0";
+const CLI_VERSION = "0.3.0";
 
 function getPackageVersion() {
   return CLI_VERSION;
@@ -166,7 +317,11 @@ Global:
   --help, -h                       Show this help
 
 Exit codes: 0 ok · 1 usage · 2 ambiguous intent · 3 resolve-wiki miss ·
-            4 Node too old · 5 git missing/too old · 6 wiki corrupt
+            4 Node too old · 5 git missing/too old · 6 wiki corrupt ·
+            7 NEEDS_TIER2 (wiki-runner must resolve pending requests
+              and re-invoke this CLI — see SKILL.md delegation contract) ·
+            8 DEPS_MISSING (required runtime dependency missing and the
+              install attempt was either declined or failed)
 `);
 }
 
@@ -268,9 +423,24 @@ async function main() {
     process.exit(1);
   }
   if (argv[0] === "--version") {
+    // The dependency preflight is intentionally skipped for --version
+    // and --help so an operator debugging a broken install can still
+    // sanity-check the binary. Every other code path runs the
+    // preflight before any deterministic work begins.
     console.log(getPackageVersion());
     return;
   }
+
+  // The dependency preflight has already run in the pre-import block
+  // at the top of this file. By the time we reach this point, every
+  // required runtime dep has been verified or the process has exited
+  // 8. See guide/ux/preflight.md Case E.
+  //
+  // Now load the skill-internal modules. They use `gray-matter` and
+  // `@xenova/transformers` transitively, so they MUST be loaded only
+  // after the dep preflight has confirmed both packages are
+  // resolvable.
+  await loadSkillModules();
 
   const cmd = argv[0];
   const args = argv.slice(1);
@@ -538,6 +708,31 @@ async function main() {
         );
         process.exit(2);
       }
+      if (err instanceof NeedsTier2Error) {
+        // Exit-7 handshake: a phase accumulated Tier 2 requests
+        // that only a wiki-runner sub-agent can resolve. The
+        // working tree is NOT rolled back — the partial-converge
+        // commits in the private git are preserved so the resume
+        // invocation can continue from the last completed
+        // iteration. The wiki-runner reads the pending batch,
+        // spawns one Agent per request, writes the responses, and
+        // re-invokes this CLI with the same op-id (same
+        // source/target positional args) so the orchestrator
+        // resumes. See SKILL.md "Agent delegation contract" and
+        // guide/tiered-ai.md "exit-7 handshake" for details.
+        const batches = listBatches(plan.target);
+        process.stderr.write(
+          `${cmd}: NEEDS_TIER2 — ${err.message}\n` +
+            `  op-id: ${opId}\n` +
+            `  pending: ${err.pendingPath ?? "(no path)"}\n` +
+            `  total batches waiting: ${batches.length}\n` +
+            `  Wiki-runner: read every pending-*.json under ` +
+            `${plan.target}/.work/tier2/, spawn one Agent per request, ` +
+            `write responses-*.json next to it, and re-invoke this CLI ` +
+            `with the same positional args.\n`,
+        );
+        process.exit(TIER2_EXIT_CODE);
+      }
       if (err instanceof ReviewAbortedError) {
         process.stderr.write(
           `${cmd}: ${err.message}\n` +
@@ -564,8 +759,21 @@ async function main() {
   switch (cmd) {
     case "ingest": {
       if (args.length < 1) usageError("ingest requires <source>");
-      const candidates = ingestSource(resolve(args[0]));
-      process.stdout.write(JSON.stringify({ candidates }, null, 2) + "\n");
+      const result = ingestSource(resolve(args[0]));
+      // The CLI-level `ingest` helper exposes both the leaf candidates
+      // and the index sources so that downstream tooling (and human
+      // inspection via `node scripts/cli.mjs ingest`) sees the full
+      // picture now that index inputs are classified separately.
+      process.stdout.write(
+        JSON.stringify(
+          {
+            candidates: result.leaves ?? result.candidates ?? [],
+            indexSources: result.indexSources ?? [],
+          },
+          null,
+          2,
+        ) + "\n",
+      );
       break;
     }
     case "draft-leaf": {

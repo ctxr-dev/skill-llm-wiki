@@ -27,7 +27,12 @@ const CLI = join(
 function runCli(args, opts = {}) {
   return spawnSync("node", [CLI, ...args], {
     encoding: "utf8",
-    env: { ...process.env, LLM_WIKI_NO_PROMPT: "1", ...(opts.env || {}) },
+    env: {
+      ...process.env,
+      LLM_WIKI_NO_PROMPT: "1",
+      LLM_WIKI_SKIP_CLUSTER_NEST: "1",
+      ...(opts.env || {}),
+    },
     cwd: opts.cwd,
   });
 }
@@ -217,7 +222,9 @@ test("validation failure leaves no op/<id> final tag and rolls tree to pre-op", 
 
     // Corrupt a leaf: keep `id` so collectAll picks it up, strip every
     // other required field so the validator emits MISSING-FIELD.
-    const leafPath = join(wiki, "general", "a.md");
+    // Leaves from a flat source live at the wiki root now (no `general/`
+    // bucket), matching the source layout.
+    const leafPath = join(wiki, "a.md");
     assert.ok(
       existsSync(leafPath),
       `fixture leaf should be at ${leafPath} after build`,

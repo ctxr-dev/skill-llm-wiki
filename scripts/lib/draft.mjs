@@ -9,31 +9,93 @@
 //   - tags[] from filename prefixes or directory hints
 //   - activation from file_glob inferred from the source path
 //
+// When the source file ALREADY carries a frontmatter block (parsed at
+// ingest time via gray-matter and stashed as
+// `candidate.authored_frontmatter`), each AUTHORED_LEAF_FIELD is
+// preferred over the heuristic — the drafter only fills gaps. This is
+// what preserves `activation`, `covers`, `tags`, `focus`, `domains`,
+// `shared_covers`, `aliases`, and friends when a hand-tuned corpus is
+// re-built.
+//
 // Anything that needs semantic understanding (prose-heavy draft, ambiguous
 // classification, cover synthesis from narrative) is left for Claude to
 // handle inside its own execution context when running this skill. The
 // `needs_ai` flag on the returned draft tells the caller which entries
 // need AI review.
 
+// Fields we copy straight from the source frontmatter when the author
+// supplied them. Fields NOT in this list (id / type / depth_role /
+// parents / source) are always re-derived because their authoritative
+// source is the target-tree position, not the original source file.
+const AUTHORED_LEAF_FIELDS = [
+  "focus",
+  "covers",
+  "tags",
+  "domains",
+  "aliases",
+  "activation",
+  "shared_covers",
+  "overlay_targets",
+  "links",
+];
+
 export function draftLeafFrontmatter(candidate, { categoryPath } = {}) {
-  const covers = extractCovers(candidate);
-  const focus = candidate.title || candidate.id;
+  const authored = candidate.authored_frontmatter || {};
+  const hasAuthored = candidate.has_authored_frontmatter === true;
+
+  // Heuristic baseline — used when the author didn't supply a field.
+  const draftedCovers = extractCovers(candidate);
+  const draftedFocus = candidate.title || candidate.id;
+  const draftedTags = inferTags(candidate);
+
   const data = {
     id: candidate.id,
     type: "primary",
     depth_role: "leaf",
-    focus,
-    covers,
-    parents: categoryPath ? [`${categoryPath}/index.md`] : [],
-    tags: inferTags(candidate),
+    // Priority: authored > drafted > default. `pickAuthored` only
+    // returns the authored value when it is non-empty (non-null,
+    // non-undefined, and — for arrays — non-empty).
+    focus: pickAuthored(authored.focus, draftedFocus),
+    covers: pickAuthored(authored.covers, draftedCovers),
+    // `parents` is authoritative from the source when supplied. The
+    // hand-authored convention is a list of index.md paths relative
+    // to the leaf's own directory (`index.md` for the same dir,
+    // `../index.md` for one up). Heuristic fallback builds the same
+    // relative form from the category path.
+    parents: pickAuthored(authored.parents, ["index.md"]),
+    tags: pickAuthored(authored.tags, draftedTags),
     source: {
       origin: "file",
       path: candidate.source_path,
       hash: candidate.hash,
     },
   };
+
+  // Forward the remaining AUTHORED_LEAF_FIELDS verbatim. These have no
+  // heuristic analogue — when the author supplied them, we keep them;
+  // otherwise we omit the field entirely so the output stays compact.
+  if (hasAuthored) {
+    for (const field of AUTHORED_LEAF_FIELDS) {
+      if (field === "focus" || field === "covers" || field === "tags") continue;
+      if (authored[field] !== undefined && authored[field] !== null) {
+        data[field] = authored[field];
+      }
+    }
+  }
+
   const confidence = scoreConfidence(data, candidate);
   return { data, confidence, needs_ai: confidence < 0.6 };
+}
+
+function pickAuthored(authoredVal, fallback) {
+  if (authoredVal === undefined || authoredVal === null) return fallback;
+  if (Array.isArray(authoredVal)) {
+    return authoredVal.length > 0 ? authoredVal : fallback;
+  }
+  if (typeof authoredVal === "string") {
+    return authoredVal.trim() !== "" ? authoredVal : fallback;
+  }
+  return authoredVal;
 }
 
 function extractCovers(candidate) {
@@ -80,8 +142,17 @@ function scoreConfidence(draft, candidate) {
 }
 
 // Quick classification by directory prefix. Script-first classifier.
+//
+// When the source file lives at the source root (no directory
+// component), the candidate is placed at the TARGET root — not under a
+// synthetic `general/` bucket. This is what keeps a flat authored
+// guide flat in the output: 17 top-level leaves stay at the wiki root
+// instead of being nested under `general/`.
+//
+// Subdirectories in the source are preserved as top-level categories
+// in the target (e.g. `operations/build.md` → `operations/build.md`).
 export function draftCategory(candidate) {
-  const parts = candidate.source_path.split(/[\/\\]/);
-  if (parts.length === 1) return "general";
+  const parts = candidate.source_path.split(/[\/\\]/).filter(Boolean);
+  if (parts.length <= 1) return "";
   return parts[0].toLowerCase().replace(/[^a-z0-9-]+/g, "-");
 }

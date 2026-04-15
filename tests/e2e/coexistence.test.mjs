@@ -73,7 +73,11 @@ function runCli(args, cwd) {
   return spawnSync("node", [CLI, ...args], {
     cwd,
     encoding: "utf8",
-    env: { ...process.env, LLM_WIKI_NO_PROMPT: "1" },
+    env: {
+      ...process.env,
+      LLM_WIKI_NO_PROMPT: "1",
+      LLM_WIKI_SKIP_CLUSTER_NEST: "1",
+    },
   });
 }
 
@@ -223,8 +227,9 @@ test("hostile core.autocrlf=input in user repo does not normalise CRLF in wiki c
     const src = join(repo, "docs");
     mkdirSync(src);
     // Seed multiple CRLF-terminated source files so LIFT does not
-    // hoist a single entry up to the wiki root; the path shape we
-    // assert on becomes `general/<entry>.md`.
+    // hoist a single entry up to the wiki root; flat sources land
+    // directly at the wiki root (no `general/` bucket), so the path
+    // we assert on is simply `<entry>.md`.
     writeFileSync(
       join(src, "crlf-alpha.md"),
       "# CRLF Alpha\r\n\r\nline one with CRLF\r\nline two with CRLF\r\n",
@@ -239,15 +244,15 @@ test("hostile core.autocrlf=input in user repo does not normalise CRLF in wiki c
     const r = runCli(["build", src], repo);
     assert.equal(r.status, 0, `build failed: ${r.stderr}`);
 
-    // The wiki leaves for crlf-* live under general/ (the default
-    // category). Read the first blob through the skill's isolated
-    // git so we bypass any filesystem-level transformations. The
-    // tracked content under HEAD must still contain CRLF byte
-    // sequences.
+    // The wiki leaves for crlf-* live at the wiki root (flat
+    // sources are not nested under a `general/` bucket any more).
+    // Read the first blob through the skill's isolated git so we
+    // bypass any filesystem-level transformations. The tracked
+    // content under HEAD must still contain CRLF byte sequences.
     const wiki = join(repo, "docs.wiki");
     const show = spawnSync(
       "git",
-      ["show", "HEAD:general/crlf-alpha.md"],
+      ["show", "HEAD:crlf-alpha.md"],
       {
         cwd: wiki,
         encoding: "buffer",

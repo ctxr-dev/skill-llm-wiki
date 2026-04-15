@@ -6,15 +6,26 @@
 //   4 — Node too old / missing
 //   5 — git missing / too old
 //   6 — wiki present but corrupt (git fsck failed)
+//   8 — required runtime dependency missing (DEPS_MISSING)
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 import { BASE_ISOLATION_ENV, gitFsck } from "./git.mjs";
 
 export const REQUIRED_NODE_MAJOR = 18;
 export const REQUIRED_GIT_MAJOR = 2;
 export const REQUIRED_GIT_MINOR = 25;
+
+// The runtime dependencies that MUST be resolvable from `skillRoot` for
+// any operation to run. Both are declared in package.json `dependencies`
+// (not devDependencies) and are pulled in by `npm install` automatically.
+// `gray-matter` is required to parse authored frontmatter in source files;
+// `@xenova/transformers` powers the local Tier 1 embeddings model used
+// during operator-convergence. The list is exported so tests can verify
+// the contract without re-declaring the names.
+export const REQUIRED_RUNTIME_DEPS = ["gray-matter", "@xenova/transformers"];
 
 // Parse `vX.Y.Z` → { major, minor }. Returns null on malformed input.
 function parseNodeVersion(raw) {
@@ -127,6 +138,60 @@ export function preflightWiki(wikiRoot) {
     };
   }
   return { ok: true };
+}
+
+// Verify that the skill's required runtime dependencies are installed and
+// resolvable from `skillRoot`. Uses createRequire anchored at the skill's
+// own package.json so the resolution honours the skill's local
+// node_modules — not the caller's. This matters when the skill is loaded
+// from a vendored install path or a non-standard layout where the parent
+// process's resolution roots wouldn't see the deps.
+//
+// Tests can pass a custom `deps` array to inject a non-existent package
+// name; production callers should always rely on the default
+// REQUIRED_RUNTIME_DEPS list.
+//
+// Returns `{ ok: true, missing: [] }` on success or
+// `{ ok: false, missing: [...], exitCode: 8, message }` on failure. The
+// failure shape mirrors preflightNode/preflightGit so cli.mjs can treat
+// it uniformly.
+export function preflightDependencies(skillRoot, deps = REQUIRED_RUNTIME_DEPS) {
+  const missing = [];
+  let require;
+  try {
+    require = createRequire(join(skillRoot, "package.json"));
+  } catch (err) {
+    return {
+      ok: false,
+      exitCode: 8,
+      missing: deps.slice(),
+      message:
+        `skill-llm-wiki: cannot anchor dependency resolution at ${skillRoot}: ` +
+        `${err && err.message ? err.message : String(err)}\n`,
+    };
+  }
+  for (const dep of deps) {
+    try {
+      require.resolve(dep);
+    } catch {
+      missing.push(dep);
+    }
+  }
+  if (missing.length === 0) {
+    return { ok: true, missing: [] };
+  }
+  const list = missing.map((d) => `  - ${d}`).join("\n");
+  return {
+    ok: false,
+    exitCode: 8,
+    missing,
+    message:
+      "skill-llm-wiki: required runtime dependencies are missing:\n" +
+      list +
+      "\n" +
+      "Run `npm install` in the skill directory to install them, or see " +
+      "guide/ux/preflight.md Case E.\n",
+  };
 }
 
 // Run the mandatory Node + Git preflight and exit on failure. Intended to

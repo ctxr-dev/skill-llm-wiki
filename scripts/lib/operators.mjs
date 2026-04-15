@@ -42,9 +42,27 @@ import {
 import { basename, dirname, join, relative } from "node:path";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
 import { collectFrontmatterOnly } from "./chunk.mjs";
-import { listChildren } from "./indices.mjs";
+import { listChildren, rebuildAllIndices } from "./indices.mjs";
 import { buildComparisonModel } from "./similarity.mjs";
-import { decide } from "./tiered.mjs";
+import {
+  countPendingRequests,
+  decide,
+  enqueuePending,
+  getResolvedResponse,
+  takePendingRequests,
+} from "./tiered.mjs";
+import {
+  buildProposeStructureRequest,
+  detectClusters,
+  MAX_CLUSTER_SIZE,
+  MIN_CLUSTER_SIZE,
+  MIN_MATH_CLUSTER_SIZE,
+  MIN_TIER2_CLUSTER_SIZE,
+} from "./cluster-detect.mjs";
+import { applyNest, validateSlug } from "./nest-applier.mjs";
+import { computeRoutingCost } from "./quality-metric.mjs";
+import { loadFixture, resolveFromFixture } from "./tier2-protocol.mjs";
+import { appendMetricTrajectory, appendNestDecision } from "./decision-log.mjs";
 
 // Max iterations the convergence loop will run before declaring
 // termination. The methodology's convergence argument proves it
@@ -397,6 +415,23 @@ export function detectNestAndDecompose(wikiRoot) {
 // → repeat until no applied proposals or the iteration budget is
 // exhausted. Returns a summary of what happened for commit messages
 // and phase records.
+//
+// Phase 8 overhaul: the loop now also runs the multi-signal
+// cluster detector (cluster-detect.mjs) after the pairwise
+// operators. When a cluster proposal survives and can be named
+// (via fixture / runtime-resolved Tier 2 responses), the NEST
+// applier rehouses the leaves into a new subcategory and the
+// parent indices are regenerated. When naming cannot be resolved
+// immediately, the request sits in the Tier 2 pending queue and
+// the caller (orchestrator) can drain it into a batch + exit 7.
+//
+// Quality-metric gating: every proposed change is scored against
+// the routing_cost metric. If the metric doesn't improve after
+// applying the change, we roll back to the pre-change disk state
+// and try the next proposal. This is the "let data pick the
+// cluster" discipline — we never apply a cluster just because the
+// affinity matrix liked it, we apply it only if the resulting
+// tree routes queries more cheaply than the pre-change tree.
 
 export async function runConvergence(wikiRoot, ctx = {}) {
   const {
@@ -406,10 +441,36 @@ export async function runConvergence(wikiRoot, ctx = {}) {
     interactive = false,
     tier2Handler,
     commitBetweenIterations = async () => {},
+    // tests that don't want cluster behaviour pass skipClusterNest
+    // explicitly; `LLM_WIKI_SKIP_CLUSTER_NEST=1` is the env-var
+    // shorthand for legacy tiered-build tests that exercise the
+    // pairwise tiered-AI path without a propose_structure fixture.
+    skipClusterNest = process.env.LLM_WIKI_SKIP_CLUSTER_NEST === "1",
   } = ctx;
   const applied = [];
   const suggestions = [];
+  const metricTrajectory = [];
+  // Directories that were freshly created by a NEST application
+  // in this convergence run. We skip cluster detection inside
+  // them for the remainder of the run to prevent noise-driven
+  // infinite re-clustering: the newly-created subcategory
+  // already represents a coherent group, and re-nesting within
+  // it should wait for a separate run where the operator can
+  // review the shape.
+  const nestedParents = new Set();
   let iteration = 0;
+
+  // Baseline metric (for the trajectory log).
+  try {
+    metricTrajectory.push({
+      iteration: 0,
+      cost: computeRoutingCost(wikiRoot).cost,
+      event: "baseline",
+    });
+  } catch {
+    /* empty wikis return 0 cost; ignore */
+  }
+
   while (iteration < maxIterations) {
     iteration++;
     const proposals = [];
@@ -433,43 +494,744 @@ export async function runConvergence(wikiRoot, ctx = {}) {
       });
     }
     const applicable = proposals.filter((p) => !p.detectOnly);
-    if (applicable.length === 0) break;
 
-    // Pick the highest-priority proposal that doesn't conflict with
-    // already-applied work this iteration. We apply exactly one per
-    // iteration so the per-iteration commit reflects a single
-    // deterministic move.
-    applicable.sort((a, b) => b.priority - a.priority);
-    const chosen = applicable[0];
-    let result;
-    try {
-      result = await chosen.apply({ wikiRoot, opId });
-    } catch (err) {
-      // A failed apply aborts the loop. The caller's surrounding
-      // try/catch (the orchestrator) rolls back via git reset.
-      throw new Error(
-        `operator-convergence: ${chosen.operator} failed: ${err.message}`,
-      );
+    if (applicable.length > 0) {
+      // Pick the highest-priority proposal and apply it.
+      applicable.sort((a, b) => b.priority - a.priority);
+      const chosen = applicable[0];
+      let result;
+      try {
+        result = await chosen.apply({ wikiRoot, opId });
+      } catch (err) {
+        throw new Error(
+          `operator-convergence: ${chosen.operator} failed: ${err.message}`,
+        );
+      }
+      applied.push({
+        iteration,
+        operator: chosen.operator,
+        sources: chosen.sources,
+        describe: chosen.describe,
+        result,
+      });
+      await commitBetweenIterations({
+        iteration,
+        operator: chosen.operator,
+        summary: result.summary,
+      });
+      try {
+        metricTrajectory.push({
+          iteration,
+          cost: computeRoutingCost(wikiRoot).cost,
+          event: chosen.operator,
+        });
+      } catch {
+        /* ignore */
+      }
+      continue; // next iteration
     }
-    applied.push({
+
+    // No pairwise operator fired. Try cluster-based NEST.
+    if (skipClusterNest) break;
+    const nestOutcome = await tryClusterNestIteration(wikiRoot, {
+      opId,
       iteration,
-      operator: chosen.operator,
-      sources: chosen.sources,
-      describe: chosen.describe,
-      result,
+      applied,
+      suggestions,
+      metricTrajectory,
+      commitBetweenIterations,
+      nestedParents,
     });
-    await commitBetweenIterations({
-      iteration,
-      operator: chosen.operator,
-      summary: result.summary,
-    });
+    if (nestOutcome === "applied") continue;
+    if (nestOutcome === "pending-tier2") {
+      // Unresolved cluster_name requests are parked on the pending
+      // queue. The orchestrator picks them up via drainPending().
+      break;
+    }
+    // "none" — nothing else to do, terminate.
+    break;
   }
+
+  const pendingTier2 = countPendingRequests(wikiRoot);
+
+  // Write the metric trajectory into decisions.yaml. Runs even
+  // for a single-point baseline (so an op that applied zero
+  // operators still leaves a record that convergence ran + what
+  // the baseline cost was). This is the "fix rebuild decision
+  // logging" patch: rebuild didn't apply any pairwise operators,
+  // so the old code never wrote a decision entry at all — the
+  // trajectory writer now guarantees every op leaves an audit
+  // trail regardless of whether it mutated anything.
+  if (opId && metricTrajectory.length > 0) {
+    try {
+      appendMetricTrajectory(wikiRoot, opId, metricTrajectory);
+    } catch {
+      /* best effort — decision log is a nice-to-have for rebuild */
+    }
+  }
+
   return {
     iterations: iteration,
     applied,
     suggestions,
-    converged: applied.length === 0 || iteration < maxIterations,
+    metric_trajectory: metricTrajectory,
+    needs_tier2: pendingTier2 > 0,
+    pending_count: pendingTier2,
+    converged:
+      applied.length === 0 ||
+      (iteration < maxIterations && pendingTier2 === 0),
   };
+}
+
+// Helper: given a wiki, try to apply a cluster NEST through the
+// multi-tier propose_structure + math-detect pipeline.
+//
+// Per-directory flow (depth-first, root → subcategories):
+//
+//   1. Emit a propose_structure Tier 2 request for the directory's
+//      leaves. Tier 2 proposes the "ideal" nested partition.
+//   2. Run the math cluster detector (aggressive thresholds) as
+//      a sanity check + source of additional proposals Tier 2
+//      might have missed.
+//   3. Merge: Tier 2 subcategories + math clusters, deduplicated
+//      by member set.
+//   4. For each math-only candidate, emit a `nest_decision`
+//      request — Tier 2 must GO/NO-GO the math proposal before
+//      it is applied.
+//   5. For each approved candidate, either use Tier 2's slug
+//      (propose_structure) or emit a `cluster_name` request
+//      (math-only with no existing slug).
+//   6. Apply each approved NEST through the applyNest helper.
+//      The quality-metric gate rolls back any application that
+//      regresses routing_cost.
+//
+// Returns one of:
+//   "applied"       — a NEST fired, commit emitted.
+//   "pending-tier2" — at least one Tier 2 request is still
+//                     unresolved. The caller exits 7.
+//   "none"          — no candidates, all candidates rejected, or
+//                     all candidates failed the metric gate.
+async function tryClusterNestIteration(wikiRoot, ctx) {
+  const {
+    opId,
+    iteration,
+    applied,
+    suggestions,
+    metricTrajectory,
+    commitBetweenIterations,
+    nestedParents = new Set(),
+  } = ctx;
+
+  // Collect candidate proposals across every parent directory.
+  // For each directory:
+  //   - propose_structure → Tier 2 subcategories (tier2-proposed)
+  //   - math detector → math clusters (math-gated)
+  //
+  // Phase 5 batching overhaul: the loop walks EVERY directory in a
+  // single pass and accumulates every pending Tier 2 request into
+  // the shared pending queue. It does NOT short-circuit when a
+  // propose_structure request parks — math cluster detection still
+  // runs for that directory so any math-only candidates can emit
+  // their own gate/naming requests in the same batch. The tree
+  // state is identical across every directory visited in this
+  // pass (no NEST has been applied yet), so every response that
+  // comes back is consistent with the same base tree.
+  //
+  // The old "skip math if propose_structure parked" short-circuit
+  // was a size-minimisation heuristic: it avoided enqueuing math
+  // gate/naming requests for clusters that propose_structure might
+  // reject outright. In practice that optimisation costs MORE
+  // round trips than it saves, because each parked dir forces a
+  // separate exit-7 cycle instead of being batched with its
+  // siblings. The cost of a few "wasted" gate/naming requests is
+  // one sub-agent per request (cheap) — the cost of an extra exit-7
+  // cycle is an entire CLI preflight + resume rebuild (expensive).
+  // We batch maximally and let `mergeClusterProposals` + the
+  // stale-candidate guard deduplicate the fallout.
+  const fixture = loadFixture();
+  const dirs = walkDirs(wikiRoot);
+  const allCandidates = [];
+  for (const dir of dirs) {
+    if (nestedParents.has(dir)) continue;
+    const { leaves } = listChildren(dir);
+    // Skip directories that cannot produce a non-trivial partition.
+    // `MIN_TIER2_CLUSTER_SIZE` is the floor on ONE cluster's members —
+    // a directory with only that many leaves could at most fold them
+    // all into a single subcategory, which would be a trivial
+    // rename rather than a structural improvement. We therefore
+    // require strictly more than `MIN_TIER2_CLUSTER_SIZE` leaves
+    // (i.e., ≥ MIN_TIER2_CLUSTER_SIZE + 1) before we even ask
+    // Tier 2 for a structure proposal. Skipping the ≤-floor case
+    // cuts a documented source of wasted Tier 2 round trips: every
+    // newly-created subcategory that convergence visits on its next
+    // pass gets this trivial keep-flat answer for free without
+    // paying for a propose_structure request.
+    if (leaves.length < MIN_TIER2_CLUSTER_SIZE + 1) continue;
+
+    const relDir = relative(wikiRoot, dir) || ".";
+
+    // Step 1: propose_structure Tier 2 request. Park on pending
+    // without short-circuiting the math phase below.
+    let tier2Clusters = [];
+    const proposeReq = buildProposeStructureRequest(relDir, leaves);
+    const proposeResp = resolveTier2Response(wikiRoot, fixture, proposeReq);
+    if (proposeResp === "pending") {
+      enqueuePending(wikiRoot, proposeReq);
+      suggestions.push({
+        operator: "NEST",
+        sources: leaves.map((l) => l.path),
+        reason: `propose_structure parked for ${relDir} (awaiting Tier 2)`,
+      });
+      // Fall through — math still runs so any cluster this dir
+      // carries is evaluated (and its gate/naming requests are
+      // batched alongside every other directory's) before we exit 7.
+    } else {
+      tier2Clusters = extractTier2Clusters(proposeResp, leaves, dir);
+    }
+
+    // Step 2: math cluster detection (aggressive scan).
+    const mathProposals = await detectClusters(wikiRoot, leaves, {
+      returnEmptyMarker: false,
+    });
+    const mathClusters = mathProposals
+      .filter((p) => !p.empty_partition)
+      .map((p) => ({
+        ...p,
+        parent_dir: dir,
+        source: "math",
+        leaves_set: new Set(p.leaves.map((l) => l.data.id)),
+      }));
+
+    // Step 3: merge proposals, dedup by member set.
+    const merged = mergeClusterProposals(tier2Clusters, mathClusters);
+    for (const c of merged) c.parent_dir = dir;
+    allCandidates.push(...merged);
+  }
+
+  if (allCandidates.length === 0) {
+    return countPendingRequests(wikiRoot) > 0 ? "pending-tier2" : "none";
+  }
+
+  // Step 4: math-only candidates go through a mandatory
+  // nest_decision gate. Candidates that came from propose_structure
+  // are already structurally approved by Tier 2 — skip the gate.
+  const gatedCandidates = [];
+  for (const cand of allCandidates) {
+    if (cand.source === "tier2" || cand.source === "both") {
+      gatedCandidates.push(cand);
+      continue;
+    }
+    // math-only: first validate staleness before emitting the gate
+    // request. A math candidate computed in an earlier directory pass
+    // (or in a prior invocation that restored from pending state) may
+    // reference leaves that a subsequent NEST has already moved out
+    // of the expected parent. Sending such a stale candidate to a
+    // Tier 2 sub-agent wastes a round trip and almost always comes
+    // back rejected with "these leaves are no longer siblings".
+    // Drop the candidate here and log the reason for the audit trail.
+    if (!mathCandidateIsFresh(cand)) {
+      dropStaleMathCandidate(wikiRoot, cand, opId, suggestions);
+      continue;
+    }
+    // math-only: run the gate.
+    const gateReq = cand.gate_request;
+    const gateResp = resolveTier2Response(wikiRoot, fixture, gateReq);
+    if (gateResp === "pending") {
+      enqueuePending(wikiRoot, gateReq);
+      suggestions.push({
+        operator: "NEST",
+        sources: cand.leaves.map((l) => l.path),
+        reason: `nest_decision parked (math cluster, avg_affinity=${cand.average_affinity.toFixed(3)})`,
+      });
+      continue;
+    }
+    const decision = typeof gateResp?.decision === "string" ? gateResp.decision : "undecidable";
+    if (decision === "nest") {
+      cand.gate_reason = gateResp.reason || "tier2 approved";
+      gatedCandidates.push(cand);
+    } else {
+      // keep_flat / undecidable — skip, log, continue.
+      suggestions.push({
+        operator: "NEST",
+        sources: cand.leaves.map((l) => l.path),
+        reason: `cluster rejected by nest_decision (${decision}): ${gateResp.reason || ""}`,
+      });
+      appendNestDecision(wikiRoot, {
+        op_id: opId,
+        sources: cand.leaves.map((l) => l.data.id),
+        similarity: cand.average_affinity ?? 0,
+        confidence_band: "math-gated",
+        decision: "rejected-by-gate",
+        reason: `nest_decision=${decision}: ${gateResp.reason || ""}`,
+      });
+    }
+  }
+
+  // Step 5: resolve naming. propose_structure already supplied a
+  // slug for tier2 clusters. math-only clusters need a
+  // cluster_name request.
+  const resolvedProposals = [];
+  for (const cand of gatedCandidates) {
+    if (cand.slug && validateSlug(cand.slug)) {
+      resolvedProposals.push(cand);
+      continue;
+    }
+    // Math-only path: cluster_name request.
+    if (!cand.naming_request) continue;
+    const namingResp = resolveTier2Response(wikiRoot, fixture, cand.naming_request);
+    if (namingResp === "pending") {
+      enqueuePending(wikiRoot, cand.naming_request);
+      suggestions.push({
+        operator: "NEST",
+        sources: cand.leaves.map((l) => l.path),
+        reason: `cluster_name parked (size=${cand.leaves.length})`,
+      });
+      continue;
+    }
+    if (namingResp?.decision === "reject") {
+      suggestions.push({
+        operator: "NEST",
+        sources: cand.leaves.map((l) => l.path),
+        reason: `cluster_name rejected (size=${cand.leaves.length})`,
+      });
+      appendNestDecision(wikiRoot, {
+        op_id: opId,
+        sources: cand.leaves.map((l) => l.data.id),
+        similarity: cand.average_affinity ?? 0,
+        confidence_band: cand.source === "math" ? "math-gated" : "tier2-proposed",
+        decision: "rejected-by-gate",
+        reason: "cluster_name=reject",
+      });
+      continue;
+    }
+    if (typeof namingResp?.slug === "string" && validateSlug(namingResp.slug)) {
+      // Forward purpose from the naming response if Tier 2 included
+      // one, otherwise keep whatever the candidate already had
+      // (which will be empty for math-only clusters). The applier
+      // uses this as the subcat's `focus:` line.
+      const purpose =
+        typeof namingResp.purpose === "string" && namingResp.purpose.trim()
+          ? namingResp.purpose
+          : cand.purpose || "";
+      resolvedProposals.push({ ...cand, slug: namingResp.slug, purpose });
+    }
+  }
+
+  if (resolvedProposals.length === 0) {
+    return countPendingRequests(wikiRoot) > 0 ? "pending-tier2" : "none";
+  }
+
+  // Apply proposals in confidence order. For each proposal:
+  //   1. Ensure indices are current (so the pre-metric reflects
+  //      the real routing graph, not a stale / missing one).
+  //   2. Compute pre-metric.
+  //   3. Apply nest.
+  //   4. Rebuild indices so the routing path sees the change.
+  //   5. Compute post-metric.
+  //   6. If post < pre, keep; else roll back and try the next.
+  //
+  // Priority ordering:
+  //   1. `source="both"` clusters (Tier 2 AND math agree) first.
+  //   2. `source="tier2"` clusters next.
+  //   3. `source="math"` clusters last, sorted by average_affinity.
+  const sourceRank = (s) => (s === "both" ? 2 : s === "tier2" ? 1 : 0);
+  resolvedProposals.sort((a, b) => {
+    const ra = sourceRank(a.source);
+    const rb = sourceRank(b.source);
+    if (ra !== rb) return rb - ra;
+    return (b.average_affinity ?? 0) - (a.average_affinity ?? 0);
+  });
+  // Ensure the routing graph exists before we measure the
+  // baseline. Without this, the very first iteration would see
+  // a non-existent root index.md (returns cost=0) and treat the
+  // first NEST's legitimate cost measurement as a regression.
+  // Bootstraps stub indices anywhere there are leaves but no
+  // index.md, then rebuilds the entire tree so entries[] is
+  // populated. Idempotent: subsequent calls are cheap.
+  try {
+    bootstrapStubIndicesForMetric(wikiRoot);
+    rebuildAllIndices(wikiRoot);
+  } catch {
+    /* best effort: indices may not be set up yet on a fresh wiki */
+  }
+  for (const proposal of resolvedProposals) {
+    const confBand =
+      proposal.source === "both"
+        ? "tier2-and-math"
+        : proposal.source === "tier2"
+          ? "tier2-proposed"
+          : "math-gated";
+    const preMetric = computeRoutingCost(wikiRoot).cost;
+    // Snapshot the files we're about to mutate so we can roll back
+    // on a metric regression. We ONLY need the old leaf contents
+    // and the parent dir's index.md — the NEST applier touches
+    // those and creates a new subdir.
+    const rollback = snapshotForRollback(proposal, wikiRoot);
+    let result;
+    try {
+      result = applyNest(wikiRoot, proposal, proposal.slug);
+    } catch (err) {
+      suggestions.push({
+        operator: "NEST",
+        sources: proposal.leaves.map((l) => l.path),
+        reason: `cluster apply failed: ${err.message}`,
+      });
+      appendNestDecision(wikiRoot, {
+        op_id: opId,
+        sources: proposal.leaves.map((l) => l.data.id),
+        similarity: proposal.average_affinity ?? 0,
+        confidence_band: confBand,
+        decision: "rejected-by-gate",
+        reason: `applyNest threw: ${err.message}`,
+      });
+      continue;
+    }
+    rebuildAllIndices(wikiRoot);
+    const postMetric = computeRoutingCost(wikiRoot).cost;
+    // Acceptance policy — distinguishes Tier 2 structural proposals
+    // from math-only candidates:
+    //
+    //   - Math-only candidates (`source === "math"`) need STRICT
+    //     improvement (post < pre − 1e-9). Math signals alone are a
+    //     weak proxy for whether a cluster is worth creating, so the
+    //     metric must pay for the nest.
+    //
+    //   - Tier 2 proposals (`source === "tier2"` or `"both"`) are
+    //     allowed to land on metric-NEUTRAL deltas: the cluster is a
+    //     structural judgment call the model is making about
+    //     conceptual organisation, and for hand-authored sparse-
+    //     signal corpora the `routing_cost` metric is often neutral
+    //     on such clusters because the authored activation keywords
+    //     already disambiguate the leaves at the flat level. The
+    //     metric stays as a REGRESSION safety net: Tier 2 nests are
+    //     rolled back if they make routing worse by more than the
+    //     tolerance (currently 5% relative), which prevents a model
+    //     hallucination from wrecking the wiki but allows structural
+    //     organisation to land.
+    const isMathOnly = proposal.source === "math";
+    const regressionTolerance = 0.05; // 5% relative slack for Tier 2 nests
+    const postLimit = isMathOnly
+      ? preMetric - 1e-9 // strict improvement
+      : preMetric * (1 + regressionTolerance); // bounded regression
+    if (postMetric > postLimit) {
+      // Regression beyond policy. Roll back.
+      restoreRollback(rollback, result);
+      rebuildAllIndices(wikiRoot);
+      const policyLabel = isMathOnly
+        ? "strict-improvement"
+        : `tier2-regression-tolerance<=${(regressionTolerance * 100).toFixed(0)}%`;
+      suggestions.push({
+        operator: "NEST",
+        sources: proposal.leaves.map((l) => l.path),
+        reason: `cluster rolled back: metric ${preMetric.toFixed(4)} → ${postMetric.toFixed(4)} (policy=${policyLabel})`,
+      });
+      appendNestDecision(wikiRoot, {
+        op_id: opId,
+        sources: proposal.leaves.map((l) => l.data.id),
+        similarity: proposal.average_affinity ?? 0,
+        confidence_band: confBand,
+        decision: "rejected-by-metric",
+        reason: `metric ${preMetric.toFixed(4)} → ${postMetric.toFixed(4)} exceeds ${policyLabel}`,
+      });
+      continue;
+    }
+    // Keep. Record application + commit.
+    const affinityTag = Number.isFinite(proposal.average_affinity)
+      ? `avg_affinity=${proposal.average_affinity.toFixed(3)}, `
+      : "";
+    applied.push({
+      iteration,
+      operator: "NEST",
+      sources: proposal.leaves.map((l) => l.path),
+      describe:
+        `NEST ${proposal.leaves.length} leaves into ` +
+        `${relative(wikiRoot, result.target_dir)} ` +
+        `(${affinityTag}source=${proposal.source}, ` +
+        `metric ${preMetric.toFixed(4)} → ${postMetric.toFixed(4)})`,
+      result,
+    });
+    await commitBetweenIterations({
+      iteration,
+      operator: "NEST",
+      summary: `nested ${proposal.leaves.length} leaves into ${relative(wikiRoot, result.target_dir)}`,
+    });
+    metricTrajectory.push({
+      iteration,
+      cost: postMetric,
+      event: "NEST",
+    });
+    appendNestDecision(wikiRoot, {
+      op_id: opId,
+      sources: proposal.leaves.map((l) => l.data.id),
+      similarity: proposal.average_affinity ?? 0,
+      confidence_band: confBand,
+      decision: "applied",
+      reason:
+        `slug=${proposal.slug}, ` +
+        `metric ${preMetric.toFixed(4)} → ${postMetric.toFixed(4)}`,
+    });
+    // Mark the freshly-created subdirectory so we do not
+    // recursively sub-cluster it in later iterations of the
+    // same run.
+    nestedParents.add(result.target_dir);
+    return "applied"; // one per iteration
+  }
+
+  return countPendingRequests(wikiRoot) > 0 ? "pending-tier2" : "none";
+}
+
+// Enqueue a cluster-naming request through the shared tiered
+// pending queue. The orchestrator drains the queue after the
+// phase finishes and decides whether to write a Tier 2 batch +
+// exit 7 or to proceed (when a fixture resolved everything).
+function enqueueNamingRequest(wikiRoot, request) {
+  enqueuePending(wikiRoot, request);
+}
+
+// Resolve a Tier 2 request: fixture → runtime-resolved map → "pending".
+// Returns the inner response object, or the literal string "pending"
+// when neither path carries an answer. Does NOT enqueue; callers
+// are responsible for calling `enqueuePending` on "pending".
+function resolveTier2Response(wikiRoot, fixture, request) {
+  if (fixture) {
+    const fx = resolveFromFixture(fixture, request);
+    if (fx !== null && fx !== undefined) return fx;
+  }
+  const runtime = getResolvedResponse(wikiRoot, request.request_id);
+  if (runtime !== null && runtime !== undefined) return runtime;
+  return "pending";
+}
+
+// Convert a propose_structure response into a canonical list of
+// cluster candidates. Each candidate carries:
+//
+//   operator:    "NEST"
+//   source:      "tier2"
+//   leaves:      [<leaf>, ...]
+//   slug:        "<validated kebab-case>"
+//   leaves_set:  Set<leaf-id>  (for dedup against math)
+//
+// Subcategories with invalid slugs, missing members, or fewer than
+// MIN_CLUSTER_SIZE members are dropped. Members referencing leaf
+// ids that aren't in the directory are silently filtered.
+function extractTier2Clusters(response, leaves, parentDir) {
+  void parentDir;
+  if (!response || typeof response !== "object") return [];
+  const subcats = Array.isArray(response.subcategories)
+    ? response.subcategories
+    : [];
+  const leafById = new Map();
+  for (const l of leaves) {
+    if (l.data && l.data.id) leafById.set(l.data.id, l);
+  }
+  const out = [];
+  for (const sc of subcats) {
+    if (!sc || typeof sc !== "object") continue;
+    const slug = typeof sc.slug === "string" ? sc.slug : null;
+    if (!slug || !validateSlug(slug)) continue;
+    const members = Array.isArray(sc.members) ? sc.members : [];
+    const resolved = [];
+    for (const memberId of members) {
+      const leaf = leafById.get(memberId);
+      if (leaf) resolved.push(leaf);
+    }
+    // Tier 2 clusters can have as few as MIN_TIER2_CLUSTER_SIZE (2)
+    // members. A language model that has read both frontmatters can
+    // defend a pair on conceptual grounds — "invariants + safety are
+    // the correctness substrate", "preflight + user-intent are UX
+    // at op boundaries" — even when pairwise math similarity alone
+    // would be noisy. The metric gate's 5% regression tolerance for
+    // Tier 2 proposals catches hallucinations; size-2 pairs flow
+    // through the same gate, so a genuinely bad pair still gets
+    // rolled back.
+    if (resolved.length < MIN_TIER2_CLUSTER_SIZE) continue;
+    if (resolved.length > MAX_CLUSTER_SIZE) {
+      // Oversized Tier 2 proposals get split — keep MAX members
+      // and leave the rest for a subsequent iteration. This keeps
+      // every nested subcategory in the 2..MAX_CLUSTER_SIZE band
+      // without silently dropping members.
+      resolved.length = MAX_CLUSTER_SIZE;
+    }
+    out.push({
+      operator: "NEST",
+      source: "tier2",
+      leaves: resolved,
+      slug,
+      purpose: typeof sc.purpose === "string" ? sc.purpose : "",
+      leaves_set: new Set(resolved.map((l) => l.data.id)),
+      size: resolved.length,
+    });
+  }
+  return out;
+}
+
+// Deduplicate Tier 2 + math cluster candidates by member set.
+// When Tier 2 and math propose the same cluster (set equality on
+// leaf ids), the merged candidate carries source="both" — this is
+// the strongest signal, applied first in the resolved-proposal
+// ordering. Math clusters that duplicate a Tier 2 cluster are
+// dropped (the tier2 entry already has a slug). Math clusters
+// that don't duplicate any Tier 2 cluster survive as source="math"
+// and go through the nest_decision gate.
+function mergeClusterProposals(tier2Clusters, mathClusters) {
+  const merged = [];
+  const usedMathIdx = new Set();
+  for (const tc of tier2Clusters) {
+    let matched = false;
+    for (let i = 0; i < mathClusters.length; i++) {
+      if (usedMathIdx.has(i)) continue;
+      const mc = mathClusters[i];
+      if (setsEqual(tc.leaves_set, mc.leaves_set)) {
+        merged.push({
+          ...tc,
+          source: "both",
+          average_affinity: mc.average_affinity,
+          naming_request: mc.naming_request,
+          gate_request: mc.gate_request,
+        });
+        usedMathIdx.add(i);
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) merged.push(tc);
+  }
+  for (let i = 0; i < mathClusters.length; i++) {
+    if (usedMathIdx.has(i)) continue;
+    merged.push(mathClusters[i]);
+  }
+  return merged;
+}
+
+function setsEqual(a, b) {
+  if (a.size !== b.size) return false;
+  for (const x of a) if (!b.has(x)) return false;
+  return true;
+}
+
+// Snapshot just the files that NEST is about to mutate. We store
+// the raw bytes of each source leaf + the parent index (if any)
+// so a regression rollback can restore them byte-exact. The NEST
+// applier creates a new subdirectory — rollback deletes that dir.
+function snapshotForRollback(proposal, wikiRoot) {
+  void wikiRoot;
+  const leafFiles = proposal.leaves.map((l) => ({
+    path: l.path,
+    content: readFileSync(l.path, "utf8"),
+  }));
+  const parentDir = dirname(proposal.leaves[0].path);
+  const parentIndex = join(parentDir, "index.md");
+  let parentIndexContent = null;
+  if (existsSync(parentIndex)) {
+    parentIndexContent = readFileSync(parentIndex, "utf8");
+  }
+  return { leafFiles, parentIndex, parentIndexContent };
+}
+
+function restoreRollback(rb, applyResult) {
+  // Delete the new subdirectory (with the stub + moved leaves).
+  if (applyResult && applyResult.target_dir && existsSync(applyResult.target_dir)) {
+    rmSync(applyResult.target_dir, { recursive: true, force: true });
+  }
+  // Restore the leaves at their original paths.
+  for (const lf of rb.leafFiles) {
+    mkdirSync(dirname(lf.path), { recursive: true });
+    writeFileSync(lf.path, lf.content, "utf8");
+  }
+  // Restore the parent index content, if any.
+  if (rb.parentIndex && rb.parentIndexContent !== null) {
+    writeFileSync(rb.parentIndex, rb.parentIndexContent, "utf8");
+  }
+}
+
+// ── Local stub-index bootstrapper ────────────────────────────────────
+//
+// Minimal stub creator used by the cluster-NEST path so the
+// routing-cost metric has an index.md to parse at every
+// directory that carries leaves. This is the same idea as
+// orchestrator.mjs's bootstrapIndexStubs but lives here so
+// runConvergence can call it without importing from the
+// orchestrator (which would create a dependency cycle). The
+// orchestrator's version (called after convergence) carries
+// more fields and handles hosted-mode markers; this local one
+// is only about getting a valid index file on disk.
+function bootstrapStubIndicesForMetric(wikiRoot) {
+  const dirs = walkDirs(wikiRoot);
+  for (const dir of dirs) {
+    const indexPath = join(dir, "index.md");
+    if (existsSync(indexPath)) continue;
+    const { leaves, subdirs } = listChildren(dir);
+    if (leaves.length === 0 && subdirs.length === 0) continue;
+    const isRoot = dir === wikiRoot;
+    const id = isRoot ? basename(wikiRoot) : basename(dir);
+    const stub =
+      "---\n" +
+      `id: ${id}\n` +
+      "type: index\n" +
+      (isRoot ? "depth_role: category\n" : "depth_role: subcategory\n") +
+      `focus: "subtree under ${id}"\n` +
+      "generator: skill-llm-wiki/v1\n" +
+      "---\n\n";
+    writeFileSync(indexPath, stub, "utf8");
+  }
+}
+
+// Validate that every leaf on a math candidate is still a direct
+// child of the candidate's expected parent_dir. Returns `false` if
+// any leaf has moved to a different directory, been deleted, or
+// was never resident there to begin with. Called just before a
+// math-source nest_decision gate request is emitted so stale
+// candidates don't burn a Tier 2 round trip.
+//
+// A fresh candidate (one produced in the same iteration from a
+// fresh `listChildren` scan) always passes this check; the guard
+// only catches candidates whose members drifted between the pass
+// that produced them and the pass that would have gated them.
+// Phase 5 audit-log hook for stale math-candidate drops. Called by
+// `tryClusterNestIteration` when `mathCandidateIsFresh` returns
+// false. Writes a `rejected-stale` entry into decisions.yaml
+// (confidence_band="math-gated") and pushes a parallel record onto
+// the in-memory suggestions[] list so the convergence summary
+// mentions the drop. Exported so unit tests can exercise the append
+// path without having to drive the full convergence loop.
+//
+// Error handling: the decision-log append is best-effort — the loop
+// never fails a build because of a missing audit record. The guard
+// catches any filesystem or validator error and moves on.
+export function dropStaleMathCandidate(wikiRoot, cand, opId, suggestions) {
+  if (Array.isArray(suggestions)) {
+    suggestions.push({
+      operator: "NEST",
+      sources: cand.leaves.map((l) => l.path),
+      reason: "math candidate dropped: members no longer co-resident in parent",
+    });
+  }
+  try {
+    appendNestDecision(wikiRoot, {
+      op_id: opId,
+      sources: cand.leaves.map((l) => l.data?.id ?? "anonymous"),
+      similarity: Number.isFinite(cand.average_affinity)
+        ? cand.average_affinity
+        : 0,
+      confidence_band: "math-gated",
+      decision: "rejected-stale",
+      reason: "members no longer co-resident in parent",
+    });
+  } catch {
+    /* best effort — audit log is a nice-to-have */
+  }
+}
+
+export function mathCandidateIsFresh(cand) {
+  if (!cand || !cand.parent_dir) return false;
+  if (!Array.isArray(cand.leaves) || cand.leaves.length === 0) return false;
+  const parentDir = cand.parent_dir;
+  for (const leaf of cand.leaves) {
+    if (!leaf || typeof leaf.path !== "string") return false;
+    if (!existsSync(leaf.path)) return false;
+    if (dirname(leaf.path) !== parentDir) return false;
+  }
+  return true;
 }
 
 // ── Directory walk helper ────────────────────────────────────────────

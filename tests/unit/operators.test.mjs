@@ -21,8 +21,12 @@ import {
   detectLift,
   detectMerge,
   detectNestAndDecompose,
+  dropStaleMathCandidate,
+  mathCandidateIsFresh,
   runConvergence,
 } from "../../scripts/lib/operators.mjs";
+import { countPendingRequests, takePendingRequests } from "../../scripts/lib/tiered.mjs";
+import { readDecisions } from "../../scripts/lib/decision-log.mjs";
 
 process.env.LLM_WIKI_MOCK_TIER1 = "1";
 
@@ -583,6 +587,43 @@ test("runConvergence: terminates on a clean wiki with zero iterations applied", 
   }
 });
 
+test("runConvergence: writes metric_trajectory to decisions.yaml even for 0 applications", async () => {
+  const { readDecisions } = await import("../../scripts/lib/decision-log.mjs");
+  const wiki = tmpWiki("traj-write");
+  try {
+    writeIndex(wiki, "root");
+    writeLeaf(join(wiki, "a.md"), {
+      id: "a",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "unrelated topic A",
+      covers: ["c1"],
+      parents: ["index.md"],
+    });
+    writeLeaf(join(wiki, "b.md"), {
+      id: "b",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "unrelated topic B",
+      covers: ["c2"],
+      parents: ["index.md"],
+    });
+    const r = await runConvergence(wiki, {
+      opId: "op-traj",
+      qualityMode: "tiered-fast",
+      skipClusterNest: true,
+    });
+    assert.equal(r.applied.length, 0);
+    const decisions = readDecisions(wiki);
+    const traj = decisions.filter(
+      (d) => d.operator === "METRIC_TRAJECTORY" && d.op_id === "op-traj",
+    );
+    assert.ok(traj.length >= 1, `expected metric trajectory entries, got ${traj.length}`);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("runConvergence: applies LIFT then terminates", async () => {
   const wiki = tmpWiki("converge-lift");
   try {
@@ -721,6 +762,416 @@ test("runConvergence: NEST and DECOMPOSE candidates land in suggestions, not app
     });
     assert.equal(r.applied.length, 0);
     assert.ok(r.suggestions.some((s) => s.operator === "NEST"));
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+// ── Rec 3: small-directory propose_structure skip ───────────────────
+//
+// A directory with ≤ MIN_TIER2_CLUSTER_SIZE leaves cannot produce a
+// non-trivial partition (the only partition would fold every leaf
+// into one subcategory, which is a rename not a nest). The
+// convergence loop should skip emitting a propose_structure request
+// on such directories to avoid wasted Tier 2 round trips.
+
+test("runConvergence: skips propose_structure on a 2-leaf directory", async () => {
+  const wiki = tmpWiki("converge-skip-pair");
+  try {
+    writeIndex(wiki, "root");
+    // Two leaves with clearly-disjoint focus so pairwise MERGE never
+    // fires and the loop reaches the cluster-NEST path.
+    writeLeaf(join(wiki, "alpha.md"), {
+      id: "alpha",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "zebra stripes taxonomy",
+      covers: ["stripes-a", "stripes-b"],
+      parents: ["index.md"],
+    });
+    writeLeaf(join(wiki, "bravo.md"), {
+      id: "bravo",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "compiler register allocation",
+      covers: ["graph-coloring", "spilling"],
+      parents: ["index.md"],
+    });
+    const r = await runConvergence(wiki, {
+      opId: "op-skip-pair",
+      qualityMode: "tiered-fast",
+    });
+    // No propose_structure enqueued — a 2-leaf dir is below the
+    // MIN_TIER2_CLUSTER_SIZE + 1 threshold for cluster detection.
+    const pending = takePendingRequests(wiki);
+    const proposeRequests = pending.filter((p) => p.kind === "propose_structure");
+    assert.equal(
+      proposeRequests.length,
+      0,
+      `expected 0 propose_structure requests for a 2-leaf dir, got ${proposeRequests.length}`,
+    );
+    assert.equal(countPendingRequests(wiki), 0);
+    // And the suggestions should NOT contain a "propose_structure parked" note.
+    const parked = r.suggestions.filter((s) =>
+      (s.reason || "").includes("propose_structure parked"),
+    );
+    assert.equal(parked.length, 0);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("runConvergence: emits propose_structure on a 3-leaf directory", async () => {
+  const wiki = tmpWiki("converge-emit-triple");
+  try {
+    writeIndex(wiki, "root");
+    writeLeaf(join(wiki, "alpha.md"), {
+      id: "alpha",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "zebra stripes taxonomy",
+      covers: ["stripes-a", "stripes-b"],
+      parents: ["index.md"],
+    });
+    writeLeaf(join(wiki, "bravo.md"), {
+      id: "bravo",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "compiler register allocation",
+      covers: ["graph-coloring", "spilling"],
+      parents: ["index.md"],
+    });
+    writeLeaf(join(wiki, "charlie.md"), {
+      id: "charlie",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "deep-sea hydrothermal vents",
+      covers: ["chemosynthesis", "mineral plumes"],
+      parents: ["index.md"],
+    });
+    await runConvergence(wiki, {
+      opId: "op-emit-triple",
+      qualityMode: "tiered-fast",
+    });
+    // A 3-leaf dir is at (MIN_TIER2_CLUSTER_SIZE + 1), which is the
+    // minimum that can produce a non-trivial partition — the loop
+    // should emit a propose_structure request and park it.
+    const pending = takePendingRequests(wiki);
+    const proposeRequests = pending.filter((p) => p.kind === "propose_structure");
+    assert.ok(
+      proposeRequests.length >= 1,
+      `expected ≥1 propose_structure request for a 3-leaf dir, got ${proposeRequests.length}`,
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+// ── Rec 4: stale math candidates are dropped before gating ──────────
+//
+// mathCandidateIsFresh returns false when any candidate member leaf
+// has moved, been deleted, or was never resident in the expected
+// parent. The convergence loop calls this guard before emitting a
+// math-source nest_decision gate request.
+
+test("mathCandidateIsFresh: all members co-resident → fresh", () => {
+  const wiki = tmpWiki("fresh-all-coresident");
+  try {
+    const parentDir = wiki;
+    const aPath = join(parentDir, "a.md");
+    const bPath = join(parentDir, "b.md");
+    writeLeaf(aPath, { id: "a", type: "primary", depth_role: "leaf", focus: "A", parents: ["index.md"] });
+    writeLeaf(bPath, { id: "b", type: "primary", depth_role: "leaf", focus: "B", parents: ["index.md"] });
+    const cand = {
+      parent_dir: parentDir,
+      source: "math",
+      leaves: [
+        { path: aPath, data: { id: "a" } },
+        { path: bPath, data: { id: "b" } },
+      ],
+      average_affinity: 0.5,
+    };
+    assert.equal(mathCandidateIsFresh(cand), true);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("mathCandidateIsFresh: member moved to a sibling dir → stale", () => {
+  const wiki = tmpWiki("fresh-moved");
+  try {
+    const parentDir = wiki;
+    const siblingDir = join(wiki, "other");
+    mkdirSync(siblingDir, { recursive: true });
+    const aPath = join(parentDir, "a.md");
+    const bPath = join(siblingDir, "b.md"); // b lives elsewhere
+    writeLeaf(aPath, { id: "a", type: "primary", depth_role: "leaf", focus: "A", parents: ["index.md"] });
+    writeLeaf(bPath, { id: "b", type: "primary", depth_role: "leaf", focus: "B", parents: ["../index.md"] });
+    const cand = {
+      parent_dir: parentDir,
+      source: "math",
+      // The math detector captured b when it still lived in parentDir;
+      // the stale candidate's leaves[].path points at the NEW location
+      // (as would happen if the object was refreshed between passes).
+      leaves: [
+        { path: aPath, data: { id: "a" } },
+        { path: bPath, data: { id: "b" } },
+      ],
+      average_affinity: 0.5,
+    };
+    assert.equal(mathCandidateIsFresh(cand), false);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("mathCandidateIsFresh: member deleted → stale", () => {
+  const wiki = tmpWiki("fresh-deleted");
+  try {
+    const parentDir = wiki;
+    const aPath = join(parentDir, "a.md");
+    const ghostPath = join(parentDir, "ghost.md");
+    writeLeaf(aPath, { id: "a", type: "primary", depth_role: "leaf", focus: "A", parents: ["index.md"] });
+    // ghost.md is NOT written to disk — simulates a member deleted
+    // between the math detection pass and the gate-emission pass.
+    const cand = {
+      parent_dir: parentDir,
+      source: "math",
+      leaves: [
+        { path: aPath, data: { id: "a" } },
+        { path: ghostPath, data: { id: "ghost" } },
+      ],
+      average_affinity: 0.5,
+    };
+    assert.equal(mathCandidateIsFresh(cand), false);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("mathCandidateIsFresh: empty or missing inputs → stale", () => {
+  assert.equal(mathCandidateIsFresh(null), false);
+  assert.equal(mathCandidateIsFresh({}), false);
+  assert.equal(mathCandidateIsFresh({ parent_dir: "/tmp/x", leaves: [] }), false);
+  assert.equal(
+    mathCandidateIsFresh({ parent_dir: "/tmp/x", leaves: [{ data: { id: "a" } }] }),
+    false,
+  );
+});
+
+// ── Rec 1: stale-candidate drops leave a decision-log entry ─────────
+//
+// The Phase 5 audit-log hook writes a `rejected-stale` entry to
+// decisions.yaml for every math candidate dropped by the
+// `mathCandidateIsFresh` guard. Without this entry operators who
+// ask "why didn't that cluster land?" have no breadcrumb — the
+// only signal is the absence of a `nest_decision` request that was
+// never sent. The unit test asserts the append happens and carries
+// the expected fields.
+
+test("dropStaleMathCandidate: writes a rejected-stale entry to decisions.yaml", () => {
+  const wiki = tmpWiki("stale-audit");
+  try {
+    const aPath = join(wiki, "a.md");
+    const bPath = join(wiki, "b.md");
+    writeLeaf(aPath, {
+      id: "a",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "A",
+      parents: ["index.md"],
+    });
+    writeLeaf(bPath, {
+      id: "b",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "B",
+      parents: ["index.md"],
+    });
+    const cand = {
+      parent_dir: wiki,
+      source: "math",
+      leaves: [
+        { path: aPath, data: { id: "a" } },
+        { path: bPath, data: { id: "b" } },
+      ],
+      average_affinity: 0.42,
+    };
+    const suggestions = [];
+    dropStaleMathCandidate(wiki, cand, "op-stale-test", suggestions);
+
+    // suggestion mirrors the append reason
+    assert.equal(suggestions.length, 1);
+    assert.match(
+      suggestions[0].reason,
+      /members no longer co-resident in parent/,
+    );
+
+    // decisions.yaml carries the audit entry
+    const decisions = readDecisions(wiki);
+    const stale = decisions.filter(
+      (d) => d.decision === "rejected-stale",
+    );
+    assert.equal(
+      stale.length,
+      1,
+      `expected exactly one rejected-stale entry, found ${stale.length}`,
+    );
+    const entry = stale[0];
+    assert.equal(entry.op_id, "op-stale-test");
+    assert.equal(entry.operator, "NEST");
+    assert.equal(entry.confidence_band, "math-gated");
+    assert.equal(entry.similarity, 0.42);
+    assert.deepEqual(entry.sources, ["a", "b"]);
+    assert.match(entry.reason, /members no longer co-resident/);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+// ── Rec 3: batch propose_structure across ALL directories ──────────
+//
+// The convergence iteration walks every directory in a single pass
+// and enqueues a propose_structure request for each eligible one,
+// instead of stopping at the first unresolved dir. The unit test
+// below builds a 3-dir synthetic tree (root + 2 subdirs, each with
+// 3 unrelated leaves) and asserts that one `runConvergence` call
+// parks propose_structure requests for EVERY dir on the pending
+// queue — not just the first one.
+
+test("runConvergence: batches propose_structure across every directory in one pass", async () => {
+  const wiki = tmpWiki("batch-propose");
+  try {
+    writeIndex(wiki, "root");
+    // Dir 1 — root: three unrelated leaves so cluster detection
+    // produces no math candidates (each tag/focus is disjoint).
+    writeLeaf(join(wiki, "root-a.md"), {
+      id: "root-a",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "zebra stripes taxonomy",
+      covers: ["stripes-alpha", "stripes-beta"],
+      parents: ["index.md"],
+    });
+    writeLeaf(join(wiki, "root-b.md"), {
+      id: "root-b",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "compiler register allocation",
+      covers: ["graph-coloring", "spilling"],
+      parents: ["index.md"],
+    });
+    writeLeaf(join(wiki, "root-c.md"), {
+      id: "root-c",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "deep-sea hydrothermal vents",
+      covers: ["chemosynthesis", "mineral-plumes"],
+      parents: ["index.md"],
+    });
+    // Dir 2 — subcat-alpha: three unrelated leaves.
+    const dirAlpha = join(wiki, "subcat-alpha");
+    mkdirSync(dirAlpha, { recursive: true });
+    writeIndex(dirAlpha, "subcat-alpha");
+    writeLeaf(join(dirAlpha, "alpha-x.md"), {
+      id: "alpha-x",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "fourier series orthogonality",
+      covers: ["sine-bases", "cosine-bases"],
+      parents: ["../index.md"],
+    });
+    writeLeaf(join(dirAlpha, "alpha-y.md"), {
+      id: "alpha-y",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "beekeeping hive inspection",
+      covers: ["queen-check", "brood-pattern"],
+      parents: ["../index.md"],
+    });
+    writeLeaf(join(dirAlpha, "alpha-z.md"), {
+      id: "alpha-z",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "victorian railway gauges",
+      covers: ["narrow-gauge", "broad-gauge"],
+      parents: ["../index.md"],
+    });
+    // Dir 3 — subcat-bravo: three unrelated leaves.
+    const dirBravo = join(wiki, "subcat-bravo");
+    mkdirSync(dirBravo, { recursive: true });
+    writeIndex(dirBravo, "subcat-bravo");
+    writeLeaf(join(dirBravo, "bravo-x.md"), {
+      id: "bravo-x",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "mediaeval illuminated manuscripts",
+      covers: ["gold-leaf", "gesso-priming"],
+      parents: ["../index.md"],
+    });
+    writeLeaf(join(dirBravo, "bravo-y.md"), {
+      id: "bravo-y",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "pigeon racing pedigree",
+      covers: ["loft-design", "feed-mixing"],
+      parents: ["../index.md"],
+    });
+    writeLeaf(join(dirBravo, "bravo-z.md"), {
+      id: "bravo-z",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "kendo bamboo shinai maintenance",
+      covers: ["tsuba-care", "tsuka-wrap"],
+      parents: ["../index.md"],
+    });
+
+    await runConvergence(wiki, {
+      opId: "op-batch",
+      qualityMode: "tiered-fast",
+    });
+
+    const pending = takePendingRequests(wiki);
+    const proposeRequests = pending.filter(
+      (r) => r.kind === "propose_structure",
+    );
+    // Every eligible directory should have parked its own
+    // propose_structure request in a single walk: root + 2 subcats.
+    assert.equal(
+      proposeRequests.length,
+      3,
+      `expected 3 propose_structure requests (one per dir), got ${proposeRequests.length}: ` +
+        proposeRequests.map((r) => r.request_id).join(", "),
+    );
+    // Distinct request_ids prove the batch spans three different
+    // directories (a single parked dir would emit exactly one).
+    const uniqueIds = new Set(proposeRequests.map((r) => r.request_id));
+    assert.equal(
+      uniqueIds.size,
+      3,
+      "every propose_structure request must have a distinct request_id",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("dropStaleMathCandidate: missing average_affinity coerces similarity to 0", () => {
+  const wiki = tmpWiki("stale-audit-noaff");
+  try {
+    const cand = {
+      parent_dir: wiki,
+      source: "math",
+      leaves: [
+        { path: join(wiki, "x.md"), data: { id: "x" } },
+      ],
+      // no average_affinity
+    };
+    dropStaleMathCandidate(wiki, cand, "op-noaff", null);
+    const decisions = readDecisions(wiki);
+    const stale = decisions.filter((d) => d.decision === "rejected-stale");
+    assert.equal(stale.length, 1);
+    assert.equal(stale[0].similarity, 0);
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }

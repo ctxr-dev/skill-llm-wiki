@@ -33,7 +33,11 @@ function runCli(args, cwd) {
   return spawnSync("node", [CLI, ...args], {
     cwd,
     encoding: "utf8",
-    env: { ...process.env, LLM_WIKI_NO_PROMPT: "1" },
+    env: {
+      ...process.env,
+      LLM_WIKI_NO_PROMPT: "1",
+      LLM_WIKI_SKIP_CLUSTER_NEST: "1",
+    },
   });
 }
 

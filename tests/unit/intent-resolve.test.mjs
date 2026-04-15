@@ -286,6 +286,118 @@ test("INT-03: build on an existing managed sibling wiki", () => {
   }
 });
 
+test("INT-03 resume: pending Tier 2 batch lets build through", () => {
+  // Resume escape hatch: a wiki with a pending-*.json under
+  // .work/tier2 is in the middle of an exit-7 handshake. Building
+  // again with the same source must NOT trip INT-03 — the
+  // orchestrator's idempotent ingest will then take over.
+  const parent = freshDir("int03-resume-pending");
+  try {
+    const src = join(parent, "docs");
+    mkdirSync(src);
+    const sibling = join(parent, "docs.wiki");
+    mkdirSync(sibling);
+    plantManagedWiki(sibling);
+    // Plant a fake pending Tier 2 batch.
+    const tier2Dir = join(sibling, ".work", "tier2");
+    mkdirSync(tier2Dir, { recursive: true });
+    writeFileSync(
+      join(tier2Dir, "pending-deadbeef.json"),
+      JSON.stringify({ batch_id: "deadbeef", requests: [] }),
+      "utf8",
+    );
+    const r = resolveIntent({
+      subcommand: "build",
+      args: [src],
+      flags: {},
+      cwd: parent,
+    });
+    assert.equal(
+      r.status,
+      "ok",
+      `resume must short-circuit INT-03, got: ${JSON.stringify(r.error)}`,
+    );
+    assert.equal(r.plan.operation, "build");
+    assert.equal(r.plan.target, sibling);
+    // is_new_wiki must reflect the pre-existing managed state so the
+    // CLI doesn't try to re-create the wiki dir.
+    assert.equal(r.plan.is_new_wiki, false);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("INT-03 resume: build-* workdir without finalised op-log lets build through", () => {
+  // Second resume signal: a `.work/build-*` workdir whose op-id
+  // never appeared in op-log.yaml means the prior build crashed
+  // before commit-finalize. Allow the resume.
+  const parent = freshDir("int03-resume-workdir");
+  try {
+    const src = join(parent, "docs");
+    mkdirSync(src);
+    const sibling = join(parent, "docs.wiki");
+    mkdirSync(sibling);
+    plantManagedWiki(sibling);
+    const workdir = join(sibling, ".work", "build-20250101-000000-abc");
+    mkdirSync(workdir, { recursive: true });
+    writeFileSync(
+      join(workdir, "candidates.json"),
+      JSON.stringify({ candidates: [], indexSources: [] }),
+      "utf8",
+    );
+    // op-log.yaml does NOT mention this op-id.
+    const r = resolveIntent({
+      subcommand: "build",
+      args: [src],
+      flags: {},
+      cwd: parent,
+    });
+    assert.equal(r.status, "ok", "crashed-build resume must short-circuit INT-03");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("INT-03 resume: a finalised build still trips INT-03", () => {
+  // Counter-test: a wiki whose op-log contains the build op-id is
+  // finalised and must NOT be silently re-built. INT-03 still fires.
+  const parent = freshDir("int03-resume-final");
+  try {
+    const src = join(parent, "docs");
+    mkdirSync(src);
+    const sibling = join(parent, "docs.wiki");
+    mkdirSync(sibling);
+    plantManagedWiki(sibling);
+    const opId = "build-20250101-000000-final";
+    const workdir = join(sibling, ".work", opId);
+    mkdirSync(workdir, { recursive: true });
+    writeFileSync(
+      join(workdir, "candidates.json"),
+      JSON.stringify({ candidates: [], indexSources: [] }),
+      "utf8",
+    );
+    // Plant an op-log entry that mentions the op-id. The YAML
+    // emitter writes hyphenated op-ids unquoted, which is what
+    // history.mjs:emitEntry produces in production.
+    mkdirSync(join(sibling, ".llmwiki"), { recursive: true });
+    writeFileSync(
+      join(sibling, ".llmwiki", "op-log.yaml"),
+      `# op-log\n- op_id: ${opId}\n  operation: build\n  layout_mode: sibling\n`,
+      "utf8",
+    );
+    const r = resolveIntent({
+      subcommand: "build",
+      args: [src],
+      flags: {},
+      cwd: parent,
+    });
+    assert.equal(r.status, "ambiguous");
+    assert.equal(r.error.code, "INT-03");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("happy path: sibling build to default target", () => {
   const parent = freshDir("happy-sibling");
   try {

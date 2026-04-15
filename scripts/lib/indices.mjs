@@ -9,7 +9,7 @@
 // authored fields, aggregating children's frontmatter to recompute derived
 // fields, rendering a deterministic body, writing back atomically.
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
 import { WIKI_GENERATOR_MARKER } from "./paths.mjs";
@@ -19,15 +19,6 @@ const AUTO_BEGIN = "<!-- BEGIN AUTO-GENERATED NAVIGATION -->";
 const AUTO_END = "<!-- END AUTO-GENERATED NAVIGATION -->";
 const AUTHORED_BEGIN = "<!-- BEGIN AUTHORED ORIENTATION -->";
 const AUTHORED_END = "<!-- END AUTHORED ORIENTATION -->";
-
-// Fields that are auto-derived on every rebuild (overwritten).
-const DERIVED_FIELDS = [
-  "entries",
-  "children",
-  "depth",
-  // shared_covers is auto-computed but may be hand-augmented; we union
-  // computed + authored when present in the existing file.
-];
 
 // Fields the user or init routine authored that must survive rebuilds.
 const AUTHORED_FIELDS = [
@@ -110,7 +101,29 @@ export function listChildren(dirPath) {
 // avoid reading every leaf's frontmatter twice per rebuild (once during
 // the walk that discovers directories, once during per-directory index
 // regeneration). At 10k leaves the savings are meaningful.
-export function rebuildIndex(dirPath, wikiRoot, preloadedChildren = null) {
+//
+// `options.indexInput`, when provided, carries the AUTHORED-index
+// hints (shared_covers / orientation / focus) that the ingest phase
+// recovered from a source file named `index.md` or carrying
+// `type: index`. Those fields are forwarded into the synthesised
+// target index verbatim — they take priority over the heuristic
+// fallbacks, so a hand-tuned guide's routing metadata survives a
+// rebuild cleanly.
+//
+// NOTE on `activation_defaults`: this field is no longer
+// auto-aggregated upward from members (that was the old literal-
+// routing substrate). The field is still recognised in
+// AUTHORED_FIELDS so a hand-authored source index that carries an
+// `activation_defaults` block round-trips without data loss, but
+// the rebuild pass does NOT synthesise one from child signals.
+// Routing is semantic — see SKILL.md "Routing into guide.wiki/".
+export function rebuildIndex(
+  dirPath,
+  wikiRoot,
+  preloadedChildren = null,
+  options = {},
+) {
+  const { indexInput = null } = options;
   const p = join(dirPath, "index.md");
   const existing = existsSync(p) ? parseFrontmatter(readFileSync(p, "utf8"), p) : null;
   const { leaves, subdirs } = preloadedChildren ?? listChildren(dirPath);
@@ -118,11 +131,41 @@ export function rebuildIndex(dirPath, wikiRoot, preloadedChildren = null) {
   const depth = computeDepth(dirPath, wikiRoot);
   const isRoot = dirPath === wikiRoot;
 
-  // Start with existing authored fields.
+  // Start with existing authored fields (survive rebuild).
   const data = {};
   if (existing?.data) {
     for (const k of AUTHORED_FIELDS) {
       if (existing.data[k] !== undefined) data[k] = existing.data[k];
+    }
+  }
+
+  // Forward hints from an authored source `index.md` (if the build
+  // pipeline stashed one for this directory). These take priority
+  // over any stub values planted by `bootstrapIndexStubs`, EXCEPT
+  // for identity fields whose correct value is structurally
+  // determined by the target-tree position (`id`, `type`,
+  // `depth_role`, `depth`, `parents`). Those get re-derived below.
+  const authoredIndex = indexInput?.authored_frontmatter || null;
+  const structuralFields = new Set([
+    "id",
+    "type",
+    "depth_role",
+    "depth",
+    "parents",
+    "generator",
+    "mode",
+    "layout_contract_path",
+    // Rebuild-status fields are managed by the orchestrator / rebuild
+    // path. Forwarding them from a source index would leak absolute
+    // paths into the target and defeat build determinism.
+    "rebuild_needed",
+    "rebuild_reasons",
+    "rebuild_command",
+  ]);
+  if (authoredIndex) {
+    for (const k of AUTHORED_FIELDS) {
+      if (structuralFields.has(k)) continue;
+      if (authoredIndex[k] !== undefined) data[k] = authoredIndex[k];
     }
   }
 
@@ -149,11 +192,17 @@ export function rebuildIndex(dirPath, wikiRoot, preloadedChildren = null) {
 
   // Derived: entries (aggregate child frontmatter).
   //
-  // Router-relevant fields are lifted from each child into its entries[]
-  // record so a single `Read <dir>/index.md` gives the router enough info
-  // to compute activations without having to peek at every leaf's own
-  // frontmatter. This is what makes routing cheap: one index read per
-  // level, no per-leaf probes.
+  // Each entry carries the minimum a semantic router needs to decide
+  // whether to descend into or load the child: `id`, `file`, `type`,
+  // `focus`, and any authored `tags`. Claude reads the parent's
+  // `entries[]`, matches on `focus` (and the parent's authored
+  // `shared_covers`), and loads only the matches. It does NOT match
+  // on literal keyword/tag lists lifted from the child — that was
+  // the old deterministic-router substrate and is gone. Per-leaf
+  // `activation` blocks are still preserved IN the leaf file as
+  // optional semantic hints the router may consult AFTER opening
+  // the leaf; they are not copied up into the parent entries[]
+  // record.
   const entries = [];
   for (const leaf of leaves) {
     const record = {
@@ -162,7 +211,6 @@ export function rebuildIndex(dirPath, wikiRoot, preloadedChildren = null) {
       type: leaf.data.type ?? "primary",
       focus: leaf.data.focus ?? "",
     };
-    if (leaf.data.activation) record.activation = leaf.data.activation;
     if (leaf.data.tags) record.tags = leaf.data.tags;
     if (leaf.data.overlay_targets) record.overlay_targets = leaf.data.overlay_targets;
     entries.push(record);
@@ -176,22 +224,37 @@ export function rebuildIndex(dirPath, wikiRoot, preloadedChildren = null) {
       type: "index",
       focus: subIndex.data.focus ?? "",
     };
-    if (subIndex.data.activation_defaults) {
-      record.activation_defaults = subIndex.data.activation_defaults;
-    }
     if (subIndex.data.tags) record.tags = subIndex.data.tags;
     entries.push(record);
   }
   data.entries = entries;
 
+  // Semantic-routing substrate: `activation_defaults` is NOT
+  // auto-aggregated anymore. Claude decides descent from `focus`
+  // and `shared_covers` semantically. If the user hand-authored an
+  // `activation_defaults` block (forwarded via AUTHORED_FIELDS or
+  // via indexInput), it survives here as a free-form authored hint
+  // but we no longer synthesise or merge one from child signals.
+  // See the doc comment on `rebuildIndex` above.
+
   // Derived: children (subdirectory index pointers)
   data.children = subdirs.map((s) => relative(dirPath, join(s, "index.md")));
 
   // Derived: shared_covers — intersection of leaf covers when present.
-  // (Subcategory intersections are handled when their own indices rebuild.)
+  // Also unioned with any authored shared_covers the user put in the
+  // existing index.md AND any shared_covers forwarded from an
+  // authored source index input. (Subcategory intersections are
+  // handled when their own indices rebuild.)
   const computedShared = intersectCovers(leaves.map((l) => l.data.covers ?? []));
   const authoredShared = existing?.data?.shared_covers ?? [];
-  data.shared_covers = uniqueJoin(computedShared, authoredShared);
+  const sourceShared =
+    authoredIndex && Array.isArray(authoredIndex.shared_covers)
+      ? authoredIndex.shared_covers
+      : [];
+  data.shared_covers = uniqueJoin(
+    uniqueJoin(computedShared, authoredShared),
+    sourceShared,
+  );
 
   // Root gets the rebuild-surfacing fields and the generator marker.
   // The marker is what the hook uses to positively identify this folder
@@ -214,14 +277,30 @@ export function rebuildIndex(dirPath, wikiRoot, preloadedChildren = null) {
     data.generator = WIKI_GENERATOR_MARKER;
   }
 
+  // Pull an authored orientation block out of the source index body,
+  // if one was forwarded. The source may carry either literal
+  // `<!-- BEGIN AUTHORED ORIENTATION -->` markers (e.g. when re-
+  // building an already-built wiki) or a plain prose preface. We
+  // only lift the marker-delimited block here — the plain-prose case
+  // is covered by the `orientation:` YAML field, which we already
+  // forwarded into `data` via AUTHORED_FIELDS.
+  let sourceAuthoredOrientation = null;
+  if (indexInput?.body) {
+    sourceAuthoredOrientation = extractAuthoredBlock(indexInput.body);
+  }
+
   // Deterministic key order
   const ordered = orderKeys(data, isRoot);
-  const body = renderBody(ordered, leaves, subdirs, existing);
+  const body = renderBody(
+    ordered,
+    existing,
+    sourceAuthoredOrientation,
+  );
   atomicWriteFile(p, renderFrontmatter(ordered, body));
   return { path: p, entries: entries.length, children: subdirs.length };
 }
 
-export function rebuildAllIndices(wikiRoot) {
+export function rebuildAllIndices(wikiRoot, options = {}) {
   // Rebuild bottom-up so parent `shared_covers[]` computations see fresh
   // child frontmatter. The wiki root is ALWAYS included even when it
   // has no leaves of its own, so `isWikiRoot` can find the generator
@@ -232,6 +311,15 @@ export function rebuildAllIndices(wikiRoot) {
   // read exactly once per rebuild. The naive implementation walked twice
   // (once to collect directories, once during per-directory aggregation),
   // which doubled I/O for no reason.
+  //
+  // `options.indexInputs`: optional map { dirRelPath → authoredIndex }
+  // produced by the orchestrator's ingest phase when the source tree
+  // carried authored `index.md` files. Each entry forwards its
+  // frontmatter (orientation / shared_covers / activation_defaults /
+  // focus / tags / domains …) into the corresponding target index.
+  // Keys are POSIX-normalised relative paths from the wiki root
+  // (`""` for the root, `"operations"` for `operations/index.md`).
+  const { indexInputs = {} } = options;
   const cache = new Map(); // dirPath → { leaves, subdirs }
   const rootChildren = listChildren(wikiRoot);
   cache.set(wikiRoot, rootChildren);
@@ -241,7 +329,11 @@ export function rebuildAllIndices(wikiRoot) {
   dirs.sort((a, b) => depthOf(b, wikiRoot) - depthOf(a, wikiRoot));
   const out = [];
   for (const d of dirs) {
-    out.push(rebuildIndex(d, wikiRoot, cache.get(d) ?? null));
+    const rel = d === wikiRoot ? "" : relative(wikiRoot, d).split("\\").join("/");
+    const indexInput = indexInputs[rel] || null;
+    out.push(
+      rebuildIndex(d, wikiRoot, cache.get(d) ?? null, { indexInput }),
+    );
   }
   return out;
 }
@@ -282,7 +374,6 @@ function computeDepth(dirPath, wikiRoot) {
 function intersectCovers(lists) {
   if (lists.length === 0) return [];
   if (lists.length === 1) return [];
-  const first = new Set(lists[0]);
   const out = [];
   for (const item of lists[0]) {
     if (lists.every((l) => l.includes(item))) out.push(item);
@@ -343,7 +434,7 @@ function orderKeys(data, isRoot) {
   return out;
 }
 
-function renderBody(data, leaves, subdirs, existing) {
+function renderBody(data, existing, sourceAuthoredOrientation) {
   const lines = [];
   lines.push("");
   lines.push(AUTO_BEGIN);
@@ -377,11 +468,17 @@ function renderBody(data, leaves, subdirs, existing) {
   lines.push(AUTO_END);
   lines.push("");
 
-  // Preserve authored orientation block if present in existing body.
+  // Preserve authored orientation block. Priority:
+  //   1. existing target index.md body (`<!-- BEGIN AUTHORED ORIENTATION -->`)
+  //   2. authored source index body block (forwarded via indexInput)
+  //   3. YAML `orientation:` field from the rebuilt frontmatter
   const authored = extractAuthoredBlock(existing?.body ?? "");
+  const sourceAuthored = sourceAuthoredOrientation || null;
   lines.push(AUTHORED_BEGIN);
   if (authored) {
     lines.push(authored);
+  } else if (sourceAuthored) {
+    lines.push(sourceAuthored);
   } else if (data.orientation) {
     lines.push(data.orientation);
   }

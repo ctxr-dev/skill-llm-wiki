@@ -55,10 +55,14 @@ test("ingest walks a source and produces candidates", () => {
       join(src, "README.md"),
       "# Project\n\nTop-level docs.\n",
     );
-    const candidates = ingestSource(src);
+    const { leaves: candidates } = ingestSource(src);
     assert.equal(candidates.length, 2);
-    const linux = candidates.find((c) => c.id === "installation-linux");
-    assert.ok(linux, "expected an installation-linux candidate");
+    // ids are derived from the plain filename, not the flattened
+    // directory slug, so the validator's ID-MISMATCH-FILE check can
+    // pass when the orchestrator writes the leaf at its original
+    // file position (`installation/linux.md`).
+    const linux = candidates.find((c) => c.id === "linux");
+    assert.ok(linux, "expected a linux candidate");
     assert.equal(linux.title, "Linux");
     assert.ok(linux.headings.some((h) => h.text === "Prerequisites"));
     assert.ok(linux.hash.startsWith("sha256:"));

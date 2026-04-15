@@ -43,7 +43,7 @@ import {
 } from "./git.mjs";
 import { preOpSnapshot } from "./snapshot.mjs";
 import { appendOpLog } from "./history.mjs";
-import { renderFrontmatter } from "./frontmatter.mjs";
+import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
 import {
   provenancePath,
   recordSource,
@@ -52,6 +52,17 @@ import {
 import { rmSync } from "node:fs";
 import { runConvergence } from "./operators.mjs";
 import { runReviewCycle } from "../commands/review.mjs";
+import {
+  deriveBatchId,
+  listBatches,
+  readAllResponses,
+  writePending,
+} from "./tier2-protocol.mjs";
+import {
+  clearTier2Responses,
+  seedTier2Responses,
+  takePendingRequests,
+} from "./tiered.mjs";
 
 // Public entry. `plan` comes from intent.mjs and carries
 // { operation, layout_mode, source, target, is_new_wiki, flags }.
@@ -71,6 +82,13 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
   const phases = [];
   const record = (name, summary) => phases.push({ name, summary });
 
+  // Map of authored index hints keyed by POSIX-relative directory
+  // path from the wiki root. Populated in the ingest phase for Build
+  // and consumed by rebuildAllIndices in the index-generation phase,
+  // so fields like shared_covers / orientation / activation_defaults
+  // survive from the source `index.md` into the synthesised target.
+  const indexInputs = {};
+
   // Phase 1 — pre-op snapshot (always, even on empty wikis).
   const snap = preOpSnapshot(wikiRoot, opId);
   record("snapshot", `tag ${snap.tag} sha=${(snap.sha ?? "n/a").slice(0, 12)}`);
@@ -87,10 +105,10 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
       if (!sourcePath) {
         throw new Error("build requires a resolved source path");
       }
-      const candidates = ingestSource(sourcePath);
+      const { leaves: candidates, indexSources } = ingestSource(sourcePath);
       writeFileSync(
         join(workDir, "candidates.json"),
-        JSON.stringify({ candidates }, null, 2),
+        JSON.stringify({ candidates, indexSources }, null, 2),
         "utf8",
       );
       // Start the provenance manifest. `pre_commit` pins source sizes
@@ -109,29 +127,112 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
       record("ingest", `${candidates.length} candidate(s) from ${sourcePath}`);
 
       // Draft-frontmatter + layout. For each candidate, compute its
-      // category path and write a fresh leaf .md file. Build is the
-      // "no authored content yet" case, so unconditional writes are
-      // safe. If a leaf file already exists at the target path we
-      // refuse: the user asked for a fresh build into a wiki that
-      // already carries prior content, which should not happen on a
-      // clean sibling build — and the extend path is disabled until
-      // Phase 4 merges frontmatter properly.
+      // category path and write a fresh leaf .md file.
+      //
+      // Resume-safe (idempotent) ingest: a build that exited 7 mid-way
+      // already wrote leaves — and operator-convergence may have moved
+      // them under subdirectories. Re-running the loop blindly would
+      // either overwrite authored frontmatter at the original path or
+      // duplicate the leaf at root. Instead we:
+      //
+      //   1. Walk the wiki once and build a map keyed by the
+      //      `source.path` field carried in each existing leaf's
+      //      frontmatter → `{ absLeafPath, hash, dataKeys }`.
+      //   2. For each candidate:
+      //        a. If the source path is in the map AND the recorded
+      //           hash matches the freshly-ingested hash, SKIP the
+      //           write (the existing leaf is already correct, and any
+      //           frontmatter authored by convergence is preserved).
+      //        b. If the source path is in the map but the hash
+      //           differs, REWRITE in place at the existing location
+      //           (the source has changed and a re-draft is correct).
+      //        c. If the source path is NOT in the map, write a fresh
+      //           leaf at the computed category path. Initial-build
+      //           runs hit this branch for every candidate.
+      //
+      // The first build still writes everything; resume runs skip the
+      // unchanged majority and never touch leaves moved by convergence.
+      const existingLeavesBySource = collectExistingLeavesBySource(wikiRoot);
       let wrote = 0;
+      let skipped = 0;
+      let updated = 0;
       for (const candidate of candidates) {
+        const existing = existingLeavesBySource.get(candidate.source_path);
+        if (existing) {
+          if (existing.hash === candidate.hash) {
+            // Byte-identical source → no-op. Provenance is still re-
+            // recorded so the manifest reflects this op-id's view of
+            // the world (startCorpus cleared the file at the top of
+            // this phase).
+            recordSource(wikiRoot, existing.targetRel, {
+              source_path: candidate.source_path,
+              source_pre_hash: candidate.hash,
+              source_size: candidate.size,
+              byte_range: [0, candidate.size],
+              disposition: "preserved",
+            });
+            skipped++;
+            continue;
+          }
+          // Hash mismatch: re-draft at the existing location so any
+          // post-convergence reshape is preserved.
+          const draft = draftLeafFrontmatter(candidate, {
+            categoryPath: existing.relCategory,
+          });
+          const body =
+            typeof candidate.body === "string"
+              ? candidate.body
+              : readFileSync(candidate.absolute_path, "utf8");
+          const rendered = renderFrontmatter(draft.data) + "\n" + body;
+          writeFileSync(existing.absLeafPath, rendered, "utf8");
+          recordSource(wikiRoot, existing.targetRel, {
+            source_path: candidate.source_path,
+            source_pre_hash: candidate.hash,
+            source_size: candidate.size,
+            byte_range: [0, candidate.size],
+            disposition: "preserved",
+          });
+          updated++;
+          continue;
+        }
+        // Fresh leaf: compute the draft category and write at
+        // <wiki>/<category>/<basename>.md.
         const category = draftCategory(candidate);
         const draft = draftLeafFrontmatter(candidate, {
           categoryPath: category,
         });
-        const categoryDir = join(wikiRoot, category);
+        const categoryDir = category ? join(wikiRoot, category) : wikiRoot;
         mkdirSync(categoryDir, { recursive: true });
-        const leafPath = join(categoryDir, `${candidate.id}.md`);
+        // Leaf filename on disk = final path segment of the SOURCE
+        // (e.g. `operations/build.md` → `build.md`). The candidate
+        // `id` stays globally unique for routing — see
+        // `scripts/lib/ingest.mjs::deriveId` — but the awkward flat-
+        // slug filename (`operations-build.md`) is a routing
+        // distraction, so we store the plain name on disk.
+        const sourceSegments = candidate.source_path.split(/[\/\\]/).filter(Boolean);
+        const leafFilename = sourceSegments[sourceSegments.length - 1] || `${candidate.id}.md`;
+        const leafPath = join(categoryDir, leafFilename);
         if (existsSync(leafPath)) {
+          // A leaf already lives at this path but it does not carry a
+          // matching `source.path`. This is the "stale collision"
+          // case: a previous candidate wrote to the same filename
+          // from a different source. Refuse loudly — the collision
+          // means the source layout changed in a way the orchestrator
+          // cannot reconcile without operator help.
           throw new Error(
-            `build: refusing to overwrite existing leaf ${leafPath} — ` +
-              "use `rebuild` or Phase 4's `extend` (not yet shipped) instead",
+            `build: leaf ${leafPath} exists but its frontmatter does ` +
+              `not reference ${candidate.source_path} — refusing to ` +
+              "clobber. Run `rebuild` to reconcile.",
           );
         }
-        const body = readFileSync(candidate.absolute_path, "utf8");
+        // `candidate.body` carries the source content WITH its
+        // frontmatter fence already stripped by ingest.mjs (via
+        // gray-matter). Prefer it over re-reading the file so we do
+        // not double-stack fences in the leaf output.
+        const body =
+          typeof candidate.body === "string"
+            ? candidate.body
+            : readFileSync(candidate.absolute_path, "utf8");
         const rendered = renderFrontmatter(draft.data) + "\n" + body;
         writeFileSync(leafPath, rendered, "utf8");
         // Record the whole source file as preserved into this leaf —
@@ -139,7 +240,9 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
         // any portion, so the byte range is [0, size] and disposition
         // is `preserved`. Phase 6 operators will record split / merged
         // / transformed dispositions when they start reshaping entries.
-        const targetRel = `${category}/${candidate.id}.md`;
+        const targetRel = category
+          ? `${category}/${leafFilename}`
+          : leafFilename;
         recordSource(wikiRoot, targetRel, {
           source_path: candidate.source_path,
           source_pre_hash: candidate.hash,
@@ -149,11 +252,76 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
         });
         wrote++;
       }
+
+      // Index-source inputs: source files named `index.md` (or
+      // carrying `type: index` in their frontmatter) are not leaves —
+      // they carry authored hints (shared_covers / orientation /
+      // activation_defaults) for the SYNTHESISED target index at the
+      // matching directory. Stash them under `.work/<opId>/` where the
+      // index-generation phase below can pick them up and forward
+      // their fields into the rebuilt `index.md` files.
+      //
+      // Note: index-source bodies are also provenance-recorded so
+      // LOSS-01 stays satisfied. The target they map to is the
+      // synthesised `<dir>/index.md` (or the root `index.md`).
+      if (indexSources.length > 0) {
+        const indexInputsPath = join(workDir, "index-inputs.json");
+        const serialisable = indexSources.map((ix) => ({
+          source_path: ix.source_path,
+          dir: ix.dir,
+          authored_frontmatter: ix.authored_frontmatter || {},
+          body: ix.body || "",
+          hash: ix.hash,
+          size: ix.size,
+        }));
+        for (const ix of serialisable) {
+          // Key by POSIX-normalised directory, "" for root. Matches
+          // the key space rebuildAllIndices expects.
+          indexInputs[ix.dir || ""] = ix;
+        }
+        writeFileSync(
+          indexInputsPath,
+          JSON.stringify({ indexSources: serialisable }, null, 2),
+          "utf8",
+        );
+        for (const ix of indexSources) {
+          const targetDir = ix.dir || "";
+          const targetRel = targetDir
+            ? `${targetDir}/index.md`
+            : "index.md";
+          recordSource(wikiRoot, targetRel, {
+            source_path: ix.source_path,
+            source_pre_hash: ix.hash,
+            source_size: ix.size,
+            byte_range: [0, ix.size],
+            disposition: "preserved",
+          });
+        }
+      }
+
       gitRunChecked(wikiRoot, ["add", "-A"]);
       if (!gitWorkingTreeClean(wikiRoot)) {
-        gitCommit(wikiRoot, `phase draft-frontmatter: wrote ${wrote} leaves`);
+        gitCommit(
+          wikiRoot,
+          `phase draft-frontmatter: wrote ${wrote}` +
+            (updated > 0 ? ` updated ${updated}` : "") +
+            (skipped > 0 ? ` skipped ${skipped}` : "") +
+            ` leaves` +
+            (indexSources.length > 0
+              ? ` (+${indexSources.length} index source(s))`
+              : ""),
+        );
       }
-      record("draft-frontmatter", `wrote ${wrote} leaves`);
+      record(
+        "draft-frontmatter",
+        `wrote ${wrote}` +
+          (updated > 0 ? `, updated ${updated}` : "") +
+          (skipped > 0 ? `, skipped ${skipped}` : "") +
+          " leaves" +
+          (indexSources.length > 0
+            ? ` (+${indexSources.length} index source(s))`
+            : ""),
+      );
     } else if (plan.operation === "extend") {
       throw new Error(
         "extend: not yet implemented in Phase 3 — Phase 4 will add " +
@@ -168,10 +336,22 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     }
 
     // Phase 4 — operator-convergence. Runs the tiered ladder
-    // (Tier 0 TF-IDF → Tier 1 local embeddings → Tier 2 Claude stub)
-    // through the five operators from methodology §3.5. Each applied
-    // proposal produces its own per-iteration commit so `git log`
-    // shows the convergence history at file-level granularity.
+    // (Tier 0 TF-IDF → Tier 1 MiniLM embeddings → Tier 2 sub-agent
+    // via exit-7 handshake) through the five operators from
+    // methodology §3.5 PLUS the cluster-based NEST applier from
+    // cluster-detect.mjs. Each applied proposal produces its own
+    // per-iteration commit so `git log` shows the convergence
+    // history at file-level granularity.
+    //
+    // On resume (after a previous exit-7 wrote responses), we
+    // seed tiered.mjs's runtime-resolved-response map with the
+    // answers collected by the wiki-runner so the next call to
+    // runConvergence finds them inline instead of re-enqueuing.
+    clearTier2Responses(wikiRoot);
+    const priorResponses = readAllResponses(wikiRoot);
+    if (priorResponses.size > 0) {
+      seedTier2Responses(wikiRoot, priorResponses);
+    }
     const convergence = await runConvergence(wikiRoot, {
       opId,
       qualityMode: plan.flags?.quality_mode || "tiered-fast",
@@ -186,6 +366,23 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
         }
       },
     });
+
+    // If convergence parked any Tier 2 requests, drain them into a
+    // pending batch and raise NeedsTier2 so the CLI exits with
+    // code 7. The wiki-runner will write responses and re-invoke.
+    if (convergence.needs_tier2) {
+      const requests = takePendingRequests(wikiRoot);
+      if (requests.length > 0) {
+        const batchId = deriveBatchId(opId, "convergence", convergence.iterations);
+        const path = writePending(wikiRoot, batchId, requests);
+        throw new NeedsTier2Error(
+          `operator-convergence parked ${requests.length} Tier 2 request(s) ` +
+            `(batch ${batchId}); wiki-runner must resolve and re-invoke`,
+          opId,
+          path,
+        );
+      }
+    }
     record(
       "operator-convergence",
       `${convergence.applied.length} operator(s) applied across ` +
@@ -231,7 +428,7 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     // no such stubs exist yet — we create minimal ones bottom-up so
     // the rebuild pass can fill them in with frontmatter.
     bootstrapIndexStubs(wikiRoot);
-    const rebuilt = rebuildAllIndices(wikiRoot);
+    const rebuilt = rebuildAllIndices(wikiRoot, { indexInputs });
     gitRunChecked(wikiRoot, ["add", "-A"]);
     if (!gitWorkingTreeClean(wikiRoot)) {
       gitCommit(
@@ -291,7 +488,15 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
       phases,
     };
   } catch (err) {
-    // Validation or any phase failure: reset to pre-op.
+    // NeedsTier2 is NOT a failure path — it's the suspend-and-
+    // resume signal the exit-7 handshake uses. The convergence
+    // phase committed its partial work; we leave the working tree
+    // as-is and let the CLI propagate the exit code. The op-log
+    // is not finalised because the op isn't done.
+    if (err instanceof NeedsTier2Error) {
+      throw err;
+    }
+    // Validation or any other phase failure: reset to pre-op.
     //
     // `.llmwiki/provenance.yaml` is wiped ONLY when the current op
     // wrote it (`build`), because it lives outside the git working
@@ -334,6 +539,23 @@ export class ValidationError extends Error {
     super(msg);
     this.name = "ValidationError";
     this.opId = opId;
+  }
+}
+
+// Thrown when a phase has accumulated Tier 2 requests and needs
+// the wiki-runner to resolve them before the operation can
+// continue. The CLI catches this and exits with code 7
+// (NEEDS_TIER2) — exit-7 is NOT a failure path; it's a normal
+// suspend-and-resume signal. The orchestrator does NOT roll back
+// to the pre-op snapshot; the partial-convergence commits remain
+// in the private git and the wiki is left in an intermediate
+// shape for the resume to pick up.
+export class NeedsTier2Error extends Error {
+  constructor(msg, opId = null, pendingPath = null) {
+    super(msg);
+    this.name = "NeedsTier2Error";
+    this.opId = opId;
+    this.pendingPath = pendingPath;
   }
 }
 
@@ -389,6 +611,78 @@ function bootstrapIndexStubs(wikiRoot) {
       "generator: skill-llm-wiki/v1\n" +
       "---\n\n";
     writeFileSync(indexPath, stub, "utf8");
+  }
+}
+
+// Walk the wiki tree once and build a map keyed by the
+// `source.path` field carried in each existing leaf's frontmatter.
+// Leaves without a `source.path` are skipped silently — they belong
+// to other operations (rebuild/extend) which do not participate in
+// build's resume protocol.
+//
+// Returned shape: Map<sourceRelPath, {
+//   absLeafPath:  absolute path on disk
+//   targetRel:    POSIX-relative path from wikiRoot (no leading "./")
+//   relCategory:  POSIX-relative category dir from wikiRoot, "" for root
+//   hash:         the source.hash recorded at the last write
+// }>
+//
+// Used by the build phase to detect "this candidate was already
+// drafted, possibly at a non-default location, and is byte-identical
+// to the source on disk → skip the write" without losing authored
+// frontmatter or doubling up after operator-convergence reshapes.
+export function collectExistingLeavesBySource(wikiRoot) {
+  const map = new Map();
+  walkLeafFiles(wikiRoot, wikiRoot, (absPath) => {
+    let raw;
+    try {
+      raw = readFileSync(absPath, "utf8");
+    } catch {
+      return;
+    }
+    let parsed;
+    try {
+      parsed = parseFrontmatter(raw, absPath);
+    } catch {
+      return;
+    }
+    const data = parsed?.data;
+    if (!data || typeof data !== "object") return;
+    const src = data.source;
+    if (!src || typeof src !== "object") return;
+    const sourcePath = typeof src.path === "string" ? src.path : null;
+    if (!sourcePath) return;
+    const hash = typeof src.hash === "string" ? src.hash : null;
+    const rel = relative(wikiRoot, absPath).split(/[\\\/]/).join("/");
+    const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+    map.set(sourcePath, {
+      absLeafPath: absPath,
+      targetRel: rel,
+      relCategory: dir,
+      hash,
+    });
+  });
+  return map;
+}
+
+function walkLeafFiles(dir, wikiRoot, visit) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (e.name.startsWith(".")) continue;
+    const full = join(dir, e.name);
+    if (e.isDirectory()) {
+      walkLeafFiles(full, wikiRoot, visit);
+      continue;
+    }
+    if (!e.isFile()) continue;
+    if (!e.name.endsWith(".md")) continue;
+    if (e.name === "index.md") continue;
+    visit(full);
   }
 }
 

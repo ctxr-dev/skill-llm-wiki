@@ -44,6 +44,13 @@ function runCli(args, opts = {}) {
       ...process.env,
       LLM_WIKI_NO_PROMPT: "1",
       LLM_WIKI_MOCK_TIER1: "1",
+      // These tests exercise the pairwise tiered AI ladder
+      // (MERGE / similarity cache / --quality-mode); they don't
+      // want the Phase 8 cluster-NEST propose_structure escalation
+      // to park Tier 2 requests in the exit-7 queue. Each test
+      // that DOES want cluster behaviour opts back in by passing
+      // an env override.
+      LLM_WIKI_SKIP_CLUSTER_NEST: "1",
       ...(opts.env || {}),
     },
     cwd: opts.cwd,
@@ -84,19 +91,27 @@ test("tiered build: decisions.yaml is populated after a multi-entry build", () =
     const wiki = join(parent, "corpus.wiki");
 
     const decisions = readDecisions(wiki);
+    // Phase 8+ writes METRIC_TRAJECTORY + NEST-outcome entries in
+    // addition to the pairwise MERGE/tiered-AI entries — filter
+    // to just the operator-applied similarity decisions for this
+    // assertion.
+    const merges = decisions.filter((d) => d.operator === "MERGE");
     assert.ok(
-      decisions.length >= 1,
-      `decisions.yaml must contain at least one entry, got ${decisions.length}`,
+      merges.length >= 1,
+      `decisions.yaml must contain at least one MERGE entry, got ${merges.length}`,
     );
-    // Every entry targets the MERGE operator (the only similarity-
-    // using operator in Phase 6) and every entry lists exactly two
-    // source ids.
-    for (const d of decisions) {
-      assert.equal(d.operator, "MERGE");
+    for (const d of merges) {
       assert.equal(d.sources.length, 2);
       assert.ok(typeof d.similarity === "number");
       assert.ok([0, 1, 2].includes(d.tier_used));
     }
+    // The trajectory addition must also be present so rebuild /
+    // 0-application ops can be distinguished from not-run ones.
+    const trajectory = decisions.filter((d) => d.operator === "METRIC_TRAJECTORY");
+    assert.ok(
+      trajectory.length >= 1,
+      `decisions.yaml should carry METRIC_TRAJECTORY entries (Phase 8 audit)`,
+    );
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }
@@ -148,11 +163,9 @@ test("tiered build: per-iteration operator commits appear in git log", () => {
     // creates it. Instead we use LIFT — a source with one leaf in
     // a subcategory will be flattened.
     //
-    // draftCategory flattens everything to one category ("general"),
-    // so we seed three entries so general/ is NOT a LIFT candidate
-    // (3 leaves in a folder doesn't lift), AND we do NOT expect
-    // LIFT to fire here. Instead we look for ANY operator-
-    // convergence commit message in the log.
+    // Flat sources now land at the wiki root, so with 4 distinct
+    // entries there is no LIFT-eligible subfolder. We expect LIFT
+    // NOT to fire here.
     const src = join(parent, "corpus");
     mkdirSync(src);
     for (let i = 0; i < 4; i++) {
@@ -197,11 +210,11 @@ test("tiered build: build with one-leaf-per-subcategory triggers LIFT", () => {
     assert.equal(build.status, 0, build.stderr);
     const wiki = join(parent, "corpus.wiki");
 
-    // Phase 3's draftCategory flattens; both leaves are under
-    // general/. Manually move `lonely` into its own subdirectory
-    // to set up a LIFT-eligible state.
+    // Flat sources now land at the wiki root (no `general/` bucket).
+    // Manually move `lonely` into its own subdirectory to set up a
+    // LIFT-eligible state.
     mkdirSync(join(wiki, "lonely-solo"));
-    const leafSrc = join(wiki, "general", "lonely.md");
+    const leafSrc = join(wiki, "lonely.md");
     const leafDst = join(wiki, "lonely-solo", "lonely.md");
     writeFileSync(leafDst, readFileSync(leafSrc, "utf8"));
     rmSync(leafSrc);
