@@ -50,7 +50,7 @@ source:
 
 # Tiered AI ladder
 
-Phase 6 of `skill-llm-wiki` routes every similarity decision through a
+`skill-llm-wiki` routes every similarity decision through a
 three-tier ladder. The **design principle** is crucial:
 
 > Claude is used for deep-understanding decisions (structural
@@ -62,13 +62,11 @@ three-tier ladder. The **design principle** is crucial:
 Every pairwise check runs Tier 0 first. If Tier 0 is decisive, the
 ladder halts. If it's mid-band, the decision escalates to Tier 1.
 If Tier 1 is also mid-band, the decision escalates to Tier 2.
-Tier 2 is a Claude sub-agent spawned by the wiki-runner via the
-**exit-7 handshake** described below. Tier 1 is a REQUIRED
-dependency — the optional-install flow was removed when the
-overhaul discovered Tier 0 alone was too weak to drive the
-ladder on terse technical frontmatter. The Phase 6 "returns
-undecidable for every Tier 2 request" stub has been replaced
-with the real exit-7 / wiki-runner sub-agent spawn path.
+Tier 2 is a real Claude sub-agent spawned by the wiki-runner via the
+**exit-7 handshake** described below. Tier 1 is a REQUIRED dependency
+— the optional-install flow was removed in v0.4.0 when the overhaul
+discovered Tier 0 alone was too weak to drive the ladder on terse
+technical frontmatter.
 
 ## Tier 0 — TF-IDF + cosine (scripts/lib/similarity.mjs)
 
@@ -285,15 +283,6 @@ Choose via `--quality-mode` or the `LLM_WIKI_QUALITY_MODE` env var.
 | `claude-first` | Tier 0 is still consulted for decisive cases. Mid-band Tier 0 skips Tier 1 and goes directly to Tier 2. | When the user values Claude's judgment over speed/cost. |
 | `tier0-only` | Tier 0 only. Mid-band decisions become "undecidable" and the caller must resolve manually. | Air-gapped, hermetic CI, and smoke tests that must not reach out to Claude. |
 
-**Phase 6 caveat:** Tier 2 is a stub in Phase 6 — it always returns
-`undecidable`. This means `claude-first` is behaviourally identical
-to `tier0-only` for MERGE decisions until Phase 7 wires in real
-Claude review. Mid-band pairs under `claude-first` today produce
-audit-log entries with `decision: undecidable` and the operator
-does not fire. Prefer `tiered-fast` in Phase 6 — Tier 1's mock or
-real embeddings carry the decisive-same / decisive-different
-weight.
-
 ## Similarity cache
 
 Every decision is cached at
@@ -310,14 +299,28 @@ The cache is symmetric: `cacheKey(a, b) === cacheKey(b, a)`.
 with:
 
 - `op_id` — the operation that triggered the check
-- `operator` — MERGE / DECOMPOSE / NEST / DESCEND / LIFT
+- `operator` — MERGE / DECOMPOSE / NEST / DESCEND / LIFT / METRIC_TRAJECTORY
 - `sources[]` — the entry ids involved
 - `tier_used` — 0, 1, or 2
-- `similarity` — the final similarity value
-- `confidence_band` — decisive-same / decisive-different / mid-band
-- `decision` — same / different / undecidable
+- `similarity` — the final similarity value (or metric cost for trajectories)
+- `confidence_band` — one of:
+  - pairwise ladder: `decisive-same` / `decisive-different` / `mid-band`
+  - NEST outcomes: `tier2-proposed` / `math-gated` / `tier2-and-math`
+- `decision` — one of:
+  - pairwise ladder: `same` / `different` / `undecidable`
+  - NEST outcomes: `applied` / `rejected-by-metric` / `rejected-by-gate` / `rejected-stale` / `slug-renamed` / `pending-tier2`
+  - metric trajectory: `measured`
 - `reason` — free-form, populated when the decision carries
   explanatory context
+
+The `slug-renamed` entry deserves a note: it is audit-trail only,
+not a failure. It is written when `resolveNestSlug` pre-empts a
+DUP-ID collision by suffixing a proposed slug with `-group` (or
+`-group-N`). The rename is only logged if the subsequent NEST
+actually commits — see `guide/substrate/operators.md` for the
+contract. A reader scanning for `decision: slug-renamed` is looking
+at a landed NEST whose directory name does not exactly match the
+slug the Tier 2 response proposed.
 
 Claude-at-session-time reads this log when a user asks "why was
 this merged?" — the audit trail answers the question from recorded
@@ -325,16 +328,18 @@ history rather than re-running the computation.
 
 ## Operators that use the ladder
 
-Phase 6 ships:
-
 - **LIFT** — doesn't use the ladder (structural detection: one leaf
   in a folder)
 - **MERGE** — uses the ladder to decide whether sibling pairs are
   the same
 - **DESCEND** — doesn't use the ladder (structural detection:
   authored zone byte budget + leaf-content signatures)
-- **NEST** and **DECOMPOSE** — detect-only in Phase 6 (they fire
-  suggestions for the shape-check log but application is deferred)
+- **NEST** — uses the ladder via the cluster detector and a Tier 2
+  `propose_structure` / `cluster_name` / `nest_decision` round-trip.
+  Applied with quality-metric gating; see
+  `guide/substrate/operators.md`.
+- **DECOMPOSE** — detect-only (fires suggestions for the shape-check
+  log; application is deferred to a human-supervised pass).
 
 The convergence loop applies proposals in the order DESCEND > LIFT >
 MERGE > NEST > DECOMPOSE so reducing moves always precede expanding

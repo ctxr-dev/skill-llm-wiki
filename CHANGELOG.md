@@ -4,6 +4,39 @@ All notable changes to `skill-llm-wiki` are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] — 2026-04-16
+
+First stable release. The semantic-routing substrate landed in v0.4.0, multi-NEST convergence landed in v0.4.1, and 1.0.0 closes the remaining sharp edge — a DUP-ID collision path discovered during the v0.4.1 deferred novel-corpus validation — plus the Windows CI parity gap. The v0.4.1 "Known remaining gaps" novel-corpus validation item is **resolved**: the combined `skill-code-review/reviewers/` + `overlays/` corpus (45 leaves) now builds end-to-end on the first try, `validate` returns 0 errors / 0 warnings, and multi-NEST applies atomically in a single convergence iteration. Semver commitments are now in effect: the six public operations (Build, Extend, Validate, Rebuild, Fix, Join), the CLI exit-code surface, the layout-mode contract, and the private-git history shape are stable and will not break in 1.x.
+
+### Fixed
+
+- **DUP-ID pre-apply slug collision resolver.** New `resolveNestSlug(slug, proposal)` helper in `scripts/lib/nest-applier.mjs`, wired into `scripts/lib/operators.mjs::tryClusterNestIteration` right before `applyNest`. When a proposed subcategory slug collides with a member leaf's id (the observed case: Tier 2's `propose_structure` picked slug=`security` for a cluster whose members included leaf id=`security`), with a non-member sibling leaf's id, or with an existing sibling subdirectory name, the resolver auto-suffixes deterministically (`<slug>-group`, then `<slug>-group-2`, `-group-3`, …) until the slug is non-colliding. Before this fix, the collision landed at `applyNest`, flowed through to validation, tripped `DUP-ID`, and triggered a full pipeline rollback to `pre-op/<id>` — forcing a manual recovery on any real corpus where Tier 2 naturally picked a category name matching one of its member files. The resolver pre-empts the entire rollback path; no user-visible change on collision-free builds. The rename is audited in `decisions.yaml` as `decision: slug-renamed` with the original slug, the resolved slug, and the reason, and — importantly — the audit entry is only written *after* `applyNest` succeeds and the metric gate accepts the NEST, so the log never records a rename for an op that was subsequently rolled back.
+- **Length-overflow short-circuit** in `resolveNestSlug`. When a base slug is 58+ characters long, `${slug}-group` exceeds the 64-character `SLUG_RE` cap and every numeric-suffix candidate fails validation identically. The resolver now short-circuits the loop on the first `validateSlug(primary)` failure and returns the original slug, propagating the collision to `applyNest` for a clean error rather than spinning 98 no-op iterations.
+- **Windows CI suite.** Six unit tests in `tests/unit/{git-security,git-env,tier2-protocol,default-sibling-naming,nest-applier}.test.mjs` were asserting against hardcoded POSIX path strings (`/tmp/fake-wiki/...`), which failed on `windows-latest` because Node's `path.join` returns `\tmp\...` on Windows. All such assertions now compose their expected paths via `path.join(os.tmpdir(), ...)` on both sides so the test is platform-independent. Test-only; no runtime behaviour change.
+
+### Added
+
+- **`"slug-renamed"` decision type** in `<wiki>/.llmwiki/decisions.yaml`. Audit-trail only, not a new exit code. Documented in the `decision-log.mjs` header comment and in `guide/substrate/tiered-ai.md`.
+- **New unit tests** in `tests/unit/nest-applier.test.mjs` (8 additional): `resolveNestSlug` non-colliding pass-through, member-id collision, non-member sibling-id collision, existing-subdir collision, `-group` double-collision numeric fallback, invalid-slug pass-through (covering `null`/`undefined`/non-string inputs), parent-own-`index.md` skip coverage, length-overflow short-circuit, and an end-to-end `applyNest + resolveNestSlug` round-trip on a member-id collision.
+
+### Changed
+
+- **`scripts/lib/decision-log.mjs`** header comment now enumerates `slug-renamed` and `rejected-stale` alongside `applied`, `rejected-by-metric`, `rejected-by-gate`, `pending-tier2`. The on-disk schema is unchanged — the enum was always `decision: <string>` with no runtime validation — but the comment block was lagging reality.
+- **`guide/substrate/tiered-ai.md`** gained a NEST-operator decision-enum subsection and lost the stale "Phase 6 caveat" language that claimed Tier 2 was a stub. Tier 2 has been real since v0.4.0; the caveat was drift.
+- **`guide/substrate/operators.md`** gained an "atomic slug resolution" step describing the pre-apply resolver, and dropped a stale reference to `activation_defaults.keyword_matches` on NEST subcategory stubs (aggregation was removed in v0.4.0).
+- **`README.md`** Tier 1 embeddings are now documented as a required runtime dependency (correct since v0.4.0); the "optional install" language was drift. The architecture tree also lists `nest-applier.mjs` alongside `operators.mjs`.
+- **`scripts/cli.mjs`** now reads the version from `package.json` at runtime via `import.meta.url` resolution instead of duplicating it as a hand-maintained `CLI_VERSION` constant. The previous hardcode had drifted two releases (CLI said `v0.3.0` through v0.4.1); the new pattern can never drift because there is only one source of truth. Falls through to `"unknown"` if `package.json` is unavailable in the installed artifact — a defensive fallback for environments where package manifests are stripped post-install.
+
+### Tests
+
+- Suite size: 470 → 472 (+2 from the new null/undefined, index.md-skip, and length-overflow tests; the initial DUP-ID test landing was already counted in the pre-1.0 tally). 3 skipped (opt-in gates, unchanged from v0.4.1). 0 failing on both `ubuntu-latest` and `windows-latest`.
+- Novel-corpus end-to-end validation on `skill-code-review/reviewers/ + overlays/` (45 leaves) passed on the post-fix run: 1 convergence iteration, 13 NESTs applied atomically, `validate` clean, `decisions.yaml` contains the expected `slug-renamed` entry for the `security` → `security-group` rename and zero `rejected-*` entries.
+
+### Known limitations (1.0.0, intentional)
+
+- **Pathological long-slug collisions (base ≥ 58 chars)** return the original colliding slug rather than a truncated variant. `applyNest` surfaces the collision with a clear error; no silent corruption. If future Tier 2 prompts start generating very long slugs, the resolver can grow a truncation fallback without a breaking change.
+- **Single-writer-per-wiki** is a documented invariant; there is no OS-level lock file on `<wiki>/.llmwiki/`. Concurrent CLI invocations on the same wiki may race. Planned for 1.1 if a user actually hits this.
+
 ## [0.4.1] — 2026-04-15
 
 Engine refinements closing three v0.4.0 loose ends. No substrate change; the output shape of `build` / `rebuild` is byte-identical to v0.4.0. The observable difference is cycle count (fewer exit-7 round trips), Tier 1 load count (lazy on all cycles when the similarity cache is warm), and — importantly — a **bug fix** for partial multi-cluster application in the convergence loop.

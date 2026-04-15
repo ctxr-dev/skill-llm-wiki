@@ -242,13 +242,19 @@ async function loadSkillModules() {
   ({ cmdSync } = await import("./commands/sync.mjs"));
 }
 
-// Hard-coded because @ctxr/kit strips package.json from installed artifacts
-// (see installers/folder.js: package.json is always-dropped metadata). Bump
-// this on every release alongside package.json.
-const CLI_VERSION = "0.3.0";
-
+// Read the version from package.json at runtime. Resolved relative to this
+// source file so it works both as a local clone (dev) and as a published
+// npm artifact. @ctxr/kit historically stripped package.json from installed
+// skill artifacts; if that environment is re-encountered we fall through to
+// "unknown" rather than carrying a hand-maintained duplicate of the version
+// string that inevitably drifts.
 function getPackageVersion() {
-  return CLI_VERSION;
+  try {
+    const pkgPath = new URL("../package.json", import.meta.url);
+    return JSON.parse(readFileSync(pkgPath, "utf8")).version;
+  } catch {
+    return "unknown";
+  }
 }
 
 // Write usage to the appropriate stream. `--help` is a success path and

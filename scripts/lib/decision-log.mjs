@@ -179,6 +179,8 @@ export function appendDecision(wikiRoot, entry) {
 //                                           "applied",
 //                                           "rejected-by-metric",
 //                                           "rejected-by-gate",
+//                                           "rejected-stale",
+//                                           "slug-renamed",
 //                                           "pending-tier2"
 //   reason                                — free text
 //

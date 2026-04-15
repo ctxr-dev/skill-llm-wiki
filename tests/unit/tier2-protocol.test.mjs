@@ -300,8 +300,9 @@ test("loadFixture: rejects fixture with __proto__ key", () => {
 });
 
 test("pendingPath / responsesPath / tier2Dir: use .work/tier2", () => {
-  const wiki = "/tmp/fake";
-  assert.equal(tier2Dir(wiki), "/tmp/fake/.work/tier2");
-  assert.equal(pendingPath(wiki, "b1"), "/tmp/fake/.work/tier2/pending-b1.json");
-  assert.equal(responsesPath(wiki, "b1"), "/tmp/fake/.work/tier2/responses-b1.json");
+  const wiki = join(tmpdir(), "fake");
+  const expectedDir = join(wiki, ".work", "tier2");
+  assert.equal(tier2Dir(wiki), expectedDir);
+  assert.equal(pendingPath(wiki, "b1"), join(expectedDir, "pending-b1.json"));
+  assert.equal(responsesPath(wiki, "b1"), join(expectedDir, "responses-b1.json"));
 });

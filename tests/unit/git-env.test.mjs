@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { buildGitEnv, gitDir, IS_WINDOWS } from "../../scripts/lib/git.mjs";
 
 test("buildGitEnv includes every required key", () => {
@@ -45,7 +46,8 @@ test("buildGitEnv does not mutate process.env", () => {
 });
 
 test("gitDir places the bare repo under .llmwiki/git/", () => {
-  assert.equal(gitDir("/wiki"), "/wiki/.llmwiki/git");
+  const wiki = join(tmpdir(), "wiki");
+  assert.equal(gitDir(wiki), join(wiki, ".llmwiki", "git"));
 });
 
 test("LLM_WIKI_FIXED_TIMESTAMP is respected for commit pinning", () => {

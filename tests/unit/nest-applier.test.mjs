@@ -8,7 +8,11 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseFrontmatter, renderFrontmatter } from "../../scripts/lib/frontmatter.mjs";
-import { applyNest, validateSlug } from "../../scripts/lib/nest-applier.mjs";
+import {
+  applyNest,
+  resolveNestSlug,
+  validateSlug,
+} from "../../scripts/lib/nest-applier.mjs";
 
 function tmpWiki(tag) {
   const d = join(
@@ -306,6 +310,178 @@ test("applyNest: missing purpose falls back to placeholder focus", () => {
     const stub = join(wiki, "fallback", "index.md");
     const { data } = parseFrontmatter(readFileSync(stub, "utf8"), stub);
     assert.equal(data.focus, "subtree under fallback");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+// ─── resolveNestSlug: DUP-ID pre-apply rename ──────────────────────
+//
+// The observed collision case on the v0.4.1 novel-corpus run:
+// Tier 2's propose_structure response picked slug "security" for a
+// cluster whose members included a leaf with id "security". After
+// apply, both the new subcategory stub (id: security) and the moved
+// leaf (id: security, now at <parent>/security/security.md) lived in
+// the same subtree — DUP-ID at validate time, forcing a full
+// pipeline rollback. resolveNestSlug auto-suffixes before apply so
+// the NEST lands on the first try.
+
+test("resolveNestSlug: non-colliding slug is returned unchanged", () => {
+  const wiki = tmpWiki("resolve-noop");
+  try {
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "beta.md", "beta");
+    const resolved = resolveNestSlug("greek", { leaves: [l1, l2] });
+    assert.equal(resolved, "greek");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: slug collision with member leaf id → suffixed", () => {
+  const wiki = tmpWiki("resolve-member");
+  try {
+    const l1 = writeLeaf(wiki, "security.md", "security");
+    const l2 = writeLeaf(wiki, "audit.md", "audit");
+    const l3 = writeLeaf(wiki, "hardening.md", "hardening");
+    const resolved = resolveNestSlug("security", { leaves: [l1, l2, l3] });
+    assert.equal(resolved, "security-group");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: slug collision with non-member sibling leaf → suffixed", () => {
+  const wiki = tmpWiki("resolve-sibling");
+  try {
+    // Cluster members
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "beta.md", "beta");
+    // Non-member sibling in the same parent
+    writeLeaf(wiki, "greek.md", "greek");
+    const resolved = resolveNestSlug("greek", { leaves: [l1, l2] });
+    assert.equal(resolved, "greek-group");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: slug collision with existing sibling subdir → suffixed", () => {
+  const wiki = tmpWiki("resolve-subdir");
+  try {
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "beta.md", "beta");
+    mkdirSync(join(wiki, "greek"), { recursive: true });
+    const resolved = resolveNestSlug("greek", { leaves: [l1, l2] });
+    assert.equal(resolved, "greek-group");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: `-group` also collides → numeric fallback", () => {
+  const wiki = tmpWiki("resolve-chain");
+  try {
+    const l1 = writeLeaf(wiki, "security.md", "security");
+    const l2 = writeLeaf(wiki, "security-group.md", "security-group");
+    const l3 = writeLeaf(wiki, "audit.md", "audit");
+    const resolved = resolveNestSlug("security", { leaves: [l1, l2, l3] });
+    assert.equal(resolved, "security-group-2");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: invalid slug passes through for applyNest to reject", () => {
+  const wiki = tmpWiki("resolve-invalid");
+  try {
+    const l1 = writeLeaf(wiki, "a.md", "a");
+    const l2 = writeLeaf(wiki, "b.md", "b");
+    assert.equal(resolveNestSlug("Invalid Name!", { leaves: [l1, l2] }), "Invalid Name!");
+    assert.equal(resolveNestSlug("", { leaves: [l1, l2] }), "");
+    assert.equal(resolveNestSlug(null, { leaves: [l1, l2] }), null);
+    assert.equal(resolveNestSlug(undefined, { leaves: [l1, l2] }), undefined);
+    assert.equal(resolveNestSlug(42, { leaves: [l1, l2] }), 42);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: parent's own index.md does NOT poison the forbidden set", () => {
+  // The parent's index.md carries id = parent basename. If collectForbiddenIds
+  // failed to skip it, a slug that happens to equal the parent's basename
+  // would be suffixed even though applyNest already catches that case via
+  // its existsSync(targetDir) check. Here we seed a parent whose index.md
+  // id is "foo" and verify that proposing slug "foo" is NOT touched by
+  // resolveNestSlug — it passes through unchanged and applyNest will (or
+  // will not) catch the actual directory collision separately.
+  const wiki = tmpWiki("resolve-indexmd");
+  try {
+    // Parent directory: wiki itself. Seed an index.md with id "foo".
+    const parentIndex = join(wiki, "index.md");
+    writeFileSync(
+      parentIndex,
+      renderFrontmatter(
+        { id: "foo", type: "index", depth_role: "root" },
+        "\n",
+      ),
+      "utf8",
+    );
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "beta.md", "beta");
+    const resolved = resolveNestSlug("foo", { leaves: [l1, l2] });
+    assert.equal(
+      resolved,
+      "foo",
+      "parent's own index.md id must not enter the forbidden set",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: length-overflow on suffix short-circuits instead of spinning", () => {
+  // 58-char slug: "${slug}-group" is 64 chars, which IS the SLUG_RE cap.
+  // 59-char slug: "${slug}-group" is 65 chars, which FAILS validateSlug.
+  // The short-circuit path must return the original slug unchanged
+  // rather than spinning the numeric-suffix loop pointlessly.
+  const wiki = tmpWiki("resolve-overflow");
+  try {
+    const longSlug = "a".repeat(59); // 59 chars
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, longSlug + ".md", longSlug); // forces collision
+    const resolved = resolveNestSlug(longSlug, { leaves: [l1, l2] });
+    // Short-circuit: primary "${slug}-group" fails validateSlug
+    // (65 chars), so return original. Numeric suffix candidates are
+    // all longer and would also fail — spinning the loop is pointless.
+    assert.equal(resolved, longSlug);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("applyNest: slug pre-resolved against member collision lands cleanly", () => {
+  const wiki = tmpWiki("apply-resolved");
+  try {
+    const l1 = writeLeaf(wiki, "security.md", "security", { tags: ["t"] });
+    const l2 = writeLeaf(wiki, "audit.md", "audit", { tags: ["t"] });
+    const l3 = writeLeaf(wiki, "hardening.md", "hardening", { tags: ["t"] });
+    const proposal = { operator: "NEST", leaves: [l1, l2, l3] };
+    const resolved = resolveNestSlug("security", proposal);
+    applyNest(wiki, proposal, resolved);
+    // New dir is suffixed
+    assert.ok(existsSync(join(wiki, "security-group")));
+    // Stub id equals the resolved slug (no collision with moved child)
+    const stub = join(wiki, "security-group", "index.md");
+    const { data: stubData } = parseFrontmatter(readFileSync(stub, "utf8"), stub);
+    assert.equal(stubData.id, "security-group");
+    // Moved child still carries its original id
+    const moved = join(wiki, "security-group", "security.md");
+    const { data: childData } = parseFrontmatter(
+      readFileSync(moved, "utf8"),
+      moved,
+    );
+    assert.equal(childData.id, "security");
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }

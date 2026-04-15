@@ -115,9 +115,10 @@ test("buildGitEnv: strips inherited GIT_* from process.env", () => {
   process.env.GIT_AUTHOR_DATE = "1999-01-01T00:00:00Z";
   process.env.SSH_ASKPASS = "/tmp/attacker-askpass";
   try {
-    const env = buildGitEnv("/tmp/fake-wiki");
+    const fakeWiki = join(tmpdir(), "fake-wiki");
+    const env = buildGitEnv(fakeWiki);
     // The skill's own overrides must win.
-    assert.equal(env.GIT_DIR, "/tmp/fake-wiki/.llmwiki/git");
+    assert.equal(env.GIT_DIR, join(fakeWiki, ".llmwiki", "git"));
     // The alternate-object-dirs key must have been dropped entirely
     // (the skill never sets it, so its presence would mean leakage).
     assert.equal(
@@ -146,7 +147,7 @@ test("buildGitEnv: strips inherited GIT_* from process.env", () => {
 
 test("buildGitEnv: does not mutate process.env", () => {
   const before = JSON.stringify(process.env);
-  buildGitEnv("/tmp/fake-wiki");
+  buildGitEnv(join(tmpdir(), "fake-wiki"));
   const after = JSON.stringify(process.env);
   assert.equal(after, before, "buildGitEnv must not mutate process.env");
 });

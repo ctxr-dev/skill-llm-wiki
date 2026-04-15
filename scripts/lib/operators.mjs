@@ -59,7 +59,7 @@ import {
   MIN_MATH_CLUSTER_SIZE,
   MIN_TIER2_CLUSTER_SIZE,
 } from "./cluster-detect.mjs";
-import { applyNest, validateSlug } from "./nest-applier.mjs";
+import { applyNest, resolveNestSlug, validateSlug } from "./nest-applier.mjs";
 import { computeRoutingCost } from "./quality-metric.mjs";
 import { loadFixture, resolveFromFixture } from "./tier2-protocol.mjs";
 import { appendMetricTrajectory, appendNestDecision } from "./decision-log.mjs";
@@ -947,9 +947,20 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
     // and the parent dir's index.md — the NEST applier touches
     // those and creates a new subdir.
     const rollback = snapshotForRollback(proposal, wikiRoot);
+    // Pre-resolve the slug against member + sibling ids. A Tier 2 or
+    // math-named slug that equals one of its member leaves' ids (or a
+    // non-member sibling's id in the same parent) would pass applyNest
+    // and then trip DUP-ID at validate time, forcing a full pipeline
+    // rollback. resolveNestSlug auto-suffixes deterministically
+    // (`-group`, then `-group-N`) so the NEST lands on the first try.
+    // An unchanged slug is a no-op. The audit-log entry for the rename
+    // is written AFTER applyNest succeeds so decisions.yaml never
+    // records a rename for an op that ultimately failed.
+    const originalSlug = proposal.slug;
+    const resolvedSlug = resolveNestSlug(originalSlug, proposal);
     let result;
     try {
-      result = applyNest(wikiRoot, proposal, proposal.slug);
+      result = applyNest(wikiRoot, proposal, resolvedSlug);
     } catch (err) {
       suggestions.push({
         operator: "NEST",
@@ -1016,6 +1027,21 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
       continue;
     }
     // Keep. Record application + commit.
+    // If resolveNestSlug renamed the slug to dodge a collision, audit
+    // the rename NOW (after the NEST has passed every gate and is
+    // about to commit) so decisions.yaml never carries a slug-renamed
+    // entry for an op that was subsequently rolled back by the metric
+    // gate or rejected by applyNest.
+    if (resolvedSlug !== originalSlug) {
+      appendNestDecision(wikiRoot, {
+        op_id: opId,
+        sources: proposal.leaves.map((l) => l.data.id),
+        similarity: proposal.average_affinity ?? 0,
+        confidence_band: confBand,
+        decision: "slug-renamed",
+        reason: `slug "${originalSlug}" collided with existing id; renamed to "${resolvedSlug}"`,
+      });
+    }
     const affinityTag = Number.isFinite(proposal.average_affinity)
       ? `avg_affinity=${proposal.average_affinity.toFixed(3)}, `
       : "";

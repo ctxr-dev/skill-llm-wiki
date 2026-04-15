@@ -27,6 +27,7 @@
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -39,6 +40,87 @@ const SLUG_RE = /^[a-z][a-z0-9-]{0,63}$/;
 export function validateSlug(slug) {
   if (typeof slug !== "string") return false;
   return SLUG_RE.test(slug);
+}
+
+// Resolve a slug that won't collide with a member leaf's id or with a
+// non-member sibling in the same parent directory. The observed
+// collision case (v0.4.1 novel-corpus run): Tier 2's propose_structure
+// response picked slug="security" for a cluster whose members included
+// a leaf with id="security", so after apply both the new subcategory's
+// stub index.md AND the moved leaf carried id="security" — DUP-ID at
+// validate time, forcing a full pipeline rollback. Pre-resolving here
+// auto-suffixes the slug (deterministically: `-group`, then `-group-N`)
+// until it's non-colliding, letting the NEST land on the first try.
+// Non-collision slugs are returned unchanged; invalid slugs are left
+// alone so applyNest's own validation can reject them with its usual
+// error message.
+export function resolveNestSlug(slug, proposal) {
+  if (!validateSlug(slug)) return slug;
+  if (
+    !proposal ||
+    !Array.isArray(proposal.leaves) ||
+    proposal.leaves.length === 0
+  ) {
+    return slug;
+  }
+  const forbidden = collectForbiddenIds(proposal);
+  if (!forbidden.has(slug)) return slug;
+  // Try "-group" first (the natural human reading: "the group of X
+  // leaves"); fall back to numeric suffixes starting at -group-2
+  // because "-group" itself already occupies the slot that would
+  // otherwise be "-group-1". If the base slug is so long that
+  // "${slug}-group" overflows the 64-char SLUG_RE cap, short-circuit:
+  // all numeric candidates share the same prefix and will fail
+  // validation identically, so there's no point spinning the loop.
+  // Returning the original (colliding) slug propagates the failure
+  // to applyNest, which throws a clear "target subcategory already
+  // exists" error — strictly better than a silent spin.
+  const primary = `${slug}-group`;
+  if (!validateSlug(primary)) return slug;
+  if (!forbidden.has(primary)) return primary;
+  for (let i = 2; i < 100; i++) {
+    const candidate = `${slug}-group-${i}`;
+    if (!forbidden.has(candidate)) return candidate;
+  }
+  return slug;
+}
+
+function collectForbiddenIds(proposal) {
+  const forbidden = new Set();
+  for (const leaf of proposal.leaves) {
+    if (leaf?.data?.id) forbidden.add(leaf.data.id);
+  }
+  const parentDir = dirname(proposal.leaves[0].path);
+  const memberPaths = new Set(proposal.leaves.map((l) => l.path));
+  let entries;
+  try {
+    entries = readdirSync(parentDir, { withFileTypes: true });
+  } catch {
+    return forbidden;
+  }
+  for (const entry of entries) {
+    // Skip the parent's own index.md: its id is the parent's basename
+    // (i.e., the parent directory name), not something the new
+    // subcategory could collide with. Parent-name collisions — where
+    // the slug equals the parent dir's name — are a separate case that
+    // applyNest itself rejects via its existsSync(targetDir) check.
+    if (entry.name === "index.md") continue;
+    const entryPath = join(parentDir, entry.name);
+    if (memberPaths.has(entryPath)) continue;
+    if (entry.isDirectory()) {
+      forbidden.add(entry.name);
+      continue;
+    }
+    if (!entry.name.endsWith(".md")) continue;
+    try {
+      const raw = readFileSync(entryPath, "utf8");
+      const { data } = parseFrontmatter(raw, entryPath);
+      if (data?.id) forbidden.add(data.id);
+    } catch {
+      /* skip unreadable siblings */
+    }
+  }
+  return forbidden;
 }
 
 export function applyNest(wikiRoot, proposal, slug, opts = {}) {

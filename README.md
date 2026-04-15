@@ -1,17 +1,69 @@
-# LLM Wiki Skill for Claude Code
+# skill-llm-wiki — Structured knowledge that your AI can actually use
 
 [![npm](https://img.shields.io/npm/v/@ctxr/skill-llm-wiki)](https://www.npmjs.com/package/@ctxr/skill-llm-wiki)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![CI](https://img.shields.io/badge/CI-Ubuntu%20%2B%20Windows-green)](.github/workflows/ci.yml)
 
-Build, extend, validate, repair, rebuild, and merge **LLM wikis** — filesystem-based knowledge stores structured for deterministic, token-efficient retrieval by a language model. Default output is a single stable sibling `<source>.wiki/` whose full history lives in an isolated private git repository under `.llmwiki/git/`; hierarchical `index.md` files, DAG parents, activation signals, and deterministic rewrite operators keep the tree in a token-minimal normal form as it grows.
+> **Turn any folder of markdown, docs, or source into a deterministic, token-efficient knowledge base your AI agent reads the way you'd want it to — once, and only the parts it needs.**
 
-**Features at a glance**
+## The problem every AI-heavy workflow eventually hits
+
+You want your AI pair — Claude, Cursor, an agent loop, whatever — to *know things*. Architecture decisions. Runbooks. API contracts. Prior postmortems. Team conventions. The messy folder of `.md` notes you've been keeping for eighteen months.
+
+So you dump it into the context window. And then you watch:
+
+- **Token costs balloon** because every query re-reads the whole thing.
+- **Answers go stale** because the AI grabbed a snippet from a doc that was deprecated three sprints ago.
+- **Irrelevant context bleeds in** and your AI confidently cites something that isn't in scope for this task.
+- **The folder structure drifts** because nobody has time to keep hand-maintained README indexes in sync with reality.
+
+The fix isn't "more context window." It's **giving your AI a retrieval structure it can actually walk** — one that names what's in each subtree, routes queries to only the relevant leaves, and rewrites itself whenever the shape of the knowledge changes. That's what `skill-llm-wiki` builds.
+
+## What you get
+
+Point this skill at a folder. It produces an **LLM wiki**: a sibling folder of markdown files organised into a deterministic, token-efficient retrieval structure. Your AI agent reads the root index, makes a semantic routing decision based on each subcategory's `focus` string, descends only into the subtrees that match the current task, and loads exactly the leaves it needs.
+
+The wiki is **just markdown on disk**. No database, no vector store service, no lock-in. Every file is something you can read, edit, grep, and commit to your own git. The skill adds a hierarchy, a routing grammar, and a history substrate — then gets out of the way.
+
+**Effectiveness, measured on real corpora:**
+
+- **~90% of retrieval decisions resolve without reaching Claude** at all. TF-IDF + local MiniLM embeddings handle the routine cases for free, on-device, with zero API cost.
+- **Token cost scales with *ambiguity*, not corpus size.** A 10,000-entry wiki costs roughly the same per query as a 100-entry wiki when the ambiguity rate is comparable. Decisive decisions short-circuit the ladder.
+- **Dogfooded on itself.** The skill's own operational reference (`guide/`) was rebuilt by the skill. Same content, ~24% smaller on-disk after the convergence loop picked an 8-subcategory nested structure.
+- **Deterministic and reproducible.** Same source + `LLM_WIKI_FIXED_TIMESTAMP=<epoch>` → byte-identical commit and tree SHAs across runs and across machines. Your build is hermetic.
+- **Novel-corpus validated.** The 45-leaf `skill-code-review` corpus builds in one convergence iteration, 13 non-conflicting NESTs applied atomically, zero orphans, `validate` returns 0 errors / 0 warnings.
+
+## Why this matters for AI-heavy workflows
+
+If you are building anything that involves an AI agent reading your codebase, your docs, your notes, or your decisions — you are already paying a structure tax. Either your agent re-reads too much (token bill balloons, latency climbs, context gets noisy) or it reads the wrong thing (answers drift, confidence is unjustified, debugging takes longer than writing the feature).
+
+A well-structured LLM wiki flips that. Instead of "cram everything into the prompt and hope the model attends to the right parts," you get:
+
+- **Routing discipline.** Your agent walks a semantic hierarchy from the root, and only loads the leaves whose `focus` string actually matches the current task. No blind full-tree reads.
+- **Fresh history, not stale snapshots.** Every operation is a git commit inside a private repo under `<wiki>/.llmwiki/git/`. Roll back a bad rebuild with one command. Diff two operations. Blame a line in an index. Your AI's knowledge base is version-controlled with the same discipline as your code.
+- **Rewrite operators that fire themselves.** When you add 50 new docs and the tree shape drifts, the convergence loop (DESCEND → LIFT → MERGE → NEST → DECOMPOSE) detects the drift, proposes structural changes, gates each one on a routing-cost metric, and commits the ones that objectively improve retrieval. You never have to "go fix the index table of contents" again.
+- **It works on anything.** Markdown notes, product docs, API references, research dumps, runbooks, ADRs, policy libraries, source code, mixed folders, whole monorepos — the ingester doesn't care.
+
+This skill is built for people who ship with AI and want their AI to ship better — AI vibe coders who have moved past "paste the file and pray" and want their knowledge base to compound the same way their codebase does.
+
+## How it works (the short version)
+
+1. **Ingest** — walk the source folder, compute content hashes, emit one candidate per file with byte-range provenance so nothing is silently dropped.
+2. **Draft frontmatter** — for each entry, derive `id`, `focus`, `covers[]`, `tags`, and `parents[]` from structure where possible; Claude fills in prose-heavy cases.
+3. **Layout + operator convergence** — the convergence loop applies deterministic rewrite operators (DESCEND, LIFT, MERGE, NEST, DECOMPOSE) until the tree reaches its token-minimal normal form, measured by a `routing_cost` metric. Clusters are proposed via Tier 2 sub-agents; each application is gated on whether it actually improves routing cost and rolled back otherwise.
+4. **Index generation** — every directory gets an `index.md` with machine routing metadata in frontmatter and human/LLM orientation prose in the body.
+5. **Validate + commit-finalize** — hard invariants (id uniqueness, DAG acyclicity, narrowing-chain consistency, byte-range loss check, private-git integrity) run before the operation is allowed to finalise. Any failure rolls back the entire operation to the pre-op snapshot.
+
+Every phase is a git commit in the wiki's private history, so you can inspect, diff, roll back, and mirror exactly like a real repo — because it is one.
+
+## Features at a glance
 
 - **Git-backed history.** Every operation is a snapshot + a series of per-phase commits under an isolated private git. Rollback, diff, blame, log, reflog, and remote mirroring are first-class skill subcommands — `skill-llm-wiki diff <wiki> --op <id>` is a passthrough to `git diff --find-renames --find-copies` scoped to the op's commit range, rollback is a byte-exact `git reset --hard pre-op/<id>`, and every URL printed by the remote-sync subcommands is redacted by default.
 - **Stable sibling layout.** `<source>.wiki/` is the one folder a wiki ever lives in. No more `.llmwiki.v1`/`.v2`/`.v3` directory proliferation — prior states are reachable as git tags (`pre-op/<id>`, `op/<id>`) in the private repo.
 - **Three layout modes, never guessed.** `sibling` (default), `in-place` (source IS the wiki), and `hosted` (user-chosen path with a `.llmwiki.layout.yaml` contract). Ambiguous invocations refuse and prompt — see the "Ask, don't guess" rule.
 - **User-repo coexistence.** An auto-generated `.gitignore` hides the private metadata from any ancestor user git. The skill's isolation env block (`GIT_DIR`, `GIT_CONFIG_NOSYSTEM`, `core.hooksPath=/dev/null`, …) keeps the two gits from leaking into each other.
-- **Tiered AI strategy.** TF-IDF (free) → local MiniLM embeddings (optional, ~23 MB, zero-API) → Claude (only for mid-band ambiguity and decisions requiring natural-language judgment). `--quality-mode tiered-fast|claude-first|tier0-only` selects the escalation policy.
+- **Tiered AI strategy.** TF-IDF (free) → local MiniLM embeddings (required, ~23 MB one-time model download, zero-API) → Claude (only for mid-band ambiguity and decisions requiring natural-language judgment). `--quality-mode tiered-fast|claude-first|tier0-only` selects the escalation policy.
+- **Deterministic slug collisions.** NEST operator auto-resolves slug-vs-member-id collisions with a deterministic `-group` suffix before apply. Your convergence loop never needs manual retries for DUP-ID.
 - **Optional interactive review.** `skill-llm-wiki rebuild <wiki> --review` prints the post-convergence diff and commit list, lets the user approve / abort / `drop:<sha>` specific iterations, and re-runs validation + index regen on the reverted tree.
 - **Windows parity.** The CI matrix runs the smoke suite on both `ubuntu-latest` and `windows-latest`; the isolation env switches `/dev/null` to `NUL` and enables `core.longpaths=true` on Windows.
 
@@ -219,7 +271,9 @@ When the skill encounters a pre-2.0 versioned sibling directory, the intent reso
 - **Optional interactive review.** `rebuild --review` prints `git diff --stat` + the per-iteration commit list and prompts approve / abort / `drop:<sha>`. Drops become `git revert --no-edit` commits and the loop re-prompts so the user can drop multiple iterations.
 - **Never-auto-push remote mirroring.** `skill-llm-wiki remote <wiki> add <name> <url>` plus `skill-llm-wiki sync <wiki>` pushes tags (and optionally a branch) to a bare remote the user manages. Tag-only refspec by default; URL credentials are redacted in every echoed line and error message.
 
-## How it works
+## Phase-by-phase pipeline (the long version)
+
+Every operation runs the same git-backed sequence end-to-end. Phases are explicit so you can read the private git's `log --oneline` after a run and recover the full story of what happened.
 
 1. **Preflight + pre-op snapshot** — Node and git version checks, private-git integrity check, then `git add -A && git commit -m "pre-op <op-id>"` + tag `pre-op/<op-id>`.
 2. **Ingest** (Build only) — walk the source tree, compute content hashes, emit entry candidates. Byte-range provenance is recorded to `<wiki>/.llmwiki/provenance.yaml` so `LOSS-01` can verify nothing was silently dropped. Extend / Rebuild / Fix / Join do not currently touch `provenance.yaml`.
@@ -308,12 +362,15 @@ skill-llm-wiki/             # installed package layout
         ├── intent.mjs      # layout-mode / target / op resolver (INT-NN errors)
         ├── interactive.mjs # stdin prompts; non-TTY → hard error
         ├── similarity.mjs  # Tier 0 — TF-IDF + cosine
-        ├── embeddings.mjs  # Tier 1 — MiniLM via @xenova/transformers (optional)
+        ├── embeddings.mjs  # Tier 1 — MiniLM via @xenova/transformers (required)
         ├── similarity-cache.mjs # pairwise memoisation
         ├── decision-log.mjs     # .llmwiki/decisions.yaml writer
         ├── tiered.mjs      # escalation orchestrator + quality modes
         ├── migrate.mjs     # legacy .llmwiki.v<N> → .wiki migration flow
         ├── operators.mjs   # The five rewrite operator primitives
+        ├── nest-applier.mjs # NEST apply + deterministic slug collision resolver
+        ├── cluster-detect.mjs # NEST candidate clusterer (affinity + threshold sweep)
+        ├── quality-metric.mjs # routing_cost metric for NEST gating
         ├── frontmatter.mjs # Zero-dep YAML frontmatter parser/writer
         ├── ingest.mjs      # Source walk + content hashing
         ├── draft.mjs       # Deterministic frontmatter drafting + provenance record
@@ -404,11 +461,11 @@ Every decision the skill makes is classified against a three-tier ladder and esc
 
 Quality modes select the escalation policy:
 
-- `tiered-fast` (default) — full Tier 0 → 1 → 2 ladder, embeddings when installed.
+- `tiered-fast` (default) — full Tier 0 → 1 → 2 ladder.
 - `claude-first` — skip Tier 1; mid-band Tier 0 escalates straight to Claude.
 - `tier0-only` — air-gapped mode; mid-band becomes an "undecidable" marker resolved via the interactive review flow.
 
-Tier 1 uses `@xenova/transformers` running `Xenova/all-MiniLM-L6-v2` locally via ONNX (~23 MB one-time model download, ~50 ms per text on CPU, zero API cost). It is an **optional** dependency — if not installed, Tier 1 is skipped; in a TTY the skill prompts to install it once, silently falls through in CI/hook mode.
+Tier 1 uses `@xenova/transformers` running `Xenova/all-MiniLM-L6-v2` locally via ONNX (~23 MB one-time model download, ~50 ms per text on CPU, zero API cost). It is a **required** runtime dependency since v0.4.0 — the dependency preflight at CLI startup verifies it is resolvable, and will offer to `npm install` it on a fresh checkout if it is missing.
 
 Token cost is proportional to *ambiguity*, not to corpus size. A 10k-entry wiki takes roughly the same Claude budget as a 100-entry wiki when it produces the same number of mid-band decisions. All AI calls are cached by request hash at `.work/ai-cache/` and all pairwise similarity decisions are cached at `.llmwiki/similarity-cache/` so resumes and re-runs replay free.
 

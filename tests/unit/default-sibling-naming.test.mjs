@@ -2,7 +2,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { defaultSiblingPath } from "../../scripts/lib/paths.mjs";
 
 test("basic relative path", () => {
@@ -14,7 +15,8 @@ test("trailing slash is normalised", () => {
 });
 
 test("absolute path", () => {
-  assert.equal(defaultSiblingPath("/tmp/fluffy"), "/tmp/fluffy.wiki");
+  const abs = join(tmpdir(), "fluffy");
+  assert.equal(defaultSiblingPath(abs), `${abs}.wiki`);
 });
 
 test("cwd-as-source uses basename of cwd", () => {
@@ -26,10 +28,8 @@ test("cwd-as-source uses basename of cwd", () => {
 });
 
 test("multi-segment path preserves parent", () => {
-  assert.equal(
-    defaultSiblingPath("/home/alice/projects/docs"),
-    "/home/alice/projects/docs.wiki",
-  );
+  const abs = join(tmpdir(), "alice", "projects", "docs");
+  assert.equal(defaultSiblingPath(abs), `${abs}.wiki`);
 });
 
 test("result never contains .llmwiki.vN anywhere", () => {
