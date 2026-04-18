@@ -13,18 +13,12 @@ import {
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
 import { runInit, InitError, renderInitText } from "../../scripts/lib/init.mjs";
 import { ENVELOPE_SCHEMA } from "../../scripts/lib/json-envelope.mjs";
+import { mktmp } from "../helpers/tmp.mjs";
 
 const SKILL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const CLI_PATH = join(SKILL_ROOT, "scripts", "cli.mjs");
-
-function mktmp(tag) {
-  const p = join(tmpdir(), `init-${tag}-${process.pid}-${Date.now()}`);
-  mkdirSync(p, { recursive: true });
-  return p;
-}
 
 test("runInit seeds a dated wiki via --kind dated default template", () => {
   const topic = join(mktmp("dated"), "reports");

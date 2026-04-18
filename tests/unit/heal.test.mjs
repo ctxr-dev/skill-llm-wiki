@@ -6,22 +6,16 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
 import {
   FINDING_ACTIONS,
   classifyFindings,
   runHeal,
   renderHealText,
 } from "../../scripts/lib/heal.mjs";
+import { mktmp } from "../helpers/tmp.mjs";
 
 const SKILL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const CLI_PATH = join(SKILL_ROOT, "scripts", "cli.mjs");
-
-function mktmp(tag) {
-  const p = join(tmpdir(), `heal-${tag}-${process.pid}-${Date.now()}`);
-  mkdirSync(p, { recursive: true });
-  return p;
-}
 
 test("FINDING_ACTIONS covers the known validate codes", () => {
   const required = [
@@ -180,30 +174,48 @@ test("`heal --dry-run` is accepted as a no-op label", () => {
   }
 });
 
-test("`heal` without --json prints a text summary with next command", () => {
-  const fake = join(mktmp("cli-text"), "x");
-  // Create a well-formed but empty-ish wiki body that will have a
-  // non-broken-but-not-ok outcome. Minimal shape: index.md that
-  // validate can parse but that fails a lesser check.
+test("`heal` without --json prints a specific broken verdict on a non-wiki dir", () => {
+  // A directory without index.md and without .llmwiki/git/ is a
+  // known-broken shape. validate emits WIKI-01 (not a valid wiki
+  // root) which FINDING_ACTIONS maps to "manual" → verdict
+  // "broken". This test asserts the exact verdict and exit code
+  // rather than the previous vacuous 5-way alternation.
+  const fake = join(mktmp("cli-text-broken"), "x");
   mkdirSync(fake, { recursive: true });
-  writeFileSync(
-    join(fake, "index.md"),
-    `---
-id: xyz
-type: index
-depth_role: root
-focus: "x"
----
-`,
-    "utf8",
-  );
   try {
     const r = spawnSync(process.execPath, [CLI_PATH, "heal", fake], {
       encoding: "utf8",
     });
-    // Whatever the verdict, the text output should start with "heal:"
-    assert.match(r.stdout, /^heal: (ok|fixable|needs-rebuild|broken|ambiguous)/);
+    assert.equal(r.status, 6, `expected exit 6 for broken verdict, got ${r.status}`);
+    assert.match(r.stdout, /^heal: broken \(manual\)/);
+    // No NEXT-01 hint when action is manual (no self-heal path).
+    assert.doesNotMatch(r.stdout, /\n {2}next: /);
   } finally {
     rmSync(dirname(fake), { recursive: true, force: true });
+  }
+});
+
+test("runHeal reaches the ambiguous path when validateWiki cannot run", () => {
+  // Pass a path that exists as a REGULAR FILE, not a directory.
+  // validateWiki's internal reads throw before producing findings.
+  // runHeal catches the throw and surfaces `ambiguous` with the
+  // error preserved in the result (diagnostic HEAL-00 added later
+  // by the CLI wrapper).
+  const base = mktmp("ambiguous-path");
+  const asFile = join(base, "not-a-dir");
+  writeFileSync(asFile, "i am a file, not a wiki\n", "utf8");
+  try {
+    const r = runHeal(asFile);
+    assert.ok(
+      r.verdict === "ambiguous" || r.verdict === "broken",
+      `expected ambiguous or broken for a file-path, got ${r.verdict}`,
+    );
+    // When validate throws, runHeal populates `error` and clears
+    // next_command. When validate returns WIKI-01 cleanly, the
+    // verdict is broken and next_command is still null (manual
+    // action).
+    assert.equal(r.next_command, null);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
 });

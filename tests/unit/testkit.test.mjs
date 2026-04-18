@@ -16,8 +16,8 @@ import {
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
 import { stubSkill, STUB_SKILL_NAME } from "../../scripts/testkit/stub-skill.mjs";
+import { mktmp } from "../helpers/tmp.mjs";
 import { makeWikiFixture } from "../../scripts/testkit/make-wiki-fixture.mjs";
 import {
   assertFrontmatterShape,
@@ -27,12 +27,6 @@ import { runCli, runCliOk } from "../../scripts/testkit/cli-run.mjs";
 
 const SKILL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const CLI_PATH = join(SKILL_ROOT, "scripts", "cli.mjs");
-
-function mktmp(tag) {
-  const p = join(tmpdir(), `testkit-${tag}-${process.pid}-${Date.now()}`);
-  mkdirSync(p, { recursive: true });
-  return p;
-}
 
 // ─── stub-skill ─────────────────────────────────────────────
 
