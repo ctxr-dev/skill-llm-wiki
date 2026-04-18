@@ -247,6 +247,37 @@ test("runCliOk throws on a non-zero exit with stderr in the message", () => {
   );
 });
 
+test("runCli surfaces spawn errors via the error field", () => {
+  // Force a spawn failure by pointing at a non-existent working
+  // directory. spawnSync returns r.error with ENOENT (macOS/Linux)
+  // or similar on Windows. The testkit must expose this to callers
+  // rather than silently returning status: null.
+  const r = runCli(["--version"], { cwd: "/does/not/exist/anywhere" });
+  // Either spawnSync populated r.error, or the child ran and then
+  // reported the cwd problem via stderr + non-zero exit — both
+  // outcomes are platform-dependent but we must see one of them.
+  assert.ok(
+    r.error !== null || r.status !== 0,
+    `expected a spawn error or non-zero exit, got status=${r.status} error=${r.error}`,
+  );
+});
+
+test("runCliOk surfaces spawn errors (not just non-zero exits)", () => {
+  // We can't easily force a true spawn ENOENT against process.execPath
+  // without renaming node, but we can assert the error-field code path
+  // still throws a descriptive message when cwd doesn't exist.
+  assert.throws(
+    () => runCliOk(["--version"], { cwd: "/does/not/exist/anywhere" }),
+    /spawn|exited/,
+  );
+});
+
+test("runCli result includes the error field (even when null)", () => {
+  const r = runCli(["--version"]);
+  assert.ok("error" in r, "runCli result must include an `error` field");
+  assert.equal(r.error, null, "clean run should have error: null");
+});
+
 // ─── CLI shorthand: `testkit-stub --at <dir>` ───────────────
 
 test("`testkit-stub --at <dir>` seeds a stub install", () => {

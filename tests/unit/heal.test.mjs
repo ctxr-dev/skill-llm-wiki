@@ -125,13 +125,34 @@ test("`heal <wiki> --json` emits an envelope with the verdict", () => {
       [CLI_PATH, "heal", fake, "--json"],
       { encoding: "utf8" },
     );
-    // Exit 2 for broken; schema should still be valid.
+    // verdict "broken" maps to exit 6 (wiki corrupt), not 2.
+    // Consumers gate on the envelope's verdict, not the exit code.
     const env = JSON.parse(r.stdout.trim().split("\n").pop());
     assert.equal(env.schema, "skill-llm-wiki/v1");
     assert.equal(env.command, "heal");
     assert.equal(env.verdict, "broken");
-    assert.equal(env.exit, 2);
+    assert.equal(env.exit, 6);
+    assert.equal(r.status, 6);
     assert.ok(env.diagnostics.length >= 1);
+  } finally {
+    rmSync(dirname(fake), { recursive: true, force: true });
+  }
+});
+
+test("`heal --dry-run` is accepted as a no-op label", () => {
+  const fake = join(mktmp("cli-dryrun"), "x");
+  mkdirSync(fake, { recursive: true });
+  try {
+    const r = spawnSync(
+      process.execPath,
+      [CLI_PATH, "heal", fake, "--dry-run", "--json"],
+      { encoding: "utf8" },
+    );
+    // --dry-run is advertised in contract.SUBCOMMANDS.heal.flags;
+    // the CLI must accept it without "unknown flag" error.
+    const env = JSON.parse(r.stdout.trim().split("\n").pop());
+    assert.equal(env.schema, "skill-llm-wiki/v1");
+    assert.equal(env.command, "heal");
   } finally {
     rmSync(dirname(fake), { recursive: true, force: true });
   }

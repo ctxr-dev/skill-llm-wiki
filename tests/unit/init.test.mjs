@@ -189,7 +189,7 @@ test("`init <topic> --kind dated --json` emits the initialised envelope", () => 
   }
 });
 
-test("`init` without --kind or --template fails with INIT-02", () => {
+test("`init` without --kind or --template fails with INIT-02 (exit 2)", () => {
   const topic = join(mktmp("no-flags"), "x");
   try {
     const r = spawnSync(
@@ -197,10 +197,32 @@ test("`init` without --kind or --template fails with INIT-02", () => {
       [CLI_PATH, "init", topic, "--json"],
       { encoding: "utf8" },
     );
-    assert.equal(r.status, 1);
+    // INIT-02 is a validation condition (user asked for init but
+    // didn't narrow to a template), so exit is 2 — matches the
+    // skill-wide exit code scheme (2 = validation/ambiguity).
+    assert.equal(r.status, 2);
     const env = JSON.parse(r.stdout);
     assert.equal(env.verdict, "ambiguous");
+    assert.equal(env.exit, 2);
     assert.equal(env.diagnostics[0].code, "INIT-02");
+  } finally {
+    rmSync(dirname(topic), { recursive: true, force: true });
+  }
+});
+
+test("`init` with unknown flag fails with INIT-00 (exit 1)", () => {
+  const topic = join(mktmp("bad-flag"), "x");
+  try {
+    const r = spawnSync(
+      process.execPath,
+      [CLI_PATH, "init", topic, "--not-a-flag", "--json"],
+      { encoding: "utf8" },
+    );
+    // INIT-00 is a CLI usage error (unknown flag) → exit 1.
+    assert.equal(r.status, 1);
+    const env = JSON.parse(r.stdout);
+    assert.equal(env.exit, 1);
+    assert.equal(env.diagnostics[0].code, "INIT-00");
   } finally {
     rmSync(dirname(topic), { recursive: true, force: true });
   }

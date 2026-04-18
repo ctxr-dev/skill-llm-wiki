@@ -15,11 +15,24 @@ const SKILL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 export const CLI_PATH = join(SKILL_ROOT, "scripts", "cli.mjs");
 
 // Run the skill CLI with `args`. Returns an object of:
-//   { status, stdout, stderr, envelope }
+//   { status, stdout, stderr, envelope, error }
 //
 // `envelope` is only populated when `args` includes `--json` or
 // `--json-errors` AND the stdout parses as JSON. On parse failure it
 // is `null` and the caller can inspect `stdout` directly.
+//
+// `error` is populated when the child process could not be spawned
+// at all (ENOENT, EACCES, EPERM). When it is set, `status` will be
+// `null` (spawnSync's convention) and the `error` field carries the
+// Node errno. Consumers writing cross-platform tests need to see
+// this to distinguish "CLI ran and exited with status X" from "CLI
+// never ran".
+//
+// Note on environment: when `env` is supplied, the testkit forwards
+// the parent process environment too (object-spread with the
+// override). This is intentional for local test convenience; CI
+// harnesses writing untrusted fixtures should scrub `process.env`
+// before calling.
 export function runCli(args, { cwd, env } = {}) {
   const resolvedArgs = Array.isArray(args) ? args : [];
   const r = spawnSync(process.execPath, [CLI_PATH, ...resolvedArgs], {
@@ -63,16 +76,26 @@ export function runCli(args, { cwd, env } = {}) {
     stdout: r.stdout,
     stderr: r.stderr,
     envelope,
+    error: r.error ?? null,
   };
 }
 
 // Convenience: assert a clean run, throw on non-zero exit with the
-// stderr attached so the consumer's test output is useful.
+// stderr attached so the consumer's test output is useful. When the
+// child failed to spawn at all (ENOENT/EACCES), surface that
+// explicitly rather than saying "exited null".
 export function runCliOk(args, opts) {
   const r = runCli(args, opts);
+  const argString = Array.isArray(args) ? args.join(" ") : "";
+  if (r.error) {
+    throw new Error(
+      `runCliOk: failed to spawn skill-llm-wiki ${argString}: ` +
+        `${r.error.code ?? "unknown"} — ${r.error.message}`,
+    );
+  }
   if (r.status !== 0) {
     throw new Error(
-      `runCliOk: skill-llm-wiki ${Array.isArray(args) ? args.join(" ") : ""} exited ${r.status}:\n${r.stderr}`,
+      `runCliOk: skill-llm-wiki ${argString} exited ${r.status}:\n${r.stderr}`,
     );
   }
   return r;

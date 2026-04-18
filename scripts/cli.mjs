@@ -1199,7 +1199,13 @@ async function cmdHeal(args) {
     });
   }
 
-  const exit = result.verdict === "ok" ? 0 : 2;
+  // heal is advisory, not a validator. Successful classification is
+  // exit 0 regardless of verdict (ok / fixable / needs-rebuild) — the
+  // envelope's `verdict` carries the state. Only a genuinely broken
+  // or unclassifiable wiki is exit 6 (matches the documented "wiki
+  // corrupt" meaning). Consumers gate on the envelope, not exit 2.
+  const exit =
+    result.verdict === "broken" || result.verdict === "ambiguous" ? 6 : 0;
   if (wantJson) {
     writeEnvelope(
       makeEnvelope({
@@ -1231,7 +1237,15 @@ async function cmdHeal(args) {
   process.exit(exit);
 }
 
+// Map init error codes to the skill's documented exit scheme.
+// INIT-00 / INIT-01 are CLI usage errors (missing flag, unknown
+// flag) → exit 1. INIT-02..07 are validation / ambiguity conditions
+// (bad --kind, template mismatch, contract collision) → exit 2,
+// matching how build/extend etc. surface validation failures.
+const INIT_USAGE_CODES = new Set(["INIT-00", "INIT-01"]);
+
 function initError(code, message, wantJson, topic) {
+  const exit = INIT_USAGE_CODES.has(code) ? 1 : 2;
   if (wantJson) {
     process.stdout.write(
       JSON.stringify({
@@ -1239,18 +1253,16 @@ function initError(code, message, wantJson, topic) {
         command: "init",
         target: topic,
         verdict: "ambiguous",
-        exit: 1,
-        diagnostics: [
-          { code, severity: "error", path: topic, message },
-        ],
+        exit,
+        diagnostics: [{ code, severity: "error", path: topic, message }],
         artifacts: { created: [], modified: [], deleted: [] },
         timing_ms: 0,
       }) + "\n",
     );
-    process.exit(1);
+    process.exit(exit);
   }
   process.stderr.write(`error: ${code} ${message}\n`);
-  process.exit(1);
+  process.exit(exit);
 }
 
 function usageError(msg) {
