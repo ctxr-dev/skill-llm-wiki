@@ -43,6 +43,22 @@ The returned absolute path contains:
 - `assert-frontmatter.mjs` — parse a leaf's frontmatter and assert expected fields.
 - `cli-run.mjs` — spawn the CLI, capture stdout/stderr/status, auto-parse the envelope.
 
+> **About `<testkit_dir>` in the code below:** the literal string
+> `<testkit_dir>` is a placeholder. Resolve it at test-load time via
+> the `where` probe. Example:
+>
+> ```js
+> import { spawnSync } from "node:child_process";
+> const WHERE = JSON.parse(
+>   spawnSync("skill-llm-wiki", ["where", "--json"], { encoding: "utf8" }).stdout,
+> );
+> const TESTKIT = WHERE.testkit_dir;
+> const { stubSkill } = await import(`${TESTKIT}/stub-skill.mjs`);
+> ```
+>
+> Do not copy the `<testkit_dir>/stub-skill.mjs` string verbatim
+> into your imports — it will not resolve.
+
 ## Consumer test code
 
 ### Presence stub (replaces hand-rolled `wikiSkillStub`)

@@ -12,7 +12,7 @@ covers:
   - "remote mirroring: remote add/list/remove, sync with tag-only default refspec"
   - "layout mode flags (--layout-mode sibling|in-place|hosted, --target)"
   - "tiered-AI flags (--quality-mode tiered-fast|claude-first|tier0-only)"
-  - "UX flags (--no-prompt, --json-errors, --accept-dirty, --accept-foreign-target, --review)"
+  - "UX flags (--no-prompt, --json, --json-errors (legacy alias), --accept-dirty, --accept-foreign-target, --review)"
   - "internal helpers: ingest, draft-leaf, draft-category, index-rebuild, index-rebuild-one, shape-check"
   - "exit code summary (0 ok, 1 usage, 2 validation/ambiguity/review-abort, 3 resolve miss, 4 node too old, 5 git missing/too old, 6 wiki corrupt, 7 NEEDS_TIER2 suspend-and-resume, 8 DEPS_MISSING runtime dependency missing)"
 tags:
@@ -235,7 +235,8 @@ All top-level operations accept:
 ## UX flags
 
 - `--no-prompt` / env `LLM_WIKI_NO_PROMPT=1` — fail loudly on any ambiguity instead of prompting; emits `INT-12` if the skill would otherwise ask a TTY question.
-- `--json-errors` — emit `INT-NN` ambiguity errors as JSON on stderr instead of numbered-options text.
+- `--json` — canonical machine-output flag. Enables the `skill-llm-wiki/v1` envelope on subcommands that emit one (validate, init, heal, rollback) and switches `INT-NN` ambiguity errors to JSON on stderr. The consumer-facing probe subcommands `contract` and `where` always emit JSON when this flag is present.
+- `--json-errors` — legacy alias for `--json`, kept for consumers that adopted the flag before the envelope shipped. Triggers identical behaviour. New code should pass `--json`.
 - `--accept-dirty` — operate on a source inside a dirty user git repo (escape hatch for `INT-08`).
 - `--review` — enable the `rebuild` interactive review cycle. See `guide/operations/rebuild.md`.
 

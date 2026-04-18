@@ -111,9 +111,12 @@ if (errors.length > 0) {
 
 ## Failure modes
 
-- Validate exits `6`: the wiki substrate is corrupt (missing `.llmwiki/git/`, divergent refs). CI must fail; fix in a separate PR.
-- Validate exits `7`: impossible for `validate` alone; only reachable from build/extend/rebuild.
-- Validate exits `8`: runtime deps missing on CI runner. Install `@ctxr/skill-llm-wiki` in the CI image.
+- Validate exits `2`: error-severity findings present in the wiki; `.diagnostics` contains one entry per finding with its code, severity, path, and message.
+- Validate exits `4`: Node.js too old on the CI runner. Upgrade to Node 20 or the version pinned in the skill's `.nvmrc`.
+- Validate exits `5`: git missing or too old on the runner.
+- Validate exits `7`: impossible for `validate` alone; only reachable from build/extend/rebuild (Tier 2 suspend-and-resume).
+- Validate exits `8`: runtime deps missing on CI runner. Install `@ctxr/skill-llm-wiki` (and its transitive deps) in the CI image.
+- For wiki-substrate corruption (missing `.llmwiki/git/`, divergent refs), run `skill-llm-wiki heal <wiki> --json` instead — `heal` is the subcommand that classifies substrate state and surfaces verdict `broken` with exit 6.
 
 ## Do not
 
