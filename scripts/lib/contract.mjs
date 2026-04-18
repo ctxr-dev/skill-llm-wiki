@@ -28,19 +28,28 @@ export const MIN_CONSUMER_FORMAT_VERSION = 1;
 
 // ─── Canonical shape ────────────────────────────────────────────────
 
-// Leaf frontmatter fields the skill reads and writes. Mirrors
-// scripts/lib/draft.mjs AUTHORED_LEAF_FIELDS plus the always-derived
-// fields. Consumers that author their own leaves rely on this list.
+// Leaf + index frontmatter fields the skill reads and writes.
+// Mirrors scripts/lib/draft.mjs AUTHORED_LEAF_FIELDS for leaves
+// and scripts/lib/indices.mjs / scripts/lib/validate.mjs for
+// indices. Enums here are the canonical values the skill's own
+// code emits and validate.mjs accepts; consumers authoring their
+// own frontmatter must pick from these.
 const FRONTMATTER_SCHEMA = {
   leaf: {
     required: ["id", "type", "depth_role", "focus", "parents", "source"],
     fields: {
       id: { kind: "string", description: "Unique leaf identifier; derived from source path." },
-      type: { kind: "enum", values: ["primary", "extension", "index"] },
-      depth_role: { kind: "enum", values: ["root", "branch", "leaf"] },
+      // Leaves are `primary` by default; `overlay` is a dedicated
+      // type that carries a smaller body budget (see validate.mjs
+      // SIZE-CAP) and mandates overlay_targets[].
+      type: { kind: "enum", values: ["primary", "overlay"] },
+      // Leaves only ever carry depth_role "leaf". Indices have
+      // their own depth_role vocabulary (see index.depth_role
+      // below).
+      depth_role: { kind: "enum", values: ["leaf"] },
       focus: { kind: "string", description: "One-line subject of the leaf." },
       covers: { kind: "string[]", description: "Sub-topics or H2 headings." },
-      parents: { kind: "string[]", description: "Relative paths to parent index.md files." },
+      parents: { kind: "string[]", description: "Relative paths to parent index.md files (e.g. [index.md] or [../index.md])." },
       tags: { kind: "string[]" },
       source: {
         kind: "object",
@@ -54,19 +63,31 @@ const FRONTMATTER_SCHEMA = {
       domains: { kind: "string[]" },
       aliases: { kind: "string[]" },
       shared_covers: { kind: "string[]" },
+      // Only present (and required) when type === "overlay".
       overlay_targets: { kind: "string[]" },
       links: { kind: "string[]" },
     },
   },
   index: {
-    required: ["id", "type", "depth_role"],
+    required: ["id", "type", "depth_role", "focus"],
     fields: {
-      id: { kind: "string" },
+      id: { kind: "string", description: "Must match the containing directory's basename." },
       type: { kind: "enum", values: ["index"] },
-      depth_role: { kind: "enum", values: ["root", "branch"] },
-      children: { kind: "string[]" },
-      entries: { kind: "object[]" },
+      // `category` is the root index of a wiki; `subcategory` is
+      // any nested index. There is no `root` or `branch` role in
+      // the canonical shape; the skill refuses those.
+      depth_role: { kind: "enum", values: ["category", "subcategory"] },
+      focus: { kind: "string", description: "One-line subject of this branch." },
+      depth: { kind: "integer", description: "0 for root category, 1+ for subcategories." },
+      parents: { kind: "string[]", description: "Empty at the root; [../index.md] for nested." },
+      children: { kind: "string[]", description: "Relative paths to nested index files." },
+      entries: { kind: "object[]", description: "Per-leaf summaries (id, file, type, focus, tags)." },
+      shared_covers: { kind: "string[]", description: "Inherited by this branch's leaves." },
+      orientation: { kind: "string", description: "Authored guidance block; preserved across rebuilds." },
       rebuild_command: { kind: "string" },
+      // Skill-generated marker; validate rejects a wiki root
+      // whose root index.md lacks it.
+      generator: { kind: "string", description: "e.g. \"skill-llm-wiki/v1\"; required on the root index." },
     },
   },
 };

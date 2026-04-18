@@ -1,7 +1,7 @@
 ---
 id: consumers
 type: index
-depth_role: branch
+depth_role: subcategory
 depth: 1
 focus: "Integrating another skill or agent as a consumer of skill-llm-wiki"
 parents:

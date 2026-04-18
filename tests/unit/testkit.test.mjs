@@ -212,6 +212,63 @@ test("makeWikiFixture refuses seed-leaf paths that escape the fixture root", asy
   }
 });
 
+test("makeWikiFixture seeds a root index.md with the generator marker", async () => {
+  const path = join(mktmp("fixture-index"), "wiki");
+  try {
+    const r = await makeWikiFixture({ path, kind: "dated" });
+    const indexPath = join(r.path, "index.md");
+    assert.ok(existsSync(indexPath));
+    const body = readFileSync(indexPath, "utf8");
+    assert.match(body, /generator:\s*"skill-llm-wiki\/v1"/);
+    assert.match(body, /type:\s*index/);
+    assert.match(body, /depth_role:\s*category/);
+    // id must match the basename of the fixture root.
+    assert.match(body, /^id:\s*wiki$/m);
+  } finally {
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+});
+
+test("defaultLeafBody computes parents[] based on leaf depth", async () => {
+  const path = join(mktmp("fixture-parents"), "wiki");
+  try {
+    const r = await makeWikiFixture({
+      path,
+      kind: "dated",
+      seedLeaves: [
+        "root-leaf.md",
+        "2026/04/18/nested.md",
+      ],
+    });
+    const rootLeaf = readFileSync(r.seeded_leaves[0], "utf8");
+    const nestedLeaf = readFileSync(r.seeded_leaves[1], "utf8");
+    // Root-level leaf: parents: [index.md].
+    assert.match(rootLeaf, /parents:\s*\[index\.md\]/);
+    // yyyy/mm/dd/leaf.md is 3 dirs deep → ../../../index.md.
+    assert.match(nestedLeaf, /parents:\s*\[\.\.\/\.\.\/\.\.\/index\.md\]/);
+  } finally {
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+});
+
+test("defaultLeafBody normalises source.path to POSIX forward slashes", async () => {
+  const path = join(mktmp("fixture-posix"), "wiki");
+  try {
+    const r = await makeWikiFixture({
+      path,
+      kind: "dated",
+      // Callers on Windows may pass backslash-separated paths.
+      seedLeaves: [{ path: "2026\\04\\18\\doc.md", body: null }],
+    });
+    const body = readFileSync(r.seeded_leaves[0], "utf8");
+    // Normalised to forward slashes regardless of caller input.
+    assert.match(body, /path:\s*2026\/04\/18\/doc\.md/);
+    assert.doesNotMatch(body, /path:.*\\/);
+  } finally {
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+});
+
 test("makeWikiFixture seeds leaves from strings and objects", async () => {
   const path = join(mktmp("fixture-seed"), "wiki");
   try {

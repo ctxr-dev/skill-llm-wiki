@@ -19,7 +19,14 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "node:path";
 import { templatesDir } from "../lib/templates.mjs";
 
 // Reject any seed-leaf path that would escape the fixture root via
@@ -169,6 +176,16 @@ export async function makeWikiFixture({
   await refuseSymlink(contractPath, rootAbs);
   await copyFile(tmplPath, contractPath);
 
+  // Seed a root index.md so `skill-llm-wiki validate/heal` against
+  // the fixture doesn't trip WIKI-01 ("not a valid wiki root").
+  // validateWiki requires index.md with the `generator` marker, a
+  // matching `id`, `type: index`, `depth_role: category` for the
+  // root, and a non-empty `focus`.
+  const indexPath = join(rootAbs, "index.md");
+  await refuseSymlink(indexPath, rootAbs);
+  const rootId = basename(rootAbs);
+  await writeFile(indexPath, defaultRootIndexBody(rootId, tmplName), "utf8");
+
   // Seed any requested leaves. Each entry is either:
   //   { path: "reports/2026/04/18/example.md", body: "..." }
   // or just a plain string `"reports/2026/04/18/example.md"` which
@@ -206,9 +223,20 @@ export async function makeWikiFixture({
 }
 
 function defaultLeafBody(relativePath) {
-  const segments = relativePath.split(/[\\\/]/).filter(Boolean);
-  const basename = segments[segments.length - 1] ?? "leaf.md";
-  const id = basename.replace(/\.md$/, "");
+  const segments = relativePath.split(/[\\/]/).filter(Boolean);
+  const leafName = segments[segments.length - 1] ?? "leaf.md";
+  const id = leafName.replace(/\.md$/, "");
+  // Compute parents[] relative to the single root index.md that
+  // makeWikiFixture seeds. Depth is (segments - 1) because the
+  // last segment is the leaf file itself. A root-level leaf gets
+  // `index.md`, a 1-level-deep leaf gets `../index.md`, a 3-level
+  // date-partitioned leaf (yyyy/mm/dd/x.md) gets `../../../index.md`.
+  const depth = Math.max(0, segments.length - 1);
+  const parents = depth === 0 ? "index.md" : `${"../".repeat(depth)}index.md`;
+  // source.path is a POSIX-relative path per the contract
+  // (scripts/lib/contract.mjs frontmatter_schema.leaf.source.path).
+  // Windows callers may pass "a\\b\\c"; normalise.
+  const sourcePathPosix = relativePath.split(/[\\/]/).filter(Boolean).join("/");
   return [
     "---",
     `id: ${id}`,
@@ -216,16 +244,43 @@ function defaultLeafBody(relativePath) {
     "depth_role: leaf",
     `focus: "${id}"`,
     "covers: []",
-    "parents: [../index.md]",
+    `parents: [${parents}]`,
     "tags: []",
     `source:`,
     `  origin: file`,
-    `  path: ${relativePath}`,
+    `  path: ${sourcePathPosix}`,
     "---",
     "",
     `# ${id}`,
     "",
     "Fixture leaf body.",
+    "",
+  ].join("\n");
+}
+
+// Minimal root index.md for a fresh fixture. Carries the fields
+// validateWiki + isWikiRoot require: generator marker, id matching
+// basename, type: index, depth_role: category, focus, empty
+// parents. Without this, `skill-llm-wiki validate/heal` against
+// the fixture returns verdict "broken" with WIKI-01.
+function defaultRootIndexBody(rootId, templateName) {
+  return [
+    "---",
+    `id: ${rootId}`,
+    "type: index",
+    "depth_role: category",
+    "depth: 0",
+    `focus: "test fixture: ${templateName}"`,
+    "parents: []",
+    "children: []",
+    "entries: []",
+    "shared_covers: []",
+    `generator: "skill-llm-wiki/v1"`,
+    "---",
+    "",
+    `# ${rootId}`,
+    "",
+    "Fixture root index seeded by makeWikiFixture. Not a production wiki.",
     "",
   ].join("\n");
 }
