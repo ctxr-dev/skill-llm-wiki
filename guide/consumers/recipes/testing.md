@@ -45,15 +45,21 @@ The returned absolute path contains:
 
 > **About `<testkit_dir>` in the code below:** the literal string
 > `<testkit_dir>` is a placeholder. Resolve it at test-load time via
-> the `where` probe. Example:
+> the `where` probe, and convert the filesystem path to a `file://`
+> URL before passing it to dynamic `import()` — Node ESM requires
+> this on Windows (where `TESTKIT` looks like `C:\...`) and it is
+> harmless on POSIX. Example:
 >
 > ```js
 > import { spawnSync } from "node:child_process";
+> import { pathToFileURL } from "node:url";
 > const WHERE = JSON.parse(
 >   spawnSync("skill-llm-wiki", ["where", "--json"], { encoding: "utf8" }).stdout,
 > );
 > const TESTKIT = WHERE.testkit_dir;
-> const { stubSkill } = await import(`${TESTKIT}/stub-skill.mjs`);
+> const { stubSkill } = await import(
+>   pathToFileURL(`${TESTKIT}/stub-skill.mjs`).href,
+> );
 > ```
 >
 > Do not copy the `<testkit_dir>/stub-skill.mjs` string verbatim

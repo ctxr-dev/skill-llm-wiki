@@ -120,6 +120,18 @@ test("makeWikiFixture copies the runbooks template for kind=subject", async () =
   }
 });
 
+test("makeWikiFixture rejects unknown kind with a clear error", async () => {
+  const path = join(mktmp("fixture-bad-kind"), "wiki");
+  try {
+    await assert.rejects(
+      () => makeWikiFixture({ path, kind: "weekly" }),
+      /unknown kind "weekly"/,
+    );
+  } finally {
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+});
+
 test("makeWikiFixture honours explicit --template", async () => {
   const path = join(mktmp("fixture-adrs"), "wiki");
   try {

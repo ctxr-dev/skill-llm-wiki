@@ -27,7 +27,9 @@ import {
   relative,
   resolve,
 } from "node:path";
-import { templatesDir } from "../lib/templates.mjs";
+import { defaultTemplateForKind, templatesDir } from "../lib/templates.mjs";
+
+const VALID_KINDS = new Set(["dated", "subject"]);
 
 // Reject any seed-leaf path that would escape the fixture root via
 // an absolute path or `..` traversal. This is a LEXICAL check; it
@@ -150,6 +152,15 @@ export async function makeWikiFixture({
   if (!path || typeof path !== "string") {
     throw new Error("makeWikiFixture: { path } is required");
   }
+  // Validate `kind` up front and throw on unknown values rather
+  // than silently falling back to the dated template and then
+  // returning the caller's (invalid) `kind` in the result. This
+  // matches runInit's behaviour (INIT-03).
+  if (!VALID_KINDS.has(kind)) {
+    throw new Error(
+      `makeWikiFixture: unknown kind "${kind}". Accepted: ${[...VALID_KINDS].join(", ")}`,
+    );
+  }
   const rootAbs = resolve(path);
   // Root-level check: walk UP from rootAbs to the first existing
   // ancestor, lstat it, and refuse if it's a symlink. This catches
@@ -165,7 +176,11 @@ export async function makeWikiFixture({
 
   // Pick a template. `templatesDir()` returns the absolute path;
   // filenames follow `<name>.llmwiki.layout.yaml`.
-  const tmplName = template ?? (kind === "subject" ? "runbooks" : "reports");
+  // Pick the default template from the shared table so
+  // makeWikiFixture and runInit stay in lockstep: both route
+  // dated → "reports", subject → "runbooks". Explicit --template
+  // still overrides.
+  const tmplName = template ?? defaultTemplateForKind(kind);
   const tmplPath = join(templatesDir(), `${tmplName}.llmwiki.layout.yaml`);
   if (!existsSync(tmplPath)) {
     throw new Error(

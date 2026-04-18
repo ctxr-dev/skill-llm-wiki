@@ -26,16 +26,26 @@ test("getWhere() returns absolute, existing paths for the required surface", () 
   assert.ok(existsSync(w.cli), `cli should exist at ${w.cli}`);
   assert.ok(existsSync(w.guide_dir), `guide/ should exist at ${w.guide_dir}`);
   assert.equal(w.format_version, FORMAT_VERSION);
-  assert.notEqual(w.package_version, "unknown");
+  // package_version is a string; `readPackageVersion()` explicitly
+  // falls back to "unknown" when package.json can't be read (e.g.
+  // stripped installs where kit removed the manifest). Accept that
+  // as a supported state; only assert the field is a non-empty
+  // string so broken envelopes still fail.
+  assert.equal(typeof w.package_version, "string");
+  assert.ok(w.package_version.length > 0);
 });
 
-test("getWhere() reports templates_dir and testkit_dir as null when absent", () => {
+test("getWhere() reports templates_dir and testkit_dir as absolute paths", () => {
   const w = getWhere();
-  // Either null (not shipped yet) or a real directory. Nothing else.
+  // Both directories are shipped in this repo and in every
+  // published tarball (see package.json `files`). `getWhere()`
+  // returns null only when the directory is absent — which can
+  // happen on a partial/stripped install. Assert the happy
+  // invariant for the tests run in this repo, but document the
+  // null fallback so consumers reading this know it exists.
   for (const key of ["templates_dir", "testkit_dir"]) {
-    if (w[key] !== null) {
-      assert.ok(existsSync(w[key]), `${key} set but missing: ${w[key]}`);
-    }
+    assert.notEqual(w[key], null, `${key} should be populated in this repo`);
+    assert.ok(existsSync(w[key]), `${key} must exist on disk: ${w[key]}`);
   }
 });
 
