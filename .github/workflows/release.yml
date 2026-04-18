@@ -35,15 +35,25 @@ jobs:
   open-release-pr:
     name: Open release PR
     runs-on: ubuntu-latest
+    # `workflow_dispatch` can be fired from the UI against any ref.
+    # Releases always cut from main; refuse to run if dispatched
+    # from a feature branch so an operator can't accidentally
+    # produce a release PR rooted at a work-in-progress commit.
+    if: github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/checkout@v4
         with:
+          # Defensive double-belt: even if the `if` above somehow
+          # lets a non-main dispatch through, explicitly check out
+          # main so the bump commit is always parented to it.
+          ref: main
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
 
       - name: Configure git
         run: |
