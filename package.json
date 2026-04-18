@@ -31,11 +31,15 @@
     "LICENSE",
     "CHANGELOG.md",
     "scripts/",
-    "guide/"
+    "guide/",
+    "templates/"
   ],
   "ctxr": {
     "type": "skill",
     "target": "folder"
+  },
+  "bin": {
+    "skill-llm-wiki": "scripts/cli.mjs"
   },
   "scripts": {
     "test": "node --test",

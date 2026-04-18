@@ -1,0 +1,34 @@
+# Layout contract for a plans topic.
+#
+# Copy this file to <topic>/.llmwiki.layout.yaml (or let `skill-llm-wiki init`
+# seed it for you) before building in hosted mode:
+#
+#   skill-llm-wiki init <topic> --kind dated --template plans
+#
+# Plans are hybrid: most live in dated subfolders alongside when they were
+# drafted, but long-running plan families live under a subject subfolder
+# instead. Both shapes are valid under this contract.
+
+mode: hosted
+
+versioning:
+  style: in-place
+  backup_before_mutate: true
+  backup_dir: .llmwiki.backups
+
+purpose: "Implementation plans: dated drafts under {yyyy}/{mm}/{dd}/, long-running families under a subject subfolder."
+
+global_invariants:
+  - "no flat date-prefixed leaves at the topic root"
+  - "plan families (3+ related plans under one umbrella) live in a subject subfolder, not a date subfolder"
+
+layout:
+  - path: .
+    purpose: "plans filed by date, with subject subfolders for long-running families"
+    dynamic_subdirs:
+      template: "{yyyy}/{mm}/{dd}"
+      purpose: "one-off plans drafted on a given day"
+      allow_entry_types: [primary]
+      content_rules:
+        - "slug encodes the subject, not the date"
+        - "promote a plan to a named subject subfolder once a third related plan appears"

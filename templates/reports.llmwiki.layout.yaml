@@ -1,0 +1,33 @@
+# Layout contract for a dated reports topic.
+#
+# Copy this file to <topic>/.llmwiki.layout.yaml (or let `skill-llm-wiki init`
+# seed it for you) before building in hosted mode:
+#
+#   skill-llm-wiki init <topic> --kind dated --template reports
+#
+# Reports accrete over time and must land under {yyyy}/{mm}/{dd}/ to keep
+# the topic root scannable. Flat date-prefixed siblings are refused.
+
+mode: hosted
+
+versioning:
+  style: in-place
+  backup_before_mutate: true
+  backup_dir: .llmwiki.backups
+
+purpose: "Generated reports (code review, investigation, regression triage), filed by date."
+
+global_invariants:
+  - "no flat date-prefixed leaves at the topic root; reports live under {yyyy}/{mm}/{dd}/"
+  - "no user-visible versioned filenames (.v1.md, -v2.md, etc.); history lives in the private git"
+
+layout:
+  - path: .
+    purpose: "reports filed by date"
+    dynamic_subdirs:
+      template: "{yyyy}/{mm}/{dd}"
+      purpose: "all reports written on a given day"
+      allow_entry_types: [primary]
+      content_rules:
+        - "one leaf per reviewed PR or standalone investigation"
+        - "slug encodes subject, not date (date is the path)"

@@ -1,0 +1,34 @@
+# Layout contract for a dated regressions topic.
+#
+# Copy this file to <topic>/.llmwiki.layout.yaml (or let `skill-llm-wiki init`
+# seed it for you) before building in hosted mode:
+#
+#   skill-llm-wiki init <topic> --kind dated --template regressions
+#
+# Regressions are lower-volume than reports or sessions, so the default
+# template is {yyyy}/{mm}. If your regression volume grows past a few
+# dozen per month, bump the template to {yyyy}/{mm}/{dd} and rebuild.
+
+mode: hosted
+
+versioning:
+  style: in-place
+  backup_before_mutate: true
+  backup_dir: .llmwiki.backups
+
+purpose: "Regression notes (bug-triage writeups, post-mortems, failing-build captures), filed by month."
+
+global_invariants:
+  - "no flat date-prefixed leaves at the topic root; regressions live under {yyyy}/{mm}/"
+  - "one leaf per distinct regression; update the leaf in place when the investigation continues"
+
+layout:
+  - path: .
+    purpose: "regressions filed by month"
+    dynamic_subdirs:
+      template: "{yyyy}/{mm}"
+      purpose: "all regressions captured in a given month"
+      allow_entry_types: [primary]
+      content_rules:
+        - "slug encodes the symptom or ticket id, not the date"
+        - "include the commit or release that introduced the regression in frontmatter.source"

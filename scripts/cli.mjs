@@ -122,15 +122,23 @@ function _depPreflightFailMessage(missing) {
   );
 }
 
-// Skip the dep check entirely for --version and --help so an operator
-// debugging a broken install can still get version/usage output. Every
-// other invocation (including `--help` placed AFTER another arg, which
-// is a malformed invocation we don't need to coddle) runs the check.
+// Skip the dep check entirely for --version, --help, `contract`, and
+// `where` so an operator debugging a broken install can still get
+// version/usage output, and so consumers can probe the contract
+// before the runtime dependencies are necessarily resolved. Every
+// other invocation (including `--help` placed AFTER another arg,
+// which is a malformed invocation we don't need to coddle) runs the
+// check.
 const _argvDP = process.argv.slice(2);
-const _isVersionOrHelpDP =
-  _argvDP[0] === "--version" || _argvDP[0] === "--help" || _argvDP[0] === "-h";
+const _isPreflightExemptDP =
+  _argvDP[0] === "--version" ||
+  _argvDP[0] === "--help" ||
+  _argvDP[0] === "-h" ||
+  _argvDP[0] === "contract" ||
+  _argvDP[0] === "where" ||
+  _argvDP[0] === "testkit-stub";
 
-if (!_isVersionOrHelpDP) {
+if (!_isPreflightExemptDP) {
   let _missingDP = _depPreflightCheck();
   if (_missingDP.length > 0) {
     process.stderr.write(_depPreflightFailMessage(_missingDP));
@@ -288,6 +296,18 @@ Remote mirroring (explicit user-invoked only, never auto-pushes):
   remote <wiki> list               List configured remotes
   sync <wiki> [--remote <name>]    Fetch + push tag refs explicitly
 
+Consumer-facing scaffolding:
+  init <topic> --kind dated|subject [--template <name>] [--force] [--json]
+                                   Seed a topic directory with a shipped
+                                   layout contract. Prints the exact build
+                                   command to run next. Replaces the
+                                   cp + edit + build-flag dance.
+  heal <wiki> [--json]             Classify validate findings into
+                                   ok / fixable / needs-rebuild / broken
+                                   and name the next command to run.
+                                   Routes consumers through the right
+                                   mutating op without guessing.
+
 Low-level script helpers (deterministic, called by Claude):
   ingest <source>                  Walk source, emit candidate JSON
   draft-leaf <candidate-file>       Script-first frontmatter draft for one candidate
@@ -312,11 +332,29 @@ Tiered-AI flags:
 
 UX flags:
   --no-prompt                      Never prompt; fail loud on ambiguity
-  --json-errors                    Emit ambiguity errors as JSON
+  --json                           Emit JSON on stdout. Operational
+                                   commands (validate, init, heal, rollback)
+                                   use the envelope schema
+                                   skill-llm-wiki/v1 for both success and
+                                   usage-error paths. Probe commands
+                                   (contract, where) emit their own
+                                   command-specific schemas
+                                   (skill-llm-wiki/contract/v1 and
+                                   skill-llm-wiki/where/v1).
+  --json-errors                    Legacy alias for --json, kept for
+                                   backwards compatibility.
   --accept-dirty                   Operate on a dirty user git repo
 
 Rollback flags:
   --to <ref>                       genesis | <op-id> | pre-<op-id> | HEAD~N
+
+Consumer probes (exempt from runtime-dep preflight):
+  contract [--json]                Print machine-readable format + CLI surface
+                                   contract. Consumers gate on format_version
+                                   instead of drift-testing SKILL.md.
+  where [--json]                   Print absolute paths to the skill root,
+                                   SKILL.md, guide/, templates/, and testkit/.
+                                   Resolves the install path without kit lookup.
 
 Global:
   --version                        Print CLI version
@@ -343,6 +381,7 @@ const FLAG_WITH_VALUE = new Set([
 ]);
 const FLAG_BOOLEAN = new Set([
   "--no-prompt",
+  "--json",
   "--json-errors",
   "--accept-dirty",
   "--accept-foreign-target",
@@ -434,6 +473,74 @@ async function main() {
     // sanity-check the binary. Every other code path runs the
     // preflight before any deterministic work begins.
     console.log(getPackageVersion());
+    return;
+  }
+
+  // `contract` and `where` are exempt from the dep preflight (see
+  // the preflight-skip list above) so consumers can probe the
+  // skill's surface before the runtime deps are resolvable. Both
+  // pull only pure-data from scripts/lib/* and do not touch any
+  // wiki state.
+  if (argv[0] === "contract") {
+    const { getContract, renderContractText } = await import("./lib/contract.mjs");
+    const { hasJsonFlag } = await import("./lib/json-envelope.mjs");
+    const wantJson = hasJsonFlag(argv.slice(1));
+    const contract = getContract();
+    if (wantJson) {
+      process.stdout.write(JSON.stringify(contract, null, 2) + "\n");
+    } else {
+      process.stdout.write(renderContractText(contract));
+    }
+    return;
+  }
+  if (argv[0] === "where") {
+    const { getWhere, renderWhereText } = await import("./lib/where.mjs");
+    const { hasJsonFlag } = await import("./lib/json-envelope.mjs");
+    const wantJson = hasJsonFlag(argv.slice(1));
+    const info = getWhere();
+    if (wantJson) {
+      process.stdout.write(JSON.stringify(info, null, 2) + "\n");
+    } else {
+      process.stdout.write(renderWhereText(info));
+    }
+    return;
+  }
+  if (argv[0] === "testkit-stub") {
+    // Shell shorthand for scripts/testkit/stub-skill.mjs. Consumers
+    // whose test suites shell out (e.g. zero-deps agent bundles that
+    // can't import from node_modules) use this to seed a stub skill
+    // install under an arbitrary base directory. Exempt from the
+    // runtime-dep preflight because testkit helpers must work in
+    // test environments that deliberately lack the runtime deps.
+    const rest = argv.slice(1);
+    let atDir = null;
+    let layout = "claude-skills";
+    for (let i = 0; i < rest.length; i++) {
+      const tok = rest[i];
+      if (tok === "--at") {
+        atDir = rest[++i];
+      } else if (tok.startsWith("--at=")) {
+        atDir = tok.slice("--at=".length);
+      } else if (tok === "--layout") {
+        layout = rest[++i];
+      } else if (tok.startsWith("--layout=")) {
+        layout = tok.slice("--layout=".length);
+      } else {
+        process.stderr.write(
+          `testkit-stub: unknown argument "${tok}"\n`,
+        );
+        process.exit(1);
+      }
+    }
+    if (!atDir) {
+      process.stderr.write(
+        "testkit-stub: --at <dir> is required (base directory to seed)\n",
+      );
+      process.exit(1);
+    }
+    const { stubSkill } = await import("./testkit/stub-skill.mjs");
+    const r = await stubSkill({ home: atDir, layout });
+    process.stdout.write(`${r.skillMd}\n`);
     return;
   }
 
@@ -587,7 +694,8 @@ async function main() {
   if (INTENT_SUBCOMMANDS.has(cmd)) {
     const parsed = parseSubArgv(args);
     if (parsed.error) {
-      const jsonMode = args.includes("--json-errors");
+      const { hasJsonFlag } = await import("./lib/json-envelope.mjs");
+      const jsonMode = hasJsonFlag(args);
       emitIntentError(
         {
           code: "INT-11",
@@ -599,7 +707,9 @@ async function main() {
       );
     }
     const { positionals, flags } = parsed;
-    const jsonMode = Boolean(flags.json_errors);
+    // `--json` is the canonical flag; `--json-errors` is the legacy
+    // alias kept for existing consumers. Either enables JSON output.
+    const jsonMode = Boolean(flags.json_errors) || Boolean(flags.json);
 
     // `migrate` has its own resolution path — the intent resolver would
     // reject the legacy folder shape as ambiguous.
@@ -667,6 +777,29 @@ async function main() {
 
     if (cmd === "rollback") {
       const result = rollbackOperation(plan.target, flags.to);
+      if (jsonMode) {
+        const { makeEnvelope, writeEnvelope } = await import(
+          "./lib/json-envelope.mjs"
+        );
+        writeEnvelope(
+          makeEnvelope({
+            command: "rollback",
+            target: plan.target,
+            verdict: "ok",
+            exit: 0,
+            diagnostics: [
+              {
+                code: "ROLLBACK-01",
+                severity: "info",
+                path: plan.target,
+                message: `rolled back to ${result.ref} (sha=${result.sha ?? "n/a"})`,
+              },
+            ],
+            artifacts: { modified: [plan.target] },
+          }),
+        );
+        return;
+      }
       process.stdout.write(
         `rolled back ${plan.target} to ${result.ref} (${result.sha ?? "n/a"})\n`,
       );
@@ -815,10 +948,59 @@ async function main() {
       break;
     }
     case "validate": {
-      if (args.length < 1) usageError("validate requires <wiki>");
-      const wiki = resolve(args[0]);
+      // Parse flags so that `validate --json <wiki>` works as well
+      // as `validate <wiki> --json`, and unknown flags are rejected
+      // loudly. Pre-scan --json first so usage errors emitted below
+      // respect the JSON contract.
+      const { hasJsonFlag } = await import("./lib/json-envelope.mjs");
+      const wantJson = hasJsonFlag(args);
+      const positionals = [];
+      for (const tok of args) {
+        if (tok === "--json" || tok === "--json-errors") continue;
+        if (typeof tok === "string" && tok.startsWith("--")) {
+          await emitConsumerUsageError(
+            "validate",
+            "VALIDATE-USAGE",
+            `validate does not support option ${tok}`,
+            wantJson,
+          );
+        }
+        positionals.push(tok);
+      }
+      if (positionals.length < 1)
+        await emitConsumerUsageError(
+          "validate",
+          "VALIDATE-USAGE",
+          "validate requires <wiki>",
+          wantJson,
+        );
+      if (positionals.length > 1)
+        await emitConsumerUsageError(
+          "validate",
+          "VALIDATE-USAGE",
+          "validate accepts exactly one <wiki>",
+          wantJson,
+        );
+      const wiki = resolve(positionals[0]);
+      const startMs = Date.now();
       const findings = validateWiki(wiki);
       const summary = summariseFindings(findings);
+      const exit = summary.errors > 0 ? 2 : 0;
+      if (wantJson) {
+        const { findingToDiagnostic, makeEnvelope, writeEnvelope } =
+          await import("./lib/json-envelope.mjs");
+        writeEnvelope(
+          makeEnvelope({
+            command: "validate",
+            target: wiki,
+            verdict: exit === 0 ? "ok" : "broken",
+            exit,
+            diagnostics: findings.map(findingToDiagnostic),
+            timing_ms: Date.now() - startMs,
+          }),
+        );
+        process.exit(exit);
+      }
       for (const f of findings) {
         const tag =
           f.severity === "error"
@@ -832,7 +1014,7 @@ async function main() {
       console.log(
         `\n${summary.errors} error(s), ${summary.warnings} warning(s)`,
       );
-      process.exit(summary.errors > 0 ? 2 : 0);
+      process.exit(exit);
       break;
     }
     case "shape-check": {
@@ -875,10 +1057,288 @@ async function main() {
       process.stdout.write(`current → ${args[1]}\n`);
       break;
     }
+    case "init": {
+      // `init` seeds a topic directory with a shipped layout contract
+      // so consumers can start building hosted wikis without the
+      // cp-then-build dance. No orchestrator invocation here — that
+      // remains the consumer's explicit `build` call so error paths
+      // stay where they already are.
+      await cmdInit(args);
+      break;
+    }
+    case "heal": {
+      // `heal` classifies validate findings into one of ok, fixable,
+      // needs-rebuild, broken and names the next command to run.
+      // Mutating action stays the consumer's explicit call so the
+      // orchestrator error surface does not leak into this
+      // classify-only path.
+      await cmdHeal(args);
+      break;
+    }
     default:
       printUsage();
       process.exit(1);
   }
+}
+
+async function cmdInit(args) {
+  const { runInit, InitError, renderInitText } = await import("./lib/init.mjs");
+  const {
+    hasJsonFlag,
+    makeEnvelope,
+    makeErrorEnvelope,
+    writeEnvelope,
+  } = await import("./lib/json-envelope.mjs");
+  const wantJson = hasJsonFlag(args);
+  const fail = (code, message, topic = null) =>
+    initError(code, message, wantJson, topic, {
+      makeErrorEnvelope,
+      writeEnvelope,
+    });
+
+  // Minimal flag parse for init. Positional is <topic>; flags are
+  // --kind <dated|subject>, --template <name>, --force, --json.
+  let topic = null;
+  let kind = null;
+  let template = null;
+  let force = false;
+  for (let i = 0; i < args.length; i++) {
+    const tok = args[i];
+    if (tok === "--force") {
+      force = true;
+      continue;
+    }
+    if (tok === "--json" || tok === "--json-errors") {
+      continue;
+    }
+    if (tok === "--kind") {
+      kind = args[++i];
+      if (kind === undefined || kind === "" || kind.startsWith("--")) {
+        fail("INIT-00", `init: flag "--kind" requires a value`);
+      }
+      continue;
+    }
+    if (tok.startsWith("--kind=")) {
+      kind = tok.slice("--kind=".length);
+      if (kind === "") {
+        fail("INIT-00", `init: flag "--kind" requires a value`);
+      }
+      continue;
+    }
+    if (tok === "--template") {
+      template = args[++i];
+      if (
+        template === undefined ||
+        template === "" ||
+        template.startsWith("--")
+      ) {
+        fail("INIT-00", `init: flag "--template" requires a value`);
+      }
+      continue;
+    }
+    if (tok.startsWith("--template=")) {
+      template = tok.slice("--template=".length);
+      if (template === "") {
+        fail("INIT-00", `init: flag "--template" requires a value`);
+      }
+      continue;
+    }
+    if (tok.startsWith("--")) {
+      fail("INIT-00", `init: unknown flag "${tok}"`);
+    }
+    if (topic === null) {
+      topic = tok;
+      continue;
+    }
+    fail("INIT-00", `init: unexpected positional "${tok}"`);
+  }
+  if (!topic) {
+    fail("INIT-01", "init requires a <topic> path");
+  }
+
+  const startMs = Date.now();
+  let result;
+  try {
+    result = runInit({ topic, kind, template, force, cwd: process.cwd() });
+  } catch (err) {
+    if (err instanceof InitError) {
+      fail(err.code, err.message);
+    }
+    throw err;
+  }
+
+  if (wantJson) {
+    writeEnvelope(
+      makeEnvelope({
+        command: "init",
+        target: result.topic,
+        verdict: "initialised",
+        exit: 0,
+        diagnostics: [
+          {
+            code: "NEXT-01",
+            severity: "info",
+            path: result.topic,
+            message:
+              `contract seeded; next step: ` +
+              result.build_command.join(" "),
+          },
+        ],
+        artifacts: { created: [result.contract_path] },
+        next: result.next,
+        timing_ms: Date.now() - startMs,
+      }),
+    );
+    return;
+  }
+  process.stdout.write(renderInitText(result));
+}
+
+async function cmdHeal(args) {
+  const { runHeal, renderHealText } = await import("./lib/heal.mjs");
+  const { findingToDiagnostic, hasJsonFlag, makeEnvelope, writeEnvelope } =
+    await import("./lib/json-envelope.mjs");
+
+  const wantJson = hasJsonFlag(args);
+  let wikiPath = null;
+  // `--dry-run` is accepted for contract compatibility. heal is
+  // already classify-only (never mutates) so --dry-run is a no-op
+  // label today; the flag will become meaningful once a follow-up
+  // adds --apply for inline fix/rebuild routing.
+  for (const tok of args) {
+    if (tok === "--json" || tok === "--json-errors") continue;
+    if (tok === "--dry-run") continue;
+    if (tok.startsWith("--")) {
+      await emitConsumerUsageError(
+        "heal",
+        "HEAL-USAGE",
+        `heal: unknown flag "${tok}"`,
+        wantJson,
+      );
+    }
+    if (wikiPath === null) {
+      wikiPath = tok;
+      continue;
+    }
+    await emitConsumerUsageError(
+      "heal",
+      "HEAL-USAGE",
+      `heal: unexpected positional "${tok}"`,
+      wantJson,
+    );
+  }
+  if (!wikiPath) {
+    await emitConsumerUsageError(
+      "heal",
+      "HEAL-USAGE",
+      "heal requires <wiki> as its first argument",
+      wantJson,
+    );
+  }
+
+  const absWiki = resolve(wikiPath);
+  const startMs = Date.now();
+  const result = runHeal(absWiki);
+
+  const diagnostics = result.findings.map(findingToDiagnostic);
+  if (result.next_command) {
+    diagnostics.push({
+      code: "NEXT-01",
+      severity: "info",
+      path: result.target,
+      message: `next: ${result.next_command.join(" ")}`,
+    });
+  }
+  if (result.error) {
+    diagnostics.unshift({
+      code: "HEAL-00",
+      severity: "error",
+      path: result.target,
+      message: result.error,
+    });
+  }
+
+  // heal is advisory, not a validator. Successful classification is
+  // exit 0 regardless of verdict (ok / fixable / needs-rebuild) — the
+  // envelope's `verdict` carries the state. Only a genuinely broken
+  // or unclassifiable wiki is exit 6 (matches the documented "wiki
+  // corrupt" meaning). Consumers gate on the envelope, not exit 2.
+  const exit =
+    result.verdict === "broken" || result.verdict === "ambiguous" ? 6 : 0;
+  const nextField = result.next_command
+    ? {
+        command: result.next_command[0],
+        args: result.next_command.slice(1),
+      }
+    : null;
+  if (wantJson) {
+    writeEnvelope(
+      makeEnvelope({
+        command: "heal",
+        target: result.target,
+        verdict: result.verdict,
+        exit,
+        diagnostics,
+        next: nextField,
+        timing_ms: Date.now() - startMs,
+      }),
+    );
+    process.exit(exit);
+  }
+
+  process.stdout.write(renderHealText(result));
+  process.exit(exit);
+}
+
+// Shared usage-error emitter for operational subcommands that
+// need to honour --json on the error path as well as success.
+// Emits the envelope (verdict="ambiguous", exit=1 for usage)
+// when wantJson, otherwise a plain-text stderr line + exit.
+// Used by validate, heal, and any future consumer-facing op
+// whose usage errors must stay parseable.
+async function emitConsumerUsageError(command, code, message, wantJson) {
+  if (wantJson) {
+    const { makeErrorEnvelope, writeEnvelope } = await import(
+      "./lib/json-envelope.mjs"
+    );
+    writeEnvelope(
+      makeErrorEnvelope({ command, code, message, exit: 1 }),
+    );
+    process.exit(1);
+  }
+  process.stderr.write(`error: ${message}\n`);
+  process.exit(1);
+}
+
+// Map init error codes to the skill's documented exit scheme.
+// INIT-00 / INIT-01 are CLI usage errors (missing flag, unknown
+// flag) → exit 1. INIT-02..08 are validation / ambiguity conditions
+// (bad --kind, template mismatch, contract collision, topic-as-
+// file, symlink refusal) → exit 2, matching how build/extend etc.
+// surface validation failures. INIT-08 specifically covers the
+// symlink-guard path (scripts/lib/init.mjs): the input path exists
+// but is a symbolic link we refuse to write through; consistent
+// with INIT-06 ("exists but not a directory") in both severity and
+// consumer recovery (fix the path, retry).
+const INIT_USAGE_CODES = new Set(["INIT-00", "INIT-01"]);
+
+function initError(code, message, wantJson, topic, envelopeHelpers) {
+  const exit = INIT_USAGE_CODES.has(code) ? 1 : 2;
+  if (wantJson && envelopeHelpers) {
+    const { makeErrorEnvelope, writeEnvelope } = envelopeHelpers;
+    writeEnvelope(
+      makeErrorEnvelope({
+        command: "init",
+        code,
+        message,
+        target: topic,
+        exit,
+      }),
+    );
+    process.exit(exit);
+  }
+  process.stderr.write(`error: ${code} ${message}\n`);
+  process.exit(exit);
 }
 
 function usageError(msg) {

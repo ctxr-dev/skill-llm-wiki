@@ -74,6 +74,13 @@ entries:
     file: "ux/index.md"
     type: index
     focus: User-facing intent resolution and preflight failure messaging.
+  - id: consumers
+    file: "consumers/index.md"
+    type: index
+    focus: "Integrating another skill or agent as a consumer of skill-llm-wiki."
+    tags:
+      - consumers
+      - integration
 children:
   - "basics/index.md"
   - "correctness/index.md"
@@ -83,6 +90,7 @@ children:
   - "operations/index.md"
   - "substrate/index.md"
   - "ux/index.md"
+  - "consumers/index.md"
 ---
 <!-- BEGIN AUTO-GENERATED NAVIGATION -->
 
@@ -110,6 +118,7 @@ children:
 | [operations/index.md](operations/index.md) | 📁 index | per-operation phase pipelines for Build, Extend, Validate, Rebuild, Fix, and Join |
 | [substrate/index.md](substrate/index.md) | 📁 index | Decision machinery — rewrite operators and the tiered AI ladder driving them. |
 | [ux/index.md](ux/index.md) | 📁 index | User-facing intent resolution and preflight failure messaging. |
+| [consumers/index.md](consumers/index.md) | 📁 index | Integrating another skill or agent as a consumer of skill-llm-wiki. |
 
 <!-- END AUTO-GENERATED NAVIGATION -->
 

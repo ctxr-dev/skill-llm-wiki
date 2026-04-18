@@ -9,7 +9,7 @@ covers:
   - the CLI refuses every ambiguous invocation with a structured INT-NN code
   - Claude MUST ask the user before running the skill when intent is unclear
   - ambiguity scenarios each have a fixed resolving flag the user can pick
-  - "--json-errors makes the ambiguity body machine-parseable for Claude to read"
+  - "--json (canonical) or --json-errors (legacy alias) makes the ambiguity body machine-parseable for Claude to read"
   - "--no-prompt / LLM_WIKI_NO_PROMPT=1 disables interactive fallback; failures become hard errors"
   - never silently default — the cost of a wrong guess is always higher than a clarifying question
 tags:
@@ -82,11 +82,12 @@ in the wrong place) is always higher than a one-sentence clarifying question.
 | INT-12 | Prompt required in non-interactive mode | supply the flag the prompt was asking for, or re-run in a TTY |
 | INT-13 | Unknown `--quality-mode` value | use `tiered-fast` / `claude-first` / `tier0-only` |
 
-## `--json-errors` for programmatic consumption
+## `--json` for programmatic consumption
 
 When the skill is called from a script or from another Claude session, pass
-`--json-errors` on every invocation. The ambiguity body becomes a single JSON
-object on stderr:
+`--json` (canonical) on every invocation; `--json-errors` is the legacy alias
+and continues to work. The ambiguity body becomes a single JSON object on
+stderr:
 
 ```json
 {

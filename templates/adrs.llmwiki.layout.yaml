@@ -1,0 +1,33 @@
+# Layout contract for an architecture-decision-records (ADRs) topic.
+#
+# Copy this file to <topic>/.llmwiki.layout.yaml (or let `skill-llm-wiki init`
+# seed it for you) before building in hosted mode:
+#
+#   skill-llm-wiki init <topic> --kind subject --template adrs
+#
+# ADRs are subject-grouped with a zero-padded sequential prefix per file
+# (e.g. 0001-use-postgres.md). Subfolders emerge once a domain accumulates
+# three or more decisions.
+
+mode: hosted
+
+versioning:
+  style: in-place
+  backup_before_mutate: true
+  backup_dir: .llmwiki.backups
+
+purpose: "Architecture decision records, numbered and grouped by subject."
+
+global_invariants:
+  - "filenames carry a zero-padded sequential prefix (NNNN-slug.md)"
+  - "superseded ADRs stay in place with status: superseded in frontmatter; never rename or delete"
+  - "category subfolders appear when three or more ADRs share a domain (storage/, auth/, transport/, ...)"
+
+layout:
+  - path: .
+    purpose: "ADRs, numbered and grouped by subject"
+    allow_entry_types: [primary, index]
+    content_rules:
+      - "one decision per leaf; link to related decisions via parents[]"
+      - "frontmatter declares status: proposed | accepted | superseded | deprecated"
+      - "root-level leaves are reserved for broad, cross-cutting decisions; domain-specific nest under a subject subfolder"
