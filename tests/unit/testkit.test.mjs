@@ -1,0 +1,299 @@
+// testkit.test.mjs — smoke-test the consumer testkit helpers.
+//
+// These modules are what consumers import into their own test
+// suites, so their happy path must be rock-solid. Each helper is
+// small; the tests exercise the contract once each.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
+import { stubSkill, STUB_SKILL_NAME } from "../../scripts/testkit/stub-skill.mjs";
+import { makeWikiFixture } from "../../scripts/testkit/make-wiki-fixture.mjs";
+import {
+  assertFrontmatterShape,
+  readLeafFrontmatter,
+} from "../../scripts/testkit/assert-frontmatter.mjs";
+import { runCli, runCliOk } from "../../scripts/testkit/cli-run.mjs";
+
+const SKILL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+const CLI_PATH = join(SKILL_ROOT, "scripts", "cli.mjs");
+
+function mktmp(tag) {
+  const p = join(tmpdir(), `testkit-${tag}-${process.pid}-${Date.now()}`);
+  mkdirSync(p, { recursive: true });
+  return p;
+}
+
+// ─── stub-skill ─────────────────────────────────────────────
+
+test("stubSkill seeds SKILL.md under the claude-skills layout", async () => {
+  const home = mktmp("stub-claude");
+  try {
+    const r = await stubSkill({ home });
+    assert.equal(r.layout, "claude-skills");
+    assert.equal(
+      r.dir,
+      join(home, ".claude", "skills", STUB_SKILL_NAME),
+    );
+    assert.ok(existsSync(r.skillMd));
+    const body = readFileSync(r.skillMd, "utf8");
+    assert.match(body, /^---\nname: skill-llm-wiki/);
+    assert.match(body, /format_version: 1/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("stubSkill seeds under the agents-skills layout", async () => {
+  const home = mktmp("stub-agents");
+  try {
+    const r = await stubSkill({ home, layout: "agents-skills" });
+    assert.equal(
+      r.dir,
+      join(home, ".agents", "skills", STUB_SKILL_NAME),
+    );
+    assert.ok(existsSync(r.skillMd));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("stubSkill rejects unknown layouts", async () => {
+  await assert.rejects(
+    () => stubSkill({ home: "/tmp/irrelevant", layout: "not-a-layout" }),
+    /unknown layout/,
+  );
+});
+
+// ─── make-wiki-fixture ──────────────────────────────────────
+
+test("makeWikiFixture copies the reports template for kind=dated", async () => {
+  const path = join(mktmp("fixture-dated"), "wiki");
+  try {
+    const r = await makeWikiFixture({ path, kind: "dated" });
+    assert.equal(r.template, "reports");
+    assert.ok(existsSync(r.contract_path));
+    const body = readFileSync(r.contract_path, "utf8");
+    assert.match(body, /mode:\s*hosted/);
+    assert.match(body, /\{yyyy\}/);
+  } finally {
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+});
+
+test("makeWikiFixture copies the runbooks template for kind=subject", async () => {
+  const path = join(mktmp("fixture-subject"), "wiki");
+  try {
+    const r = await makeWikiFixture({ path, kind: "subject" });
+    assert.equal(r.template, "runbooks");
+    const body = readFileSync(r.contract_path, "utf8");
+    assert.doesNotMatch(body, /dynamic_subdirs:/);
+  } finally {
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+});
+
+test("makeWikiFixture honours explicit --template", async () => {
+  const path = join(mktmp("fixture-adrs"), "wiki");
+  try {
+    const r = await makeWikiFixture({ path, template: "adrs" });
+    assert.equal(r.template, "adrs");
+  } finally {
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+});
+
+test("makeWikiFixture seeds leaves from strings and objects", async () => {
+  const path = join(mktmp("fixture-seed"), "wiki");
+  try {
+    const r = await makeWikiFixture({
+      path,
+      kind: "dated",
+      seedLeaves: [
+        "2026/04/18/example.md",
+        { path: "2026/04/19/custom.md", body: "hand-written body" },
+      ],
+    });
+    assert.equal(r.seeded_leaves.length, 2);
+    const defaulted = readFileSync(r.seeded_leaves[0], "utf8");
+    assert.match(defaulted, /^---\n/);
+    assert.match(defaulted, /id: example/);
+    const custom = readFileSync(r.seeded_leaves[1], "utf8");
+    assert.equal(custom, "hand-written body");
+  } finally {
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+});
+
+// ─── assert-frontmatter ─────────────────────────────────────
+
+test("readLeafFrontmatter parses id, type, depth_role, focus, covers", () => {
+  const leaf = join(mktmp("fm-read"), "leaf.md");
+  writeFileSync(
+    leaf,
+    `---
+id: my-leaf
+type: primary
+depth_role: leaf
+focus: "hello world"
+covers: [alpha, "beta word"]
+parents:
+  - ../index.md
+tags: []
+---
+
+body
+`,
+    "utf8",
+  );
+  try {
+    const data = readLeafFrontmatter(leaf);
+    assert.equal(data.id, "my-leaf");
+    assert.equal(data.type, "primary");
+    assert.equal(data.depth_role, "leaf");
+    assert.equal(data.focus, "hello world");
+    assert.deepEqual(data.covers, ["alpha", "beta word"]);
+    assert.deepEqual(data.parents, ["../index.md"]);
+    assert.deepEqual(data.tags, []);
+  } finally {
+    rmSync(dirname(leaf), { recursive: true, force: true });
+  }
+});
+
+test("readLeafFrontmatter throws on missing frontmatter", () => {
+  const leaf = join(mktmp("fm-missing"), "leaf.md");
+  writeFileSync(leaf, "no frontmatter here\n", "utf8");
+  try {
+    assert.throws(() => readLeafFrontmatter(leaf), /no frontmatter block/);
+  } finally {
+    rmSync(dirname(leaf), { recursive: true, force: true });
+  }
+});
+
+test("assertFrontmatterShape passes when expected subset matches", () => {
+  const leaf = join(mktmp("fm-assert"), "leaf.md");
+  writeFileSync(
+    leaf,
+    `---
+id: x
+type: primary
+depth_role: leaf
+focus: "hi"
+---
+body
+`,
+    "utf8",
+  );
+  try {
+    assertFrontmatterShape(leaf, { id: "x", depth_role: "leaf" });
+  } finally {
+    rmSync(dirname(leaf), { recursive: true, force: true });
+  }
+});
+
+test("assertFrontmatterShape throws with a clear message on mismatch", () => {
+  const leaf = join(mktmp("fm-mismatch"), "leaf.md");
+  writeFileSync(
+    leaf,
+    `---
+id: actual
+type: primary
+---
+`,
+    "utf8",
+  );
+  try {
+    assert.throws(
+      () => assertFrontmatterShape(leaf, { id: "expected" }),
+      /id: expected "expected", got "actual"/,
+    );
+  } finally {
+    rmSync(dirname(leaf), { recursive: true, force: true });
+  }
+});
+
+// ─── cli-run ────────────────────────────────────────────────
+
+test("runCli returns stdout + status for a plain invocation", () => {
+  const r = runCli(["--version"]);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout.trim(), /^\d+\.\d+\.\d+/);
+  assert.equal(r.envelope, null);
+});
+
+test("runCli parses the envelope when --json is passed", () => {
+  const r = runCli(["contract", "--json"]);
+  assert.equal(r.status, 0);
+  assert.ok(r.envelope);
+  assert.equal(r.envelope.schema, "skill-llm-wiki/contract/v1");
+  assert.equal(r.envelope.format_version, 1);
+});
+
+test("runCliOk throws on a non-zero exit with stderr in the message", () => {
+  // Invoke an unknown subcommand to get a non-zero exit.
+  assert.throws(
+    () => runCliOk(["definitely-not-a-real-subcommand"]),
+    /exited/,
+  );
+});
+
+// ─── CLI shorthand: `testkit-stub --at <dir>` ───────────────
+
+test("`testkit-stub --at <dir>` seeds a stub install", () => {
+  const home = mktmp("shorthand");
+  try {
+    const r = spawnSync(
+      process.execPath,
+      [CLI_PATH, "testkit-stub", "--at", home],
+      { encoding: "utf8" },
+    );
+    assert.equal(r.status, 0, `testkit-stub exited ${r.status}: ${r.stderr}`);
+    const expected = join(home, ".claude", "skills", STUB_SKILL_NAME, "SKILL.md");
+    assert.equal(r.stdout.trim(), expected);
+    assert.ok(existsSync(expected));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("`testkit-stub --at <dir> --layout agents-skills` respects the layout flag", () => {
+  const home = mktmp("shorthand-agents");
+  try {
+    const r = spawnSync(
+      process.execPath,
+      [CLI_PATH, "testkit-stub", "--at", home, "--layout", "agents-skills"],
+      { encoding: "utf8" },
+    );
+    assert.equal(r.status, 0);
+    assert.ok(r.stdout.includes(".agents/skills"));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("`testkit-stub` is exempt from the runtime-dep preflight", () => {
+  const home = mktmp("shorthand-nodep");
+  try {
+    const r = spawnSync(
+      process.execPath,
+      [CLI_PATH, "testkit-stub", "--at", home],
+      {
+        encoding: "utf8",
+        env: { ...process.env, LLM_WIKI_TEST_FORCE_DEPS_MISSING: "gray-matter" },
+      },
+    );
+    assert.equal(r.status, 0, `should succeed with forced missing dep: ${r.stderr}`);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

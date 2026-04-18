@@ -135,7 +135,8 @@ const _isPreflightExemptDP =
   _argvDP[0] === "--help" ||
   _argvDP[0] === "-h" ||
   _argvDP[0] === "contract" ||
-  _argvDP[0] === "where";
+  _argvDP[0] === "where" ||
+  _argvDP[0] === "testkit-stub";
 
 if (!_isPreflightExemptDP) {
   let _missingDP = _depPreflightCheck();
@@ -494,6 +495,44 @@ async function main() {
     } else {
       process.stdout.write(renderWhereText(info));
     }
+    return;
+  }
+  if (argv[0] === "testkit-stub") {
+    // Shell shorthand for scripts/testkit/stub-skill.mjs. Consumers
+    // whose test suites shell out (e.g. zero-deps agent bundles that
+    // can't import from node_modules) use this to seed a stub skill
+    // install under an arbitrary base directory. Exempt from the
+    // runtime-dep preflight because testkit helpers must work in
+    // test environments that deliberately lack the runtime deps.
+    const rest = argv.slice(1);
+    let atDir = null;
+    let layout = "claude-skills";
+    for (let i = 0; i < rest.length; i++) {
+      const tok = rest[i];
+      if (tok === "--at") {
+        atDir = rest[++i];
+      } else if (tok.startsWith("--at=")) {
+        atDir = tok.slice("--at=".length);
+      } else if (tok === "--layout") {
+        layout = rest[++i];
+      } else if (tok.startsWith("--layout=")) {
+        layout = tok.slice("--layout=".length);
+      } else {
+        process.stderr.write(
+          `testkit-stub: unknown argument "${tok}"\n`,
+        );
+        process.exit(1);
+      }
+    }
+    if (!atDir) {
+      process.stderr.write(
+        "testkit-stub: --at <dir> is required (base directory to seed)\n",
+      );
+      process.exit(1);
+    }
+    const { stubSkill } = await import("./testkit/stub-skill.mjs");
+    const r = await stubSkill({ home: atDir, layout });
+    process.stdout.write(`${r.skillMd}\n`);
     return;
   }
 
