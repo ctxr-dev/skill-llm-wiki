@@ -42,6 +42,12 @@ Every operation is a git sequence: `preflight → pre-op snapshot → phase comm
 
 **Ambiguous invocations refuse and prompt.** If the user's request could mean two things (a default sibling would stomp on a foreign directory, a hosted target has no contract, `--layout-mode in-place` is combined with `--target`, …), the CLI exits with code 2 and a structured `INT-NN` error rather than guessing. See `guide/ux/user-intent.md` for the full list.
 
+## Integrating another skill or agent as a consumer
+
+If the user is building a skill, agent, or CI job that calls this skill programmatically (rather than asking you to build a wiki for them in this session), route them to `guide/consumers/index.md`. That subtree answers: how to gate on `format_version`, how to `init` a topic wiki in one command, how to `heal` after every leaf write, how to detect the skill-absent case, how to write consumer tests against the shipped `scripts/testkit/` helpers. Every consumer recipe is dispatched from `guide/consumers/index.md`; do not re-derive the integration path from SKILL.md alone.
+
+Quick probe summary: `skill-llm-wiki contract --json` returns `format_version` + the full CLI + frontmatter schema, and `skill-llm-wiki where --json` returns absolute install paths. Both are exempt from the runtime-dep preflight so consumers can probe before the skill is fully set up.
+
 ## Non-automation contract
 
 This skill has **no hooks, no filesystem watchers, no PostToolUse listeners, no install-time wiring, no background processes**. Every action happens only in direct response to an explicit user request against an explicit target directory. If the user did not ask, do nothing. Do not propose automation. Do not create hooks. Do not schedule anything.
