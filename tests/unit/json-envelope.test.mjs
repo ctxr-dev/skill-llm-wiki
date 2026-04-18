@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { SKILL_ROOT } from "../../scripts/lib/where.mjs";
 import { mktmp } from "../helpers/tmp.mjs";
 import {
   ENVELOPE_SCHEMA,
@@ -18,7 +18,6 @@ import {
   hasJsonFlag,
 } from "../../scripts/lib/json-envelope.mjs";
 
-const SKILL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const CLI_PATH = join(SKILL_ROOT, "scripts", "cli.mjs");
 
 test("ENVELOPE_SCHEMA is stable", () => {

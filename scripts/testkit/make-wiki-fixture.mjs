@@ -22,11 +22,16 @@ import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { templatesDir } from "../lib/templates.mjs";
 
-// Reject any seed-leaf path that would escape the fixture root.
-// Absolute paths, paths starting with "/" or "\", and anything that
-// resolves outside `rootAbs` (via `..` segments or symlinks) are
-// refused. Defence against a caller passing `seedLeaves: ["../../etc/evil.md"]`
-// on a shared tmp dir.
+// Reject any seed-leaf path that would escape the fixture root via
+// an absolute path or `..` traversal. This is a LEXICAL check; it
+// does not detect symlink-based escapes inside the fixture tree.
+// For those, see `refuseSymlink` below, which walks every path
+// segment from the root down to the leaf and rejects if any is a
+// symbolic link. Together the two functions defend against:
+//   - absolute seed paths
+//   - `..` segments that resolve outside the root
+//   - symlinks anywhere in the resolved path's intermediate
+//     directories (e.g. `<root>/sub -> /etc/`)
 function assertInsideRoot(rootAbs, entryRel) {
   if (typeof entryRel !== "string" || entryRel.length === 0) {
     throw new Error("makeWikiFixture: seedLeaves entries must have a non-empty path");
@@ -46,19 +51,55 @@ function assertInsideRoot(rootAbs, entryRel) {
   return resolved;
 }
 
-// Refuse to write through a pre-existing symlink. Fixture builders
-// run in shared tmp dirs; a hostile sibling test could plant a
-// symlink and redirect fixture writes elsewhere.
-async function refuseSymlink(absPath) {
-  try {
-    const st = await lstat(absPath);
-    if (st.isSymbolicLink()) {
-      throw new Error(
-        `makeWikiFixture: ${absPath} is a symbolic link; refusing to write through it`,
-      );
+// Refuse to write through a pre-existing symlink.
+//
+// When called with a single `absPath` (no `rootAbs`), only that
+// path is checked — useful for the one-time fixture-root probe,
+// where climbing further up the chain would trip macOS's
+// /var → /private/var (or similar OS-level symlinks that are NOT
+// a fixture concern).
+//
+// When called with `rootAbs`, every segment from rootAbs down to
+// absPath is checked. A lexical `assertInsideRoot` check can be
+// bypassed by planting a symlinked sub-directory inside the
+// fixture (e.g. `<root>/sub -> /etc/`) and then passing a
+// seedLeaves entry like `sub/passwd`; walking every segment
+// closes that.
+//
+// Non-existent segments are accepted (mkdir/writeFile will create
+// them).
+async function refuseSymlink(absPath, rootAbs = null) {
+  const segments = [];
+  if (rootAbs) {
+    // Build segment list from rootAbs DOWN to absPath so we only
+    // inspect paths inside the fixture. Never climb past rootAbs.
+    segments.push(rootAbs);
+    if (absPath !== rootAbs) {
+      const rel = relative(rootAbs, absPath);
+      if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
+        const parts = rel.split(/[\\/]/).filter(Boolean);
+        let cursor = rootAbs;
+        for (const part of parts) {
+          cursor = join(cursor, part);
+          segments.push(cursor);
+        }
+      }
     }
-  } catch (err) {
-    if (err.code !== "ENOENT") throw err;
+  } else {
+    segments.push(absPath);
+  }
+  for (const seg of segments) {
+    try {
+      const st = await lstat(seg);
+      if (st.isSymbolicLink()) {
+        throw new Error(
+          `makeWikiFixture: ${seg} is a symbolic link; refusing to write through it`,
+        );
+      }
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      // Segment doesn't exist yet — that's fine for mkdir's path.
+    }
   }
 }
 
@@ -73,8 +114,13 @@ export async function makeWikiFixture({
   if (!path || typeof path !== "string") {
     throw new Error("makeWikiFixture: { path } is required");
   }
-  await refuseSymlink(path);
-  await mkdir(path, { recursive: true });
+  const rootAbs = resolve(path);
+  // Root-level check: if the parent chain leading down to the
+  // fixture root contains any symlink, refuse. Once we've
+  // validated the root, subsequent refuseSymlink calls pass
+  // rootAbs so they only walk the SEGMENTS inside the fixture.
+  await refuseSymlink(rootAbs);
+  await mkdir(rootAbs, { recursive: true });
 
   // Pick a template. `templatesDir()` returns the absolute path;
   // filenames follow `<name>.llmwiki.layout.yaml`.
@@ -85,8 +131,8 @@ export async function makeWikiFixture({
       `makeWikiFixture: template "${tmplName}" not found at ${tmplPath}`,
     );
   }
-  const contractPath = join(path, CONTRACT_FILENAME);
-  await refuseSymlink(contractPath);
+  const contractPath = join(rootAbs, CONTRACT_FILENAME);
+  await refuseSymlink(contractPath, rootAbs);
   await copyFile(tmplPath, contractPath);
 
   // Seed any requested leaves. Each entry is either:
@@ -100,9 +146,12 @@ export async function makeWikiFixture({
     // Refuse any seed path that escapes the fixture root. Caller
     // bugs (typos, absolute paths) are caught loudly before any
     // write happens.
-    const abs = assertInsideRoot(resolve(path), entry.path);
+    const abs = assertInsideRoot(rootAbs, entry.path);
     await mkdir(dirname(abs), { recursive: true });
-    await refuseSymlink(abs);
+    // Walk every intermediate segment (rootAbs ... abs) so a
+    // pre-existing symlinked sub-dir inside the fixture can't
+    // redirect the write.
+    await refuseSymlink(abs, rootAbs);
     const body = entry.body ?? defaultLeafBody(entry.path);
     await writeFile(abs, body, "utf8");
     createdLeaves.push(abs);

@@ -36,9 +36,9 @@ Your consumer's tests used to drift-test against SKILL.md prose. Replace that wi
 skill-llm-wiki contract --json
 ```
 
-Parse the envelope; assert `format_version >= <your required>`.
+Parse the contract JSON; assert `format_version >= <your required>`. Note that `contract --json` emits the contract shape (schema `skill-llm-wiki/contract/v1`), NOT the operational envelope (`skill-llm-wiki/v1`). It carries no `verdict` or `diagnostics` fields.
 
-## Envelope fields
+## Contract JSON fields
 
 ```json
 {
@@ -109,14 +109,14 @@ Bump `REQUIRED_WIKI_FORMAT_VERSION` when:
 - The skill bumps `format_version` and your consumer depends on the new behaviour.
 - A leaf frontmatter field your consumer reads is added or removed.
 - A CLI flag your consumer passes becomes mandatory or is removed.
-- The envelope shape (schema `skill-llm-wiki/v1`) changes the field your consumer parses.
+- The operational envelope shape (schema `skill-llm-wiki/v1`) changes a field your consumer parses from validate/init/heal/rollback output.
 
 Do NOT bump when the skill ships a `package_version` patch or minor release that doesn't touch the contract.
 
 ## Failure modes
 
-- `format_version` missing from the envelope: the skill is too old to declare a format version (pre-1). Treat as `< 1` and fail with an upgrade message.
-- Envelope is unparseable: the skill's `contract` subcommand is broken. Open an issue upstream.
+- `format_version` missing from the contract JSON: the skill is too old to declare a format version (pre-1). Treat as `< 1` and fail with an upgrade message.
+- Contract JSON is unparseable: the skill's `contract` subcommand is broken. Open an issue upstream.
 - `min_consumer_format_version` exceeds your required version: the skill intentionally dropped support for your version. You must upgrade your consumer.
 
 ## Do not

@@ -4,12 +4,18 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { getWhere, renderWhereText } from "../../scripts/lib/where.mjs";
+import { join } from "node:path";
+import {
+  SKILL_ROOT,
+  getWhere,
+  renderWhereText,
+} from "../../scripts/lib/where.mjs";
 import { FORMAT_VERSION } from "../../scripts/lib/contract.mjs";
 
-const SKILL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+// SKILL_ROOT is re-exported from the module under test — the single
+// source of truth for the skill install path. Importing it here
+// (rather than re-deriving via dirname^3 + fileURLToPath) means a
+// future repo-layout change stays a one-file edit.
 const CLI_PATH = join(SKILL_ROOT, "scripts", "cli.mjs");
 
 test("getWhere() returns absolute, existing paths for the required surface", () => {

@@ -6,8 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
   FORMAT_VERSION,
@@ -15,8 +14,8 @@ import {
   getContract,
   renderContractText,
 } from "../../scripts/lib/contract.mjs";
+import { SKILL_ROOT } from "../../scripts/lib/where.mjs";
 
-const SKILL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const CLI_PATH = join(SKILL_ROOT, "scripts", "cli.mjs");
 const SKILL_MD_PATH = join(SKILL_ROOT, "SKILL.md");
 
@@ -145,6 +144,10 @@ test("every flag in SUBCOMMANDS is accepted by the CLI's shared parser", () => {
   // Some flags are parsed ad-hoc by individual subcommand handlers
   // (init, heal, testkit-stub) rather than the shared parser. List
   // those here so the drift test doesn't false-positive.
+  // Flags parsed by dedicated per-subcommand handlers rather than
+  // the shared parseSubArgv. --json is DELIBERATELY not in this
+  // set: it lives in cli.mjs's FLAG_BOOLEAN, and we want the
+  // drift-guard to fail if anyone ever removes it from there.
   const handlerParsed = new Set([
     "--kind",
     "--template",
@@ -152,7 +155,6 @@ test("every flag in SUBCOMMANDS is accepted by the CLI's shared parser", () => {
     "--dry-run",
     "--at",
     "--layout",
-    "--json", // handled by hasJsonFlag across all subcommands
   ]);
 
   for (const [cmd, spec] of Object.entries(c.subcommands)) {

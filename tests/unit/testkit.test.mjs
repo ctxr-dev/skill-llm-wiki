@@ -8,13 +8,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   existsSync,
+  mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { SKILL_ROOT } from "../../scripts/lib/where.mjs";
 import { stubSkill, STUB_SKILL_NAME } from "../../scripts/testkit/stub-skill.mjs";
 import { mktmp } from "../helpers/tmp.mjs";
 import { makeWikiFixture } from "../../scripts/testkit/make-wiki-fixture.mjs";
@@ -24,7 +26,6 @@ import {
 } from "../../scripts/testkit/assert-frontmatter.mjs";
 import { runCli, runCliOk } from "../../scripts/testkit/cli-run.mjs";
 
-const SKILL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const CLI_PATH = join(SKILL_ROOT, "scripts", "cli.mjs");
 
 // ─── stub-skill ─────────────────────────────────────────────
@@ -103,6 +104,39 @@ test("makeWikiFixture honours explicit --template", async () => {
     assert.equal(r.template, "adrs");
   } finally {
     rmSync(dirname(path), { recursive: true, force: true });
+  }
+});
+
+test("makeWikiFixture refuses symlinks in intermediate path segments", async () => {
+  // A lexical `..`-traversal check cannot detect this shape: the
+  // attacker plants a symlinked sub-directory INSIDE the fixture
+  // root, then passes a seed path under it. Every segment along
+  // the resolved path must be lstat-checked.
+  const root = mktmp("fixture-intermediate-symlink");
+  const realTarget = join(root, "elsewhere");
+  const fixturePath = join(root, "wiki");
+  mkdirSync(realTarget, { recursive: true });
+  mkdirSync(fixturePath, { recursive: true });
+  const hostileSub = join(fixturePath, "sub");
+  // First build the wiki so we have a well-formed contract.
+  const fixture = await makeWikiFixture({ path: fixturePath, kind: "dated" });
+  assert.ok(fixture);
+  // Plant a symlinked sub-dir inside the wiki.
+  symlinkSync(realTarget, hostileSub, "dir");
+  try {
+    await assert.rejects(
+      () =>
+        makeWikiFixture({
+          path: fixturePath,
+          kind: "dated",
+          seedLeaves: ["sub/inner.md"],
+        }),
+      /symbolic link/,
+    );
+    // The real target outside the fixture root was not written to.
+    assert.equal(existsSync(join(realTarget, "inner.md")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
