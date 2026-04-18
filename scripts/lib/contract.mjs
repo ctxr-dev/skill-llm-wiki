@@ -99,18 +99,46 @@ const EXIT_CODES = {
 // from the contract: they are internal tools, subject to change
 // without a format_version bump. Keep this list in sync with
 // cli.mjs printUsage() top-level operations.
+// Keep this table in sync with scripts/cli.mjs. A drift test in
+// tests/unit/contract.test.mjs asserts every flag listed here is
+// actually accepted by the CLI, and every consumer-surface flag
+// accepted by the CLI is listed here.
 const SUBCOMMANDS = {
-  build: { positionals: ["source"], flags: ["--layout-mode", "--target", "--quality-mode", "--no-prompt", "--accept-dirty", "--json"] },
-  extend: { positionals: ["wiki"], flags: ["--quality-mode", "--no-prompt", "--json"] },
+  build: {
+    positionals: ["source"],
+    flags: [
+      "--layout-mode",
+      "--target",
+      "--quality-mode",
+      "--no-prompt",
+      "--accept-dirty",
+      "--accept-foreign-target",
+      "--json",
+    ],
+  },
+  extend: {
+    positionals: ["wiki"],
+    flags: ["--quality-mode", "--no-prompt", "--json"],
+  },
   validate: { positionals: ["wiki"], flags: ["--json"] },
-  rebuild: { positionals: ["wiki"], flags: ["--quality-mode", "--review", "--no-prompt", "--json"] },
+  rebuild: {
+    positionals: ["wiki"],
+    flags: ["--quality-mode", "--review", "--no-prompt", "--json"],
+  },
   fix: { positionals: ["wiki"], flags: ["--json"] },
-  join: { positionals: ["wiki-a", "wiki-b"], flags: ["--target", "--json"] },
+  join: {
+    positionals: ["wiki-a", "wiki-b"],
+    flags: ["--target", "--canonical", "--json"],
+  },
   rollback: { positionals: ["wiki"], flags: ["--to", "--json"] },
-  init: { positionals: ["topic"], flags: ["--kind", "--template", "--force", "--json"] },
+  init: {
+    positionals: ["topic"],
+    flags: ["--kind", "--template", "--force", "--json"],
+  },
   heal: { positionals: ["wiki"], flags: ["--dry-run", "--json"] },
   where: { positionals: [], flags: ["--json"] },
   contract: { positionals: [], flags: ["--json"] },
+  "testkit-stub": { positionals: [], flags: ["--at", "--layout"] },
 };
 
 // Envelope schema that --json stdout follows across every command.

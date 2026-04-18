@@ -769,6 +769,29 @@ async function main() {
 
     if (cmd === "rollback") {
       const result = rollbackOperation(plan.target, flags.to);
+      if (jsonMode) {
+        const { makeEnvelope, writeEnvelope } = await import(
+          "./lib/json-envelope.mjs"
+        );
+        writeEnvelope(
+          makeEnvelope({
+            command: "rollback",
+            target: plan.target,
+            verdict: "ok",
+            exit: 0,
+            diagnostics: [
+              {
+                code: "ROLLBACK-01",
+                severity: "info",
+                path: plan.target,
+                message: `rolled back to ${result.ref} (sha=${result.sha ?? "n/a"})`,
+              },
+            ],
+            artifacts: { modified: [plan.target] },
+          }),
+        );
+        return;
+      }
       process.stdout.write(
         `rolled back ${plan.target} to ${result.ref} (${result.sha ?? "n/a"})\n`,
       );
@@ -1131,8 +1154,13 @@ async function cmdHeal(args) {
 
   const wantJson = hasJsonFlag(args);
   let wikiPath = null;
+  // `--dry-run` is accepted for contract compatibility. heal is
+  // already classify-only (never mutates) so --dry-run is a no-op
+  // label today; the flag will become meaningful once a follow-up
+  // adds --apply for inline fix/rebuild routing.
   for (const tok of args) {
     if (tok === "--json" || tok === "--json-errors") continue;
+    if (tok === "--dry-run") continue;
     if (tok.startsWith("--")) {
       process.stderr.write(`error: heal: unknown flag "${tok}"\n`);
       process.exit(1);

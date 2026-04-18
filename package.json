@@ -38,6 +38,9 @@
     "type": "skill",
     "target": "folder"
   },
+  "bin": {
+    "skill-llm-wiki": "scripts/cli.mjs"
+  },
   "scripts": {
     "test": "node --test",
     "validate": "node scripts/cli.mjs --version",
