@@ -19,8 +19,32 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { templatesDir } from "../lib/templates.mjs";
+
+// Reject any seed-leaf path that would escape the fixture root.
+// Absolute paths, paths starting with "/" or "\", and anything that
+// resolves outside `rootAbs` (via `..` segments or symlinks) are
+// refused. Defence against a caller passing `seedLeaves: ["../../etc/evil.md"]`
+// on a shared tmp dir.
+function assertInsideRoot(rootAbs, entryRel) {
+  if (typeof entryRel !== "string" || entryRel.length === 0) {
+    throw new Error("makeWikiFixture: seedLeaves entries must have a non-empty path");
+  }
+  if (isAbsolute(entryRel)) {
+    throw new Error(
+      `makeWikiFixture: seed-leaf path "${entryRel}" must be relative to the fixture root`,
+    );
+  }
+  const resolved = resolve(rootAbs, entryRel);
+  const rel = relative(rootAbs, resolved);
+  if (rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(
+      `makeWikiFixture: seed-leaf path "${entryRel}" resolves outside the fixture root`,
+    );
+  }
+  return resolved;
+}
 
 // Refuse to write through a pre-existing symlink. Fixture builders
 // run in shared tmp dirs; a hostile sibling test could plant a
@@ -73,7 +97,10 @@ export async function makeWikiFixture({
   for (const raw of seedLeaves) {
     const entry =
       typeof raw === "string" ? { path: raw, body: null } : raw;
-    const abs = join(path, entry.path);
+    // Refuse any seed path that escapes the fixture root. Caller
+    // bugs (typos, absolute paths) are caught loudly before any
+    // write happens.
+    const abs = assertInsideRoot(resolve(path), entry.path);
     await mkdir(dirname(abs), { recursive: true });
     await refuseSymlink(abs);
     const body = entry.body ?? defaultLeafBody(entry.path);

@@ -25,7 +25,6 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { join, resolve as pathResolve } from "node:path";

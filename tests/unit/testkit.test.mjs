@@ -8,7 +8,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   existsSync,
-  mkdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -107,6 +106,32 @@ test("makeWikiFixture honours explicit --template", async () => {
   }
 });
 
+test("makeWikiFixture refuses seed-leaf paths that escape the fixture root", async () => {
+  const path = join(mktmp("fixture-traversal"), "wiki");
+  try {
+    await assert.rejects(
+      () =>
+        makeWikiFixture({
+          path,
+          kind: "dated",
+          seedLeaves: ["../../evil.md"],
+        }),
+      /resolves outside the fixture root/,
+    );
+    await assert.rejects(
+      () =>
+        makeWikiFixture({
+          path,
+          kind: "dated",
+          seedLeaves: [{ path: "/tmp/evil.md", body: "x" }],
+        }),
+      /must be relative to the fixture root/,
+    );
+  } finally {
+    rmSync(dirname(path), { recursive: true, force: true });
+  }
+});
+
 test("makeWikiFixture seeds leaves from strings and objects", async () => {
   const path = join(mktmp("fixture-seed"), "wiki");
   try {
@@ -189,6 +214,72 @@ test("readLeafFrontmatter throws on missing frontmatter", () => {
   writeFileSync(leaf, "no frontmatter here\n", "utf8");
   try {
     assert.throws(() => readLeafFrontmatter(leaf), /no frontmatter block/);
+  } finally {
+    rmSync(dirname(leaf), { recursive: true, force: true });
+  }
+});
+
+test("readLeafFrontmatter parses a nested `source` object", () => {
+  // The skill's canonical leaf frontmatter emits `source:` as a
+  // one-level-nested object (origin/path/hash). Consumers must be
+  // able to inspect those fields, not just see an empty string.
+  const leaf = join(mktmp("fm-nested"), "leaf.md");
+  writeFileSync(
+    leaf,
+    `---
+id: my-leaf
+type: primary
+depth_role: leaf
+source:
+  origin: file
+  path: my-leaf.md
+  hash: sha256:abc123
+focus: "has a nested source"
+---
+
+body
+`,
+    "utf8",
+  );
+  try {
+    const data = readLeafFrontmatter(leaf);
+    assert.ok(data.source && typeof data.source === "object");
+    assert.equal(data.source.origin, "file");
+    assert.equal(data.source.path, "my-leaf.md");
+    assert.equal(data.source.hash, "sha256:abc123");
+    assert.equal(data.focus, "has a nested source");
+  } finally {
+    rmSync(dirname(leaf), { recursive: true, force: true });
+  }
+});
+
+test("assertFrontmatterShape compares nested source keys", () => {
+  const leaf = join(mktmp("fm-nested-assert"), "leaf.md");
+  writeFileSync(
+    leaf,
+    `---
+id: x
+source:
+  origin: file
+  path: x.md
+---
+`,
+    "utf8",
+  );
+  try {
+    // Happy path: matching nested subset.
+    assertFrontmatterShape(leaf, {
+      id: "x",
+      source: { origin: "file", path: "x.md" },
+    });
+    // Mismatch on a sub-key surfaces the dotted path.
+    assert.throws(
+      () =>
+        assertFrontmatterShape(leaf, {
+          source: { origin: "wrong" },
+        }),
+      /source\.origin: expected "wrong", got "file"/,
+    );
   } finally {
     rmSync(dirname(leaf), { recursive: true, force: true });
   }

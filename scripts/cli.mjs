@@ -942,11 +942,27 @@ async function main() {
       break;
     }
     case "validate": {
-      if (args.length < 1) usageError("validate requires <wiki>");
-      const wiki = resolve(args[0]);
-      const wantJson = (await import("./lib/json-envelope.mjs")).hasJsonFlag(
-        args,
-      );
+      // Parse flags so that `validate --json <wiki>` works as well
+      // as `validate <wiki> --json`, and unknown flags are rejected
+      // loudly. Previously args[0] was taken as the wiki path
+      // unconditionally, which accepted the positional-anywhere
+      // pattern only by accident.
+      const positionals = [];
+      let wantJson = false;
+      for (const tok of args) {
+        if (tok === "--json" || tok === "--json-errors") {
+          wantJson = true;
+          continue;
+        }
+        if (typeof tok === "string" && tok.startsWith("--")) {
+          usageError(`validate does not support option ${tok}`);
+        }
+        positionals.push(tok);
+      }
+      if (positionals.length < 1) usageError("validate requires <wiki>");
+      if (positionals.length > 1)
+        usageError("validate accepts exactly one <wiki>");
+      const wiki = resolve(positionals[0]);
       const startMs = Date.now();
       const findings = validateWiki(wiki);
       const summary = summariseFindings(findings);

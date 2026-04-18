@@ -1,7 +1,14 @@
 // json-envelope.mjs — shared JSON stdout shape for consumer-facing
-// subcommands. Every subcommand that accepts `--json` emits exactly
-// one envelope object on stdout; no surrounding prose, no multiple
-// envelopes per invocation. stderr stays free-form for logs.
+// operational subcommands that use the envelope (validate, init,
+// heal, rollback). Those commands emit exactly one envelope object
+// on stdout; no surrounding prose, no multiple envelopes per
+// invocation. stderr stays free-form for logs.
+//
+// Probe-style commands — `contract --json` and `where --json` —
+// intentionally return their own non-envelope JSON shapes because
+// they pre-date the envelope contract and have stable consumer
+// schemas of their own (skill-llm-wiki/contract/v1 and
+// skill-llm-wiki/where/v1).
 //
 // Consumers validate the `schema` discriminator as their first
 // check. See guide/consumers/recipes/post-write-heal.md and
@@ -142,20 +149,22 @@ export function writeEnvelope(envelope, stream = process.stdout) {
   stream.write(JSON.stringify(envelope) + "\n");
 }
 
-// Detect whether any of --json, --json-errors (legacy alias), or
-// --json=1 was passed. Returns true on the first positive match.
-// `--json-errors` predates the envelope; we accept it as an alias
-// rather than deprecating it loudly, because every existing
-// consumer passes it to get structured intent errors.
+// Detect whether --json or --json-errors (legacy alias) was passed.
+// Returns true on the first positive match. `--json-errors`
+// predates the envelope; we accept it as an alias rather than
+// deprecating it loudly, because every existing consumer passes it
+// to get structured intent errors.
+//
+// Only the bare flag forms are supported. `--json=1` / `--json=true`
+// are NOT accepted: the skill's shared arg parser (parseSubArgv)
+// rejects inline values on boolean flags, and hasJsonFlag would
+// otherwise diverge from that contract and silently accept an
+// argument shape that build/extend/rebuild/... reject.
 export function hasJsonFlag(args) {
   if (!Array.isArray(args)) return false;
   for (const tok of args) {
     if (typeof tok !== "string") continue;
     if (tok === "--json" || tok === "--json-errors") return true;
-    if (tok.startsWith("--json=")) {
-      const v = tok.slice("--json=".length).toLowerCase();
-      return v === "1" || v === "true" || v === "yes";
-    }
   }
   return false;
 }

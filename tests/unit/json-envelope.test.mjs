@@ -130,14 +130,14 @@ test("makeEnvelope preserves provided artifacts", () => {
   assert.deepEqual(e.artifacts, { created: ["a"], modified: ["b"], deleted: ["c"] });
 });
 
-test("hasJsonFlag detects --json, --json-errors, and --json=1", () => {
+test("hasJsonFlag detects bare --json and --json-errors only", () => {
   assert.equal(hasJsonFlag(["--json"]), true);
   assert.equal(hasJsonFlag(["--json-errors"]), true);
-  assert.equal(hasJsonFlag(["--json=1"]), true);
-  assert.equal(hasJsonFlag(["--json=true"]), true);
-  assert.equal(hasJsonFlag(["--json=yes"]), true);
-  assert.equal(hasJsonFlag(["--json=0"]), false);
-  assert.equal(hasJsonFlag(["--json=false"]), false);
+  // Inline-value forms are NOT accepted. parseSubArgv rejects
+  // `--json=1` on boolean flags; hasJsonFlag must mirror that or
+  // the two code paths disagree on the same token.
+  assert.equal(hasJsonFlag(["--json=1"]), false);
+  assert.equal(hasJsonFlag(["--json=true"]), false);
   assert.equal(hasJsonFlag([]), false);
   assert.equal(hasJsonFlag(["--other", "value"]), false);
   assert.equal(hasJsonFlag(null), false);

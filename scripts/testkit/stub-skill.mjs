@@ -12,6 +12,7 @@
 
 import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { FORMAT_VERSION } from "../lib/contract.mjs";
 
 // The kit's ARTIFACT_TYPES.skill enumerates these install layouts.
 // Consumers pick the one their test environment emulates.
@@ -66,7 +67,7 @@ export async function stubSkill({ home, layout = "claude-skills" } = {}) {
     "---",
     "name: skill-llm-wiki",
     "description: test stub of @ctxr/skill-llm-wiki — presence-only, not a working skill",
-    "format_version: 1",
+    `format_version: ${FORMAT_VERSION}`,
     "---",
     "",
     "This is a test stub. Do not invoke wiki operations against it.",

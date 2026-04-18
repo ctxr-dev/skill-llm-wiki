@@ -39,34 +39,69 @@ export function readLeafFrontmatter(absLeafPath) {
   }
   const block = afterFirst.slice(0, endMatch.index);
   const data = {};
-  let currentKey = null;
-  let currentList = null;
+  // A "pending key" is a top-level key with an empty RHS whose
+  // type isn't yet decided. The first indented continuation line
+  // picks: `- x` → list, `subkey: v` → map. Once decided, further
+  // continuations at the same indent extend the same container.
+  let pendingKey = null;
+  let pendingIndent = -1;
+  let pendingKind = null; // null | "list" | "map"
   for (const line of block.split(/\r?\n/)) {
-    if (!line.trim() || line.startsWith("#")) continue;
-    const listMatch = /^\s+-\s*(.*)$/.exec(line);
-    if (listMatch && currentKey) {
-      if (!currentList) {
-        currentList = [];
-        data[currentKey] = currentList;
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+    const indent = line.length - line.trimStart().length;
+    const trimmed = line.trimStart();
+
+    // Continuation: line is indented past the open key.
+    if (pendingKey !== null && indent > pendingIndent) {
+      const listMatch = /^-\s*(.*)$/.exec(trimmed);
+      if (listMatch && (pendingKind === null || pendingKind === "list")) {
+        if (pendingKind === null) {
+          data[pendingKey] = [];
+          pendingKind = "list";
+        }
+        data[pendingKey].push(unquote(listMatch[1].trim()));
+        continue;
       }
-      currentList.push(unquote(listMatch[1].trim()));
+      const nestedKv = /^([a-z_][a-z0-9_]*)\s*:\s*(.*)$/i.exec(trimmed);
+      if (nestedKv && (pendingKind === null || pendingKind === "map")) {
+        if (pendingKind === null) {
+          data[pendingKey] = {};
+          pendingKind = "map";
+        }
+        data[pendingKey][nestedKv[1]] = unquote(nestedKv[2].trim());
+        continue;
+      }
+      // Fall through: unknown continuation shape, ignore.
       continue;
     }
+
+    // New top-level key ends any open container.
     const kv = /^([a-z_][a-z0-9_]*)\s*:\s*(.*)$/i.exec(line);
     if (!kv) continue;
-    currentKey = kv[1];
-    currentList = null;
+    pendingKey = null;
+    pendingIndent = -1;
+    pendingKind = null;
+    const key = kv[1];
     const val = kv[2].trim();
-    if (val === "" || val === "[]") {
-      data[currentKey] = val === "[]" ? [] : "";
+    if (val === "") {
+      // Empty RHS: open a pending key; the first continuation
+      // picks list vs map. Default to an empty object until
+      // decided — consumers that asserts a key exists without
+      // inspecting its type still pass.
+      data[key] = {};
+      pendingKey = key;
+      pendingIndent = indent;
+      pendingKind = null;
+    } else if (val === "[]") {
+      data[key] = [];
     } else if (val.startsWith("[") && val.endsWith("]")) {
-      data[currentKey] = val
+      data[key] = val
         .slice(1, -1)
         .split(",")
         .map((s) => unquote(s.trim()))
         .filter(Boolean);
     } else {
-      data[currentKey] = unquote(val);
+      data[key] = unquote(val);
     }
   }
   return data;
@@ -84,7 +119,10 @@ function unquote(s) {
 
 // Compare actual frontmatter to an expected subset. Only fields
 // named in `expected` are checked; extra fields in the leaf are
-// allowed. Arrays compare element-wise as strings.
+// allowed. Arrays compare element-wise as strings; objects compare
+// each expected key shallowly (string-equality) so consumers can
+// write `{ source: { origin: "file", path: "foo.md" } }` against
+// the skill's canonical frontmatter shape.
 //
 // Throws an Error when any mismatch is found. Returns the parsed
 // frontmatter object on success.
@@ -102,6 +140,20 @@ export function assertFrontmatterShape(absLeafPath, expected) {
         mismatches.push(
           `${key}: expected [${want.join(", ")}], got [${got.join(", ")}]`,
         );
+      }
+      continue;
+    }
+    if (want !== null && typeof want === "object") {
+      if (got === null || typeof got !== "object" || Array.isArray(got)) {
+        mismatches.push(`${key}: expected object, got ${JSON.stringify(got)}`);
+        continue;
+      }
+      for (const [subKey, subWant] of Object.entries(want)) {
+        if (String(got[subKey]) !== String(subWant)) {
+          mismatches.push(
+            `${key}.${subKey}: expected ${JSON.stringify(subWant)}, got ${JSON.stringify(got[subKey])}`,
+          );
+        }
       }
       continue;
     }
