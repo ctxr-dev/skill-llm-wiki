@@ -23,6 +23,43 @@ const LAYOUTS = {
 
 export const STUB_SKILL_NAME = "ctxr-skill-llm-wiki";
 
+// Walk every segment from `base` (inclusive) down to `target`
+// (inclusive), lstat-ing each. Refuse if any segment is a
+// symbolic link. Non-existent segments are accepted (they'll be
+// created by mkdir). `base` itself is NOT walked further upward:
+// we never inspect OS-level directories above the caller-supplied
+// home (macOS's /var → /private/var, for example, would false-
+// positive otherwise).
+async function refuseSymlinkChain(base, target) {
+  const segments = [base];
+  if (target !== base) {
+    if (!target.startsWith(base)) {
+      throw new Error(
+        `stubSkill: internal error, target ${target} is not under base ${base}`,
+      );
+    }
+    const tail = target.slice(base.length).replace(/^[\\/]+/, "");
+    const parts = tail.split(/[\\/]/).filter(Boolean);
+    let cursor = base;
+    for (const part of parts) {
+      cursor = join(cursor, part);
+      segments.push(cursor);
+    }
+  }
+  for (const seg of segments) {
+    try {
+      const st = await lstat(seg);
+      if (st.isSymbolicLink()) {
+        throw new Error(
+          `stubSkill: ${seg} is a symbolic link; refusing to write through it`,
+        );
+      }
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+  }
+}
+
 export async function stubSkill({ home, layout = "claude-skills" } = {}) {
   if (!home || typeof home !== "string") {
     throw new Error(
@@ -37,32 +74,17 @@ export async function stubSkill({ home, layout = "claude-skills" } = {}) {
     );
   }
   const dir = join(home, ...parts, STUB_SKILL_NAME);
-  // Refuse to follow a pre-existing symlink at the stub directory.
-  // Test harnesses run in shared tmp dirs; a hostile fixture in
-  // CI could plant a symlink here and redirect writeFile elsewhere.
-  try {
-    const st = await lstat(dir);
-    if (st.isSymbolicLink()) {
-      throw new Error(
-        `stubSkill: ${dir} is a symbolic link; refusing to write through it`,
-      );
-    }
-  } catch (err) {
-    if (err.code !== "ENOENT") throw err;
-  }
-  await mkdir(dir, { recursive: true });
   const skillMd = join(dir, "SKILL.md");
-  // Same guard on the file itself.
-  try {
-    const st = await lstat(skillMd);
-    if (st.isSymbolicLink()) {
-      throw new Error(
-        `stubSkill: ${skillMd} is a symbolic link; refusing to overwrite through it`,
-      );
-    }
-  } catch (err) {
-    if (err.code !== "ENOENT") throw err;
-  }
+  // Walk every intermediate segment (home → .claude → skills →
+  // ctxr-skill-llm-wiki) BEFORE mkdir. mkdir({recursive: true})
+  // follows symlinks, so a hostile fixture that planted
+  // `${home}/.claude -> /etc` would otherwise cause stubSkill to
+  // create `.claude/skills/ctxr-skill-llm-wiki` under `/etc/`.
+  await refuseSymlinkChain(home, dir);
+  await mkdir(dir, { recursive: true });
+  // Re-check the leaf file path before writing, so a pre-existing
+  // symlink at `<dir>/SKILL.md` is also rejected.
+  await refuseSymlinkChain(home, skillMd);
   const body = [
     "---",
     "name: skill-llm-wiki",

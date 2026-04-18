@@ -151,10 +151,15 @@ export async function makeWikiFixture({
     // bugs (typos, absolute paths) are caught loudly before any
     // write happens.
     const abs = assertInsideRoot(rootAbs, entry.path);
-    await mkdir(dirname(abs), { recursive: true });
-    // Walk every intermediate segment (rootAbs ... abs) so a
-    // pre-existing symlinked sub-dir inside the fixture can't
-    // redirect the write.
+    const dirAbs = dirname(abs);
+    // IMPORTANT: segment-walk BEFORE mkdir. Once mkdir(recursive)
+    // runs, it follows any pre-existing symlinked sub-dir and can
+    // create directories OUTSIDE rootAbs — the attack this helper
+    // is explicitly defending against. Check every segment of
+    // dirAbs, then mkdir, then re-check the leaf path for a
+    // symlinked file.
+    await refuseSymlink(dirAbs, rootAbs);
+    await mkdir(dirAbs, { recursive: true });
     await refuseSymlink(abs, rootAbs);
     const body = entry.body ?? defaultLeafBody(entry.path);
     await writeFile(abs, body, "utf8");

@@ -62,6 +62,29 @@ test("stubSkill seeds under the agents-skills layout", async () => {
   }
 });
 
+test("stubSkill refuses to write through a symlinked intermediate segment", async () => {
+  // A hostile fixture plants `${home}/.claude -> elsewhere`
+  // BEFORE stubSkill runs. The recursive mkdir would otherwise
+  // follow that symlink and create the stub under the attacker-
+  // controlled directory. The segment walker must lstat every
+  // intermediate path from home down to the stub directory.
+  const home = mktmp("stub-intermediate");
+  const elsewhere = mktmp("stub-elsewhere");
+  try {
+    // Plant the attack: home/.claude is a symlink to elsewhere.
+    symlinkSync(elsewhere, join(home, ".claude"), "dir");
+    await assert.rejects(
+      () => stubSkill({ home }),
+      /symbolic link/,
+    );
+    // Confirm the symlink target was NOT populated.
+    assert.equal(existsSync(join(elsewhere, "skills")), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
+  }
+});
+
 test("stubSkill rejects unknown layouts", async () => {
   await assert.rejects(
     () => stubSkill({ home: "/tmp/irrelevant", layout: "not-a-layout" }),

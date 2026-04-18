@@ -332,9 +332,14 @@ Tiered-AI flags:
 
 UX flags:
   --no-prompt                      Never prompt; fail loud on ambiguity
-  --json                           Emit a structured envelope on stdout
-                                   (schema skill-llm-wiki/v1). Supported by
-                                   validate, contract, where, init, heal.
+  --json                           Emit JSON on stdout. Operational
+                                   commands (validate, init, heal, rollback)
+                                   use the envelope schema
+                                   skill-llm-wiki/v1. Probe commands
+                                   (contract, where) emit their own
+                                   command-specific schemas
+                                   (skill-llm-wiki/contract/v1 and
+                                   skill-llm-wiki/where/v1).
   --json-errors                    Legacy alias for --json, kept for
                                    backwards compatibility.
   --accept-dirty                   Operate on a dirty user git repo
