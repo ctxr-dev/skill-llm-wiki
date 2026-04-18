@@ -319,7 +319,11 @@ Tiered-AI flags:
 
 UX flags:
   --no-prompt                      Never prompt; fail loud on ambiguity
-  --json-errors                    Emit ambiguity errors as JSON
+  --json                           Emit a structured envelope on stdout
+                                   (schema skill-llm-wiki/v1). Supported by
+                                   validate, contract, where, init, heal.
+  --json-errors                    Legacy alias for --json, kept for
+                                   backwards compatibility.
   --accept-dirty                   Operate on a dirty user git repo
 
 Rollback flags:
@@ -355,6 +359,7 @@ const FLAG_WITH_VALUE = new Set([
 ]);
 const FLAG_BOOLEAN = new Set([
   "--no-prompt",
+  "--json",
   "--json-errors",
   "--accept-dirty",
   "--accept-foreign-target",
@@ -616,7 +621,8 @@ async function main() {
   if (INTENT_SUBCOMMANDS.has(cmd)) {
     const parsed = parseSubArgv(args);
     if (parsed.error) {
-      const jsonMode = args.includes("--json-errors");
+      const jsonMode =
+        args.includes("--json-errors") || args.includes("--json");
       emitIntentError(
         {
           code: "INT-11",
@@ -628,7 +634,9 @@ async function main() {
       );
     }
     const { positionals, flags } = parsed;
-    const jsonMode = Boolean(flags.json_errors);
+    // `--json` is the canonical flag; `--json-errors` is the legacy
+    // alias kept for existing consumers. Either enables JSON output.
+    const jsonMode = Boolean(flags.json_errors) || Boolean(flags.json);
 
     // `migrate` has its own resolution path — the intent resolver would
     // reject the legacy folder shape as ambiguous.
@@ -846,8 +854,28 @@ async function main() {
     case "validate": {
       if (args.length < 1) usageError("validate requires <wiki>");
       const wiki = resolve(args[0]);
+      const wantJson = (await import("./lib/json-envelope.mjs")).hasJsonFlag(
+        args,
+      );
+      const startMs = Date.now();
       const findings = validateWiki(wiki);
       const summary = summariseFindings(findings);
+      const exit = summary.errors > 0 ? 2 : 0;
+      if (wantJson) {
+        const { findingToDiagnostic, makeEnvelope, writeEnvelope } =
+          await import("./lib/json-envelope.mjs");
+        writeEnvelope(
+          makeEnvelope({
+            command: "validate",
+            target: wiki,
+            verdict: exit === 0 ? "ok" : "broken",
+            exit,
+            diagnostics: findings.map(findingToDiagnostic),
+            timing_ms: Date.now() - startMs,
+          }),
+        );
+        process.exit(exit);
+      }
       for (const f of findings) {
         const tag =
           f.severity === "error"
@@ -861,7 +889,7 @@ async function main() {
       console.log(
         `\n${summary.errors} error(s), ${summary.warnings} warning(s)`,
       );
-      process.exit(summary.errors > 0 ? 2 : 0);
+      process.exit(exit);
       break;
     }
     case "shape-check": {
