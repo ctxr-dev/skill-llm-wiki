@@ -301,6 +301,11 @@ Consumer-facing scaffolding:
                                    layout contract. Prints the exact build
                                    command to run next. Replaces the
                                    cp + edit + build-flag dance.
+  heal <wiki> [--json]             Classify validate findings into
+                                   ok / fixable / needs-rebuild / broken
+                                   and name the next command to run.
+                                   Routes consumers through the right
+                                   mutating op without guessing.
 
 Low-level script helpers (deterministic, called by Claude):
   ingest <source>                  Walk source, emit candidate JSON
@@ -962,6 +967,15 @@ async function main() {
       await cmdInit(args);
       break;
     }
+    case "heal": {
+      // `heal` classifies validate findings into one of ok, fixable,
+      // needs-rebuild, broken and names the next command to run.
+      // Mutating action stays the consumer's explicit call so the
+      // orchestrator error surface does not leak into this
+      // classify-only path.
+      await cmdHeal(args);
+      break;
+    }
     default:
       printUsage();
       process.exit(1);
@@ -1069,6 +1083,85 @@ async function cmdInit(args) {
       (result.overwrote ? `  overwrote existing contract\n` : "") +
       `  next: ${result.build_command.join(" ")}\n`,
   );
+}
+
+async function cmdHeal(args) {
+  const { runHeal } = await import("./lib/heal.mjs");
+  const { findingToDiagnostic, hasJsonFlag, makeEnvelope, writeEnvelope } =
+    await import("./lib/json-envelope.mjs");
+
+  const wantJson = hasJsonFlag(args);
+  let wikiPath = null;
+  for (const tok of args) {
+    if (tok === "--json" || tok === "--json-errors") continue;
+    if (tok.startsWith("--")) {
+      process.stderr.write(`error: heal: unknown flag "${tok}"\n`);
+      process.exit(1);
+    }
+    if (wikiPath === null) {
+      wikiPath = tok;
+      continue;
+    }
+    process.stderr.write(`error: heal: unexpected positional "${tok}"\n`);
+    process.exit(1);
+  }
+  if (!wikiPath) {
+    process.stderr.write("error: heal requires <wiki> as its first argument\n");
+    process.exit(1);
+  }
+
+  const absWiki = resolve(wikiPath);
+  const startMs = Date.now();
+  const result = runHeal(absWiki);
+
+  const diagnostics = result.findings.map(findingToDiagnostic);
+  if (result.next_command) {
+    diagnostics.push({
+      code: "NEXT-01",
+      severity: "info",
+      path: result.target,
+      message: `next: ${result.next_command.join(" ")}`,
+    });
+  }
+  if (result.error) {
+    diagnostics.unshift({
+      code: "HEAL-00",
+      severity: "error",
+      path: result.target,
+      message: result.error,
+    });
+  }
+
+  const exit = result.verdict === "ok" ? 0 : 2;
+  if (wantJson) {
+    writeEnvelope(
+      makeEnvelope({
+        command: "heal",
+        target: result.target,
+        verdict: result.verdict,
+        exit,
+        diagnostics,
+        timing_ms: Date.now() - startMs,
+      }),
+    );
+    process.exit(exit);
+  }
+
+  process.stdout.write(`heal: ${result.verdict} (${result.action})\n`);
+  for (const f of result.findings) {
+    const tag =
+      f.severity === "error"
+        ? "ERR "
+        : f.severity === "warning"
+          ? "WARN"
+          : "INFO";
+    process.stdout.write(`  [${tag}] ${f.code}  ${f.target}\n`);
+    process.stdout.write(`         ${f.message}\n`);
+  }
+  if (result.next_command) {
+    process.stdout.write(`  next: ${result.next_command.join(" ")}\n`);
+  }
+  process.exit(exit);
 }
 
 function initError(code, message, wantJson, topic) {
