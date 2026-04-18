@@ -24,6 +24,13 @@ permissions:
   contents: write
   pull-requests: write
 
+# Serialize release dispatches so two operators can't race on the
+# same `release/v<version>` branch. A queued run picks up after
+# the earlier one finishes.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   open-release-pr:
     name: Open release PR
@@ -69,11 +76,22 @@ jobs:
           fi
           git commit -m "release: v${AFTER}"
 
-          # --force-with-lease is a no-op on the first push and only
-          # overwrites a pre-existing branch if its remote ref matches
-          # what we fetched — safe replacement of a stale release
-          # branch from a prior failed run.
-          git push --force-with-lease origin "${BRANCH}"
+          # Push safely whether or not the branch pre-exists on the
+          # remote. actions/checkout does NOT seed remote-tracking
+          # refs for arbitrary release branches, so bare
+          # `--force-with-lease` has no base and can degrade to
+          # unsafe behaviour. We fetch the remote branch first (if
+          # it exists) and then force-with-lease using the EXPLICIT
+          # ref:sha form so the lease is actually enforced against
+          # a known SHA. If the branch doesn't exist on the remote
+          # yet, a plain push is sufficient and safe.
+          if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
+            git fetch origin "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}"
+            REMOTE_SHA=$(git rev-parse "refs/remotes/origin/${BRANCH}")
+            git push --force-with-lease="refs/heads/${BRANCH}:${REMOTE_SHA}" origin "${BRANCH}"
+          else
+            git push origin "${BRANCH}"
+          fi
 
       - name: Open or update the release PR
         env:

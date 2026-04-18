@@ -22,6 +22,14 @@ on:
 permissions:
   contents: write
 
+# Serialize pushes to main so two concurrent release merges can't
+# both observe the tag as absent and then race on `git push`.
+# cancel-in-progress:false because every run MUST complete:
+# cancelling a run would skip tagging a legitimate release commit.
+concurrency:
+  group: tag-on-main
+  cancel-in-progress: false
+
 jobs:
   maybe-tag:
     name: Tag current main if package.json version is new
@@ -64,5 +72,23 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           TAG="${{ steps.version.outputs.tag }}"
           git tag -a "${TAG}" -m "release ${TAG}"
-          git push origin "refs/tags/${TAG}"
-          echo "Created and pushed tag ${TAG}"
+
+          # Tolerate "already exists" as success. The concurrency
+          # group above serialises runs on main, but a belt-and-
+          # suspenders guard closes the residual race where a user
+          # (or another workflow) created the same tag between our
+          # ls-remote check above and this push. We only swallow the
+          # specific "already exists" failure; any other push error
+          # still surfaces.
+          set +e
+          PUSH_OUT=$(git push origin "refs/tags/${TAG}" 2>&1)
+          PUSH_STATUS=$?
+          set -e
+          echo "$PUSH_OUT"
+          if [ $PUSH_STATUS -eq 0 ]; then
+            echo "Created and pushed tag ${TAG}"
+          elif echo "$PUSH_OUT" | grep -q "already exists"; then
+            echo "Tag ${TAG} was created concurrently; treating as success."
+          else
+            exit $PUSH_STATUS
+          fi
