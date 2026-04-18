@@ -1,6 +1,7 @@
 ---
 name: skill-llm-wiki
 description: Use when the user explicitly asks to build, extend, validate, repair, rebuild, or merge an LLM-optimized knowledge wiki from markdown notes, documentation, source code, or mixed folders. Default output is a single stable sibling `<source>.wiki/` with full history in a private git repo under `.llmwiki/git/`; `--layout-mode in-place` transforms the source folder itself, and `--layout-mode hosted --target <path>` honours a user-provided `.llmwiki.layout.yaml` contract. SKILL.md is the entry point; detailed operation instructions are loaded on demand from `guide/` per the routing procedure below.
+format_version: 1
 ---
 
 # skill-llm-wiki

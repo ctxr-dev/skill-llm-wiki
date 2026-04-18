@@ -122,15 +122,22 @@ function _depPreflightFailMessage(missing) {
   );
 }
 
-// Skip the dep check entirely for --version and --help so an operator
-// debugging a broken install can still get version/usage output. Every
-// other invocation (including `--help` placed AFTER another arg, which
-// is a malformed invocation we don't need to coddle) runs the check.
+// Skip the dep check entirely for --version, --help, `contract`, and
+// `where` so an operator debugging a broken install can still get
+// version/usage output, and so consumers can probe the contract
+// before the runtime dependencies are necessarily resolved. Every
+// other invocation (including `--help` placed AFTER another arg,
+// which is a malformed invocation we don't need to coddle) runs the
+// check.
 const _argvDP = process.argv.slice(2);
-const _isVersionOrHelpDP =
-  _argvDP[0] === "--version" || _argvDP[0] === "--help" || _argvDP[0] === "-h";
+const _isPreflightExemptDP =
+  _argvDP[0] === "--version" ||
+  _argvDP[0] === "--help" ||
+  _argvDP[0] === "-h" ||
+  _argvDP[0] === "contract" ||
+  _argvDP[0] === "where";
 
-if (!_isVersionOrHelpDP) {
+if (!_isPreflightExemptDP) {
   let _missingDP = _depPreflightCheck();
   if (_missingDP.length > 0) {
     process.stderr.write(_depPreflightFailMessage(_missingDP));
@@ -318,6 +325,11 @@ UX flags:
 Rollback flags:
   --to <ref>                       genesis | <op-id> | pre-<op-id> | HEAD~N
 
+Consumer probes (exempt from runtime-dep preflight):
+  contract [--json]                Print machine-readable format + CLI surface
+                                   contract. Consumers gate on format_version
+                                   instead of drift-testing SKILL.md.
+
 Global:
   --version                        Print CLI version
   --help, -h                       Show this help
@@ -434,6 +446,23 @@ async function main() {
     // sanity-check the binary. Every other code path runs the
     // preflight before any deterministic work begins.
     console.log(getPackageVersion());
+    return;
+  }
+
+  // `contract` is exempt from the dep preflight (see the preflight-
+  // skip list above) so consumers can probe the skill's format +
+  // CLI surface before the runtime deps are resolvable. It pulls
+  // only pure-data from scripts/lib/contract.mjs and does not touch
+  // any wiki state.
+  if (argv[0] === "contract") {
+    const { getContract, renderContractText } = await import("./lib/contract.mjs");
+    const wantJson = argv.slice(1).includes("--json");
+    const contract = getContract();
+    if (wantJson) {
+      process.stdout.write(JSON.stringify(contract, null, 2) + "\n");
+    } else {
+      process.stdout.write(renderContractText(contract));
+    }
     return;
   }
 
