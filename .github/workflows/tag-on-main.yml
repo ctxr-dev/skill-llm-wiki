@@ -74,9 +74,19 @@ jobs:
           fi
 
           # Compare the version at this push's starting SHA to HEAD.
-          # If git can't read package.json at the before-SHA (e.g.
-          # the file is new), we also treat it as a change.
-          PREV_VERSION=$(git show "${GITHUB_EVENT_BEFORE}:package.json" 2>/dev/null | node -e "
+          # If git can't read package.json at the before-SHA (file
+          # introduced in this push, tree rewritten, etc.), we treat
+          # the absence as a version change — the conservative
+          # direction that produces a tag rather than silently
+          # skipping. `|| true` keeps the pipeline's exit status 0
+          # under bash -eo pipefail so the step continues.
+          PREV_JSON=$(git show "${GITHUB_EVENT_BEFORE}:package.json" 2>/dev/null || true)
+          if [ -z "$PREV_JSON" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Previous package.json not readable at ${GITHUB_EVENT_BEFORE}; treating as change."
+            exit 0
+          fi
+          PREV_VERSION=$(printf '%s' "$PREV_JSON" | node -e "
             let buf = ''
             process.stdin.on('data', c => buf += c)
             process.stdin.on('end', () => {
