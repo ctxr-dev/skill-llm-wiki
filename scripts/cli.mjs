@@ -333,6 +333,9 @@ Consumer probes (exempt from runtime-dep preflight):
   contract [--json]                Print machine-readable format + CLI surface
                                    contract. Consumers gate on format_version
                                    instead of drift-testing SKILL.md.
+  where [--json]                   Print absolute paths to the skill root,
+                                   SKILL.md, guide/, templates/, and testkit/.
+                                   Resolves the install path without kit lookup.
 
 Global:
   --version                        Print CLI version
@@ -454,11 +457,11 @@ async function main() {
     return;
   }
 
-  // `contract` is exempt from the dep preflight (see the preflight-
-  // skip list above) so consumers can probe the skill's format +
-  // CLI surface before the runtime deps are resolvable. It pulls
-  // only pure-data from scripts/lib/contract.mjs and does not touch
-  // any wiki state.
+  // `contract` and `where` are exempt from the dep preflight (see
+  // the preflight-skip list above) so consumers can probe the
+  // skill's surface before the runtime deps are resolvable. Both
+  // pull only pure-data from scripts/lib/* and do not touch any
+  // wiki state.
   if (argv[0] === "contract") {
     const { getContract, renderContractText } = await import("./lib/contract.mjs");
     const wantJson = argv.slice(1).includes("--json");
@@ -467,6 +470,17 @@ async function main() {
       process.stdout.write(JSON.stringify(contract, null, 2) + "\n");
     } else {
       process.stdout.write(renderContractText(contract));
+    }
+    return;
+  }
+  if (argv[0] === "where") {
+    const { getWhere, renderWhereText } = await import("./lib/where.mjs");
+    const wantJson = argv.slice(1).includes("--json");
+    const info = getWhere();
+    if (wantJson) {
+      process.stdout.write(JSON.stringify(info, null, 2) + "\n");
+    } else {
+      process.stdout.write(renderWhereText(info));
     }
     return;
   }
