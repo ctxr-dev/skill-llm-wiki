@@ -34,11 +34,13 @@ test("MIN_CONSUMER_FORMAT_VERSION is at or below FORMAT_VERSION", () => {
 
 test("SKILL.md frontmatter format_version matches the constant", () => {
   const raw = readFileSync(SKILL_MD_PATH, "utf8");
-  const match = /^---\n([\s\S]*?)\n---/.exec(raw);
+  // Tolerate CRLF — on Windows runners git checks the repo out with
+  // native line endings by default, so the regex has to accept both.
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(raw);
   assert.ok(match, "SKILL.md must have a frontmatter block");
   const block = match[1];
   const fmLine = block
-    .split("\n")
+    .split(/\r?\n/)
     .find((line) => /^format_version:/.test(line));
   assert.ok(
     fmLine,

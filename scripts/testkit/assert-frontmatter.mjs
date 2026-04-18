@@ -2,16 +2,21 @@
 // frontmatter block, assert expected fields match.
 //
 // Deliberately lightweight: does not import gray-matter. The
-// opening `---\n` fence, body, and closing `---\n` fence pattern
-// the skill emits is stable enough that a ~10-line parser is the
-// right shape for a testkit.
+// opening `---` fence, body, and closing `---` fence pattern the
+// skill emits is stable enough that a ~10-line parser is the right
+// shape for a testkit. Tolerates both LF and CRLF line endings so
+// consumer tests running on Windows runners don't see spurious
+// parse failures.
 //
 // Zero runtime deps; pure Node built-ins.
 
 import { readFileSync } from "node:fs";
 
-const FM_START = /^---\n/;
-const FM_END = /\n---\n/;
+// Both fences match CRLF and LF: git on Windows checks repos out
+// with native line endings by default. Capture group on FM_START is
+// the length of the consumed fence so the caller can slice past it.
+const FM_START = /^---(\r?\n)/;
+const FM_END = /\r?\n---(\r?\n|$)/;
 
 // Parse a leaf's frontmatter block into a flat key: string-ish
 // object. Only the shallow YAML shape the skill emits is
@@ -19,12 +24,13 @@ const FM_END = /\n---\n/;
 // in their own test code; this helper is for sanity checks.
 export function readLeafFrontmatter(absLeafPath) {
   const raw = readFileSync(absLeafPath, "utf8");
-  if (!FM_START.test(raw)) {
+  const startMatch = FM_START.exec(raw);
+  if (!startMatch) {
     throw new Error(
       `readLeafFrontmatter: ${absLeafPath} has no frontmatter block`,
     );
   }
-  const afterFirst = raw.slice(4); // strip the opening ---\n
+  const afterFirst = raw.slice(startMatch[0].length);
   const endMatch = FM_END.exec(afterFirst);
   if (!endMatch) {
     throw new Error(
@@ -35,7 +41,7 @@ export function readLeafFrontmatter(absLeafPath) {
   const data = {};
   let currentKey = null;
   let currentList = null;
-  for (const line of block.split("\n")) {
+  for (const line of block.split(/\r?\n/)) {
     if (!line.trim() || line.startsWith("#")) continue;
     const listMatch = /^\s+-\s*(.*)$/.exec(line);
     if (listMatch && currentKey) {

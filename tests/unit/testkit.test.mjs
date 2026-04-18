@@ -164,6 +164,26 @@ body
   }
 });
 
+test("readLeafFrontmatter parses CRLF-line-ended frontmatter", () => {
+  // Simulates a leaf written on Windows or checked out via git
+  // with native line endings. The fence regexes and split must
+  // tolerate \r\n transparently.
+  const leaf = join(mktmp("fm-crlf"), "leaf.md");
+  writeFileSync(
+    leaf,
+    ["---", "id: crlf-leaf", "type: primary", "depth_role: leaf", 'focus: "crlf"', "---", "", "body", ""].join("\r\n"),
+    "utf8",
+  );
+  try {
+    const data = readLeafFrontmatter(leaf);
+    assert.equal(data.id, "crlf-leaf");
+    assert.equal(data.type, "primary");
+    assert.equal(data.focus, "crlf");
+  } finally {
+    rmSync(dirname(leaf), { recursive: true, force: true });
+  }
+});
+
 test("readLeafFrontmatter throws on missing frontmatter", () => {
   const leaf = join(mktmp("fm-missing"), "leaf.md");
   writeFileSync(leaf, "no frontmatter here\n", "utf8");
