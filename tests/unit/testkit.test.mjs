@@ -411,7 +411,11 @@ test("`testkit-stub --at <dir> --layout agents-skills` respects the layout flag"
       { encoding: "utf8" },
     );
     assert.equal(r.status, 0);
-    assert.ok(r.stdout.includes(".agents/skills"));
+    // Compare by path.join so the test is platform-agnostic —
+    // Windows uses "\" as a separator, POSIX uses "/". An
+    // `includes(".agents/skills")` check fails on Windows runners.
+    const expected = join(home, ".agents", "skills", STUB_SKILL_NAME, "SKILL.md");
+    assert.equal(r.stdout.trim(), expected);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
