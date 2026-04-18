@@ -78,11 +78,15 @@ After `init` succeeds, the envelope is:
     "modified": [],
     "deleted": []
   },
+  "next": {
+    "command": "skill-llm-wiki",
+    "args": ["build", "/abs/.../reports", "--layout-mode", "hosted", "--target", "/abs/.../reports", "--json"]
+  },
   "timing_ms": 12
 }
 ```
 
-Consumers parse the `NEXT-01` diagnostic to get the exact build command.
+Consumers read the structured `next` field to get the exact build command: `env.next.command` + `env.next.args` go directly into `spawnSync`. The `NEXT-01` diagnostic carries the same hint as human-readable prose for operators tailing stdout, but it is not the canonical machine form.
 
 ## Minimum consumer code
 
@@ -98,8 +102,19 @@ function initDated(topicPath, template = "reports") {
   if (r.status !== 0) throw new Error(`init failed: ${r.stderr}`);
   const env = JSON.parse(r.stdout);
   if (env.verdict !== "initialised") throw new Error(env.diagnostics?.[0]?.message ?? "unexpected");
-  const nextHint = env.diagnostics.find((d) => d.code === "NEXT-01");
-  return { contractPath: env.artifacts.created[0], nextCommand: nextHint?.message };
+  // Prefer the structured `next` field over parsing NEXT-01.
+  return {
+    contractPath: env.artifacts.created[0],
+    next: env.next, // { command: "skill-llm-wiki", args: ["build", ...] }
+  };
+}
+
+// Consumers that want to run the build immediately:
+function initAndBuild(topicPath, template = "reports") {
+  const { next } = initDated(topicPath, template);
+  if (!next) throw new Error("init envelope missing `next` field");
+  const r2 = spawnSync(next.command, next.args, { encoding: "utf8", stdio: "inherit" });
+  if (r2.status !== 0) throw new Error(`build exited ${r2.status}`);
 }
 ```
 

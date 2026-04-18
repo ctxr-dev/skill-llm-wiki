@@ -70,9 +70,15 @@ Same `init` envelope as the dated recipe:
   "verdict": "initialised",
   "target": "/abs/.../runbooks",
   "artifacts": { "created": ["/abs/.../.llmwiki.layout.yaml"] },
-  "diagnostics": [{ "code": "NEXT-01", "severity": "info", "message": "..." }]
+  "diagnostics": [{ "code": "NEXT-01", "severity": "info", "message": "..." }],
+  "next": {
+    "command": "skill-llm-wiki",
+    "args": ["build", "/abs/.../runbooks", "--layout-mode", "hosted", "--target", "/abs/.../runbooks", "--json"]
+  }
 }
 ```
+
+Consumers read `env.next.command` + `env.next.args` to get the build invocation; the `NEXT-01` diagnostic carries the same hint as prose for humans tailing stdout.
 
 ## Minimum consumer code
 
@@ -86,7 +92,9 @@ function initSubject(topicPath, template = "runbooks") {
     { encoding: "utf8" },
   );
   if (r.status !== 0) throw new Error(`init failed: ${r.stderr}`);
-  return JSON.parse(r.stdout);
+  const env = JSON.parse(r.stdout);
+  // Prefer the structured `next` field over parsing NEXT-01.
+  return { contractPath: env.artifacts.created[0], next: env.next };
 }
 ```
 

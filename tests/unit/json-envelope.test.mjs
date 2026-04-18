@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { SKILL_ROOT } from "../../scripts/lib/where.mjs";
+import { makeWikiFixture } from "../../scripts/testkit/make-wiki-fixture.mjs";
 import { mktmp } from "../helpers/tmp.mjs";
 import {
   ENVELOPE_SCHEMA,
@@ -166,41 +167,25 @@ test("findingToDiagnostic fills gaps with defaults", () => {
 });
 
 // ─── End-to-end: validate --json emits the envelope ────────────
+//
+// Use the shipped testkit helper to seed a wiki that isWikiRoot +
+// validateWiki actually accept: root index.md with the generator
+// marker, id matching the directory basename, depth_role: category,
+// and a layout.yaml contract. Without this the test exercises the
+// WIKI-01 early-return path, not the happy envelope path.
 
-function makeMinimalWiki(dir) {
-  mkdirSync(dir, { recursive: true });
-  // Empty wiki — validate should run without errors and return exit 0.
-  // We don't care about the detailed findings here, only the envelope shape.
-  writeFileSync(
-    join(dir, "index.md"),
-    `---
-id: index
-type: index
-depth_role: root
-focus: "test wiki"
-covers: []
-parents: []
-tags: []
----
-
-# test wiki
-`,
-    "utf8",
-  );
-  // Private git metadata expected by some validation paths.
-  mkdirSync(join(dir, ".llmwiki"), { recursive: true });
-}
-
-test("validate --json emits a parseable envelope with correct schema", () => {
+test("validate --json emits a parseable envelope with correct schema", async () => {
   const wiki = join(mktmp("envelope-validate"), "wiki");
   try {
-    makeMinimalWiki(wiki);
+    await makeWikiFixture({ path: wiki, kind: "dated" });
     const r = spawnSync(process.execPath, [CLI_PATH, "validate", wiki, "--json"], {
       encoding: "utf8",
     });
-    // validate may exit 0 or 2 depending on whether the minimal
-    // wiki passes all invariants; either is fine for this test.
-    // We only care about the envelope shape on stdout.
+    // The fixture isn't built through the full orchestrator, so
+    // validate may still find issues (LOSS-01 / GIT-01 are common
+    // on a fixture with no private-git history). The important
+    // thing is that we reach the envelope-emission path, not the
+    // WIKI-01 early-return path.
     const lines = r.stdout.trim().split("\n");
     const last = lines[lines.length - 1];
     const env = JSON.parse(last);
@@ -211,6 +196,11 @@ test("validate --json emits a parseable envelope with correct schema", () => {
     assert.ok(Number.isInteger(env.exit));
     assert.ok(Array.isArray(env.diagnostics));
     assert.ok(Number.isInteger(env.timing_ms));
+    // Crucial: we did NOT take the isWikiRoot=false branch. That
+    // branch surfaces WIKI-01. If we got WIKI-01 here, the fixture
+    // isn't being recognised as a wiki root.
+    const wikiOne = env.diagnostics.find((d) => d.code === "WIKI-01");
+    assert.equal(wikiOne, undefined, `unexpected WIKI-01: ${JSON.stringify(wikiOne)}`);
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }
@@ -247,10 +237,10 @@ test("heal --json emits a JSON envelope on missing positional", () => {
   assert.equal(env.diagnostics[0].code, "HEAL-USAGE");
 });
 
-test("validate --json-errors is treated as an alias for --json", () => {
+test("validate --json-errors is treated as an alias for --json", async () => {
   const wiki = join(mktmp("envelope-validate-alias"), "wiki");
   try {
-    makeMinimalWiki(wiki);
+    await makeWikiFixture({ path: wiki, kind: "dated" });
     const r = spawnSync(
       process.execPath,
       [CLI_PATH, "validate", wiki, "--json-errors"],
