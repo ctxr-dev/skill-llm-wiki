@@ -7,10 +7,9 @@
 // where --json` + templates_dir.
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { SKILL_ROOT } from "./where.mjs";
 
-const SKILL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const TEMPLATES_DIR = join(SKILL_ROOT, "templates");
 const TEMPLATE_SUFFIX = ".llmwiki.layout.yaml";
 

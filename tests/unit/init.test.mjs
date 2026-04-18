@@ -14,7 +14,7 @@ import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { runInit, InitError } from "../../scripts/lib/init.mjs";
+import { runInit, InitError, renderInitText } from "../../scripts/lib/init.mjs";
 import { ENVELOPE_SCHEMA } from "../../scripts/lib/json-envelope.mjs";
 
 const SKILL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -41,6 +41,22 @@ test("runInit seeds a dated wiki via --kind dated default template", () => {
       r.build_command.slice(0, 2),
       ["skill-llm-wiki", "build"],
     );
+    // Structured `next` mirrors build_command.
+    assert.equal(r.next.command, "skill-llm-wiki");
+    assert.deepEqual(r.next.args, r.build_command.slice(1));
+  } finally {
+    rmSync(dirname(topic), { recursive: true, force: true });
+  }
+});
+
+test("renderInitText produces the human-readable summary", () => {
+  const topic = join(mktmp("render"), "reports");
+  try {
+    const r = runInit({ topic, kind: "dated" });
+    const text = renderInitText(r);
+    assert.match(text, /init: seeded/);
+    assert.match(text, /template: reports/);
+    assert.match(text, /next: skill-llm-wiki build/);
   } finally {
     rmSync(dirname(topic), { recursive: true, force: true });
   }

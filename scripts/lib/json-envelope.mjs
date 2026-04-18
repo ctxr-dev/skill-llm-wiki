@@ -47,6 +47,11 @@ export const SEVERITIES = Object.freeze(["error", "warning", "info"]);
 // Build an envelope from a minimal set of inputs. Missing artifact
 // buckets default to empty arrays so consumers never have to
 // defensively check for undefined.
+//
+// `next` is an optional structured hint for consumers that also
+// carries a human-readable form in an info diagnostic. It is the
+// machine-readable sibling of the NEXT-01 diagnostic consumers may
+// still parse today.
 export function makeEnvelope({
   command,
   target = null,
@@ -55,6 +60,7 @@ export function makeEnvelope({
   diagnostics = [],
   artifacts = {},
   timing_ms = 0,
+  next = null,
 } = {}) {
   if (!command || typeof command !== "string") {
     throw new Error("makeEnvelope: command is required");
@@ -70,7 +76,7 @@ export function makeEnvelope({
   if (!Number.isInteger(exit)) {
     throw new Error("makeEnvelope: exit must be an integer");
   }
-  return {
+  const envelope = {
     schema: ENVELOPE_SCHEMA,
     command,
     target,
@@ -84,6 +90,49 @@ export function makeEnvelope({
     },
     timing_ms: Number.isInteger(timing_ms) ? timing_ms : 0,
   };
+  if (next !== null) {
+    if (
+      typeof next !== "object" ||
+      typeof next.command !== "string" ||
+      !Array.isArray(next.args)
+    ) {
+      throw new Error(
+        "makeEnvelope: next must be { command: string, args: string[] } or null",
+      );
+    }
+    envelope.next = { command: next.command, args: next.args.slice() };
+  }
+  return envelope;
+}
+
+// Shared error-envelope builder used by consumer subcommands that
+// need to surface a structured failure without reinventing the
+// envelope shape. Verdict defaults to "ambiguous" (the canonical
+// error verdict) and exit defaults to 2 (validation / ambiguity per
+// the skill-wide scheme). Usage-error callers pass exit=1 explicitly.
+export function makeErrorEnvelope({
+  command,
+  code,
+  message,
+  target = null,
+  verdict = "ambiguous",
+  exit = 2,
+} = {}) {
+  if (!command || typeof command !== "string") {
+    throw new Error("makeErrorEnvelope: command is required");
+  }
+  if (!code || typeof code !== "string") {
+    throw new Error("makeErrorEnvelope: code is required");
+  }
+  return makeEnvelope({
+    command,
+    target,
+    verdict,
+    exit,
+    diagnostics: [
+      { code, severity: "error", path: target, message: message ?? "" },
+    ],
+  });
 }
 
 // Write an envelope to stdout as one line of JSON followed by a

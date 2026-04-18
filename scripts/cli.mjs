@@ -1045,11 +1045,19 @@ async function main() {
 }
 
 async function cmdInit(args) {
-  const { runInit, InitError } = await import("./lib/init.mjs");
-  const { hasJsonFlag, makeEnvelope, writeEnvelope } = await import(
-    "./lib/json-envelope.mjs"
-  );
+  const { runInit, InitError, renderInitText } = await import("./lib/init.mjs");
+  const {
+    hasJsonFlag,
+    makeEnvelope,
+    makeErrorEnvelope,
+    writeEnvelope,
+  } = await import("./lib/json-envelope.mjs");
   const wantJson = hasJsonFlag(args);
+  const fail = (code, message, topic = null) =>
+    initError(code, message, wantJson, topic, {
+      makeErrorEnvelope,
+      writeEnvelope,
+    });
 
   // Minimal flag parse for init. Positional is <topic>; flags are
   // --kind <dated|subject>, --template <name>, --force, --json.
@@ -1083,26 +1091,16 @@ async function cmdInit(args) {
       continue;
     }
     if (tok.startsWith("--")) {
-      initError(
-        "INIT-00",
-        `init: unknown flag "${tok}"`,
-        wantJson,
-        null,
-      );
+      fail("INIT-00", `init: unknown flag "${tok}"`);
     }
     if (topic === null) {
       topic = tok;
       continue;
     }
-    initError(
-      "INIT-00",
-      `init: unexpected positional "${tok}"`,
-      wantJson,
-      null,
-    );
+    fail("INIT-00", `init: unexpected positional "${tok}"`);
   }
   if (!topic) {
-    initError("INIT-01", "init requires a <topic> path", wantJson, null);
+    fail("INIT-01", "init requires a <topic> path");
   }
 
   const startMs = Date.now();
@@ -1111,7 +1109,7 @@ async function cmdInit(args) {
     result = runInit({ topic, kind, template, force, cwd: process.cwd() });
   } catch (err) {
     if (err instanceof InitError) {
-      initError(err.code, err.message, wantJson, null);
+      fail(err.code, err.message);
     }
     throw err;
   }
@@ -1134,21 +1132,17 @@ async function cmdInit(args) {
           },
         ],
         artifacts: { created: [result.contract_path] },
+        next: result.next,
         timing_ms: Date.now() - startMs,
       }),
     );
     return;
   }
-  process.stdout.write(
-    `init: seeded ${result.contract_path}\n` +
-      `  template: ${result.template} (kind=${result.kind})\n` +
-      (result.overwrote ? `  overwrote existing contract\n` : "") +
-      `  next: ${result.build_command.join(" ")}\n`,
-  );
+  process.stdout.write(renderInitText(result));
 }
 
 async function cmdHeal(args) {
-  const { runHeal } = await import("./lib/heal.mjs");
+  const { runHeal, renderHealText } = await import("./lib/heal.mjs");
   const { findingToDiagnostic, hasJsonFlag, makeEnvelope, writeEnvelope } =
     await import("./lib/json-envelope.mjs");
 
@@ -1206,6 +1200,12 @@ async function cmdHeal(args) {
   // corrupt" meaning). Consumers gate on the envelope, not exit 2.
   const exit =
     result.verdict === "broken" || result.verdict === "ambiguous" ? 6 : 0;
+  const nextField = result.next_command
+    ? {
+        command: result.next_command[0],
+        args: result.next_command.slice(1),
+      }
+    : null;
   if (wantJson) {
     writeEnvelope(
       makeEnvelope({
@@ -1214,26 +1214,14 @@ async function cmdHeal(args) {
         verdict: result.verdict,
         exit,
         diagnostics,
+        next: nextField,
         timing_ms: Date.now() - startMs,
       }),
     );
     process.exit(exit);
   }
 
-  process.stdout.write(`heal: ${result.verdict} (${result.action})\n`);
-  for (const f of result.findings) {
-    const tag =
-      f.severity === "error"
-        ? "ERR "
-        : f.severity === "warning"
-          ? "WARN"
-          : "INFO";
-    process.stdout.write(`  [${tag}] ${f.code}  ${f.target}\n`);
-    process.stdout.write(`         ${f.message}\n`);
-  }
-  if (result.next_command) {
-    process.stdout.write(`  next: ${result.next_command.join(" ")}\n`);
-  }
+  process.stdout.write(renderHealText(result));
   process.exit(exit);
 }
 
@@ -1244,20 +1232,18 @@ async function cmdHeal(args) {
 // matching how build/extend etc. surface validation failures.
 const INIT_USAGE_CODES = new Set(["INIT-00", "INIT-01"]);
 
-function initError(code, message, wantJson, topic) {
+function initError(code, message, wantJson, topic, envelopeHelpers) {
   const exit = INIT_USAGE_CODES.has(code) ? 1 : 2;
-  if (wantJson) {
-    process.stdout.write(
-      JSON.stringify({
-        schema: "skill-llm-wiki/v1",
+  if (wantJson && envelopeHelpers) {
+    const { makeErrorEnvelope, writeEnvelope } = envelopeHelpers;
+    writeEnvelope(
+      makeErrorEnvelope({
         command: "init",
+        code,
+        message,
         target: topic,
-        verdict: "ambiguous",
         exit,
-        diagnostics: [{ code, severity: "error", path: topic, message }],
-        artifacts: { created: [], modified: [], deleted: [] },
-        timing_ms: 0,
-      }) + "\n",
+      }),
     );
     process.exit(exit);
   }

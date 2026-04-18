@@ -13,6 +13,7 @@ import {
   VERDICTS,
   SEVERITIES,
   makeEnvelope,
+  makeErrorEnvelope,
   findingToDiagnostic,
   hasJsonFlag,
 } from "../../scripts/lib/json-envelope.mjs";
@@ -61,6 +62,61 @@ test("makeEnvelope rejects missing required fields", () => {
   assert.throws(
     () => makeEnvelope({ command: "x", verdict: "ok" }),
     /exit must be an integer/,
+  );
+});
+
+test("makeEnvelope accepts a structured `next` field", () => {
+  const e = makeEnvelope({
+    command: "init",
+    verdict: "initialised",
+    exit: 0,
+    next: { command: "skill-llm-wiki", args: ["build", "/tmp/x", "--json"] },
+  });
+  assert.deepEqual(e.next, {
+    command: "skill-llm-wiki",
+    args: ["build", "/tmp/x", "--json"],
+  });
+});
+
+test("makeEnvelope omits `next` when null", () => {
+  const e = makeEnvelope({ command: "validate", verdict: "ok", exit: 0 });
+  assert.equal("next" in e, false);
+});
+
+test("makeEnvelope rejects malformed `next`", () => {
+  assert.throws(
+    () =>
+      makeEnvelope({
+        command: "init",
+        verdict: "initialised",
+        exit: 0,
+        next: { command: "x" }, // missing args
+      }),
+    /next must be/,
+  );
+});
+
+test("makeErrorEnvelope builds a canonical error shape", () => {
+  const e = makeErrorEnvelope({
+    command: "init",
+    code: "INIT-07",
+    message: "contract exists",
+    target: "/abs/topic",
+    exit: 2,
+  });
+  assert.equal(e.schema, ENVELOPE_SCHEMA);
+  assert.equal(e.command, "init");
+  assert.equal(e.verdict, "ambiguous");
+  assert.equal(e.exit, 2);
+  assert.equal(e.diagnostics.length, 1);
+  assert.equal(e.diagnostics[0].code, "INIT-07");
+  assert.equal(e.diagnostics[0].severity, "error");
+});
+
+test("makeErrorEnvelope rejects missing code", () => {
+  assert.throws(
+    () => makeErrorEnvelope({ command: "init", message: "x" }),
+    /code is required/,
   );
 });
 

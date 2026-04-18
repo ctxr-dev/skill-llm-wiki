@@ -58,7 +58,18 @@ export const FINDING_ACTIONS = Object.freeze({
 
 // Priority ranking: if any finding maps to a higher-priority action,
 // that action wins for the whole wiki.
-const PRIORITY = { none: 0, fix: 1, rebuild: 2, manual: 3 };
+const PRIORITY = Object.freeze({ none: 0, fix: 1, rebuild: 2, manual: 3 });
+
+// Verdict that corresponds to each action tier. Keeps the four
+// tables (FINDING_ACTIONS, PRIORITY, NEXT_COMMAND_BY_ACTION,
+// VERDICT_BY_ACTION) in parallel so adding a new action tier means
+// adding one row in each.
+const VERDICT_BY_ACTION = Object.freeze({
+  none: "ok",
+  fix: "fixable",
+  rebuild: "needs-rebuild",
+  manual: "broken",
+});
 
 function actionFor(code) {
   return FINDING_ACTIONS[code] ?? "rebuild";
@@ -80,13 +91,7 @@ export function classifyFindings(findings) {
   for (const a of actions) {
     if (PRIORITY[a] > PRIORITY[best]) best = a;
   }
-  const verdictByAction = {
-    none: "ok",
-    fix: "fixable",
-    rebuild: "needs-rebuild",
-    manual: "broken",
-  };
-  return { action: best, verdict: verdictByAction[best] };
+  return { action: best, verdict: VERDICT_BY_ACTION[best] };
 }
 
 // Full heal run against a wiki path. Returns an object the CLI
@@ -117,14 +122,41 @@ export function runHeal(wikiPath) {
   };
 }
 
+// Map every action to the CLI invocation that resolves it. A map
+// rather than an if/else chain keeps the action vocabulary in one
+// place next to FINDING_ACTIONS / PRIORITY / VERDICT_BY_ACTION. To
+// add a new action tier, add a row here; anything else falls back
+// to `null` (no auto-step).
+const NEXT_COMMAND_BY_ACTION = Object.freeze({
+  none: null,
+  fix: (wikiPath) => ["skill-llm-wiki", "fix", wikiPath, "--json"],
+  rebuild: (wikiPath) => ["skill-llm-wiki", "rebuild", wikiPath, "--json"],
+  manual: null,
+});
+
 function buildNextCommand(action, wikiPath) {
-  if (action === "none") return null;
-  if (action === "fix") {
-    return ["skill-llm-wiki", "fix", wikiPath, "--json"];
+  const builder = NEXT_COMMAND_BY_ACTION[action];
+  if (typeof builder !== "function") return null;
+  return builder(wikiPath);
+}
+
+// Human-readable rendering of a runHeal result. Lives here so the
+// text and JSON output of heal stay under the same roof and cannot
+// drift. Mirrors the renderContractText / renderInitText pattern.
+export function renderHealText(result) {
+  const lines = [`heal: ${result.verdict} (${result.action})`];
+  for (const f of result.findings) {
+    const tag =
+      f.severity === "error"
+        ? "ERR "
+        : f.severity === "warning"
+          ? "WARN"
+          : "INFO";
+    lines.push(`  [${tag}] ${f.code}  ${f.target}`);
+    lines.push(`         ${f.message}`);
   }
-  if (action === "rebuild") {
-    return ["skill-llm-wiki", "rebuild", wikiPath, "--json"];
+  if (result.next_command) {
+    lines.push(`  next: ${result.next_command.join(" ")}`);
   }
-  // manual
-  return null;
+  return lines.join("\n") + "\n";
 }

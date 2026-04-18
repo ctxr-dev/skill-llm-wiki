@@ -143,8 +143,8 @@ export function runInit({
   writeFileSync(contractPath, body, "utf8");
 
   // The next step for the consumer. Passed back so the CLI can
-  // include it in the envelope as an "info" diagnostic: machine-
-  // readable enough for scripts, human-readable enough for operators.
+  // include it in the envelope both as a structured `next` field
+  // and as a human-readable NEXT-01 info diagnostic.
   const buildCommand = [
     "skill-llm-wiki",
     "build",
@@ -163,5 +163,19 @@ export function runInit({
     contract_path: contractPath,
     overwrote: alreadyPresent,
     build_command: buildCommand,
+    next: { command: buildCommand[0], args: buildCommand.slice(1) },
   };
+}
+
+// Human-readable rendering of a runInit result. Lives here (not in
+// cli.mjs) so the text and JSON output of init stay under the same
+// roof and cannot drift. Mirrors the renderContractText /
+// renderWhereText pattern.
+export function renderInitText(result) {
+  return (
+    `init: seeded ${result.contract_path}\n` +
+    `  template: ${result.template} (kind=${result.kind})\n` +
+    (result.overwrote ? `  overwrote existing contract\n` : "") +
+    `  next: ${result.build_command.join(" ")}\n`
+  );
 }

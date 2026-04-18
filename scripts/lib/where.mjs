@@ -18,8 +18,12 @@ import { dirname, join } from "node:path";
 import { FORMAT_VERSION } from "./contract.mjs";
 
 // `where.mjs` lives at <SKILL_ROOT>/scripts/lib/where.mjs. The skill
-// root is two directories up.
-const SKILL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+// root is two directories up. Exported so other lib / testkit
+// modules that need the skill root import this single source of
+// truth (contract.mjs, templates.mjs, cli-run.mjs).
+export const SKILL_ROOT = dirname(
+  dirname(dirname(fileURLToPath(import.meta.url))),
+);
 
 function readPackageVersion() {
   try {

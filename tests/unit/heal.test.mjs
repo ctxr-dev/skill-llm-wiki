@@ -11,6 +11,7 @@ import {
   FINDING_ACTIONS,
   classifyFindings,
   runHeal,
+  renderHealText,
 } from "../../scripts/lib/heal.mjs";
 
 const SKILL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -98,6 +99,27 @@ test("classifyFindings: fix + rebuild → rebuild wins", () => {
     { code: "DUP-ID", severity: "error", target: "b", message: "m" },
   ]);
   assert.equal(r.verdict, "needs-rebuild");
+});
+
+test("renderHealText prints the verdict, findings, and next command", () => {
+  const text = renderHealText({
+    target: "/tmp/x",
+    verdict: "fixable",
+    action: "fix",
+    findings: [
+      {
+        code: "DANGLING-LINK",
+        severity: "error",
+        target: "a.md",
+        message: "broken",
+      },
+    ],
+    error: null,
+    next_command: ["skill-llm-wiki", "fix", "/tmp/x", "--json"],
+  });
+  assert.match(text, /^heal: fixable \(fix\)/);
+  assert.match(text, /\[ERR \] DANGLING-LINK {2}a\.md/);
+  assert.match(text, /next: skill-llm-wiki fix \/tmp\/x --json/);
 });
 
 test("runHeal surfaces verdict broken when path is not a wiki", () => {

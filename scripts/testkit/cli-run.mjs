@@ -6,12 +6,10 @@
 // Zero runtime deps; pure Node built-ins.
 
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { SKILL_ROOT } from "../lib/where.mjs";
+import { hasJsonFlag } from "../lib/json-envelope.mjs";
 
-// `cli-run.mjs` lives at <SKILL_ROOT>/scripts/testkit/cli-run.mjs,
-// so the CLI is two directories up then scripts/cli.mjs.
-const SKILL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 export const CLI_PATH = join(SKILL_ROOT, "scripts", "cli.mjs");
 
 // Run the skill CLI with `args`. Returns an object of:
@@ -40,12 +38,7 @@ export function runCli(args, { cwd, env } = {}) {
     cwd: cwd ?? process.cwd(),
     env: env ? { ...process.env, ...env } : process.env,
   });
-  const wantJson = resolvedArgs.some(
-    (a) =>
-      a === "--json" ||
-      a === "--json-errors" ||
-      (typeof a === "string" && a.startsWith("--json=")),
-  );
+  const wantJson = hasJsonFlag(resolvedArgs);
   let envelope = null;
   if (wantJson && r.stdout) {
     // Two output shapes exist. Envelope subcommands (validate, init,
