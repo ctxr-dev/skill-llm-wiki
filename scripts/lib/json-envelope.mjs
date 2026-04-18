@@ -27,8 +27,16 @@
 //       { "code": "IDX-01", "severity": "warning", "path": "...", "message": "..." }
 //     ],
 //     "artifacts": { "created": [...], "modified": [...], "deleted": [...] },
-//     "timing_ms": <integer>
+//     "timing_ms": <integer>,
+//     "next": null | { "command": "skill-llm-wiki", "args": ["fix", "/wiki", "--json"] }
 //   }
+//
+// `next` is present only when the subcommand wants to hand the
+// consumer a machine-readable follow-up command (init emits the
+// build invocation; heal emits the fix or rebuild invocation).
+// Consumers that receive `verdict: "fixable"` / `"needs-rebuild"`
+// should invoke `next.command` with `next.args` rather than parse
+// the `NEXT-01` info diagnostic's free-text message.
 
 export const ENVELOPE_SCHEMA = "skill-llm-wiki/v1";
 

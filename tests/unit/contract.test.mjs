@@ -127,8 +127,11 @@ test("`contract` CLI without --json prints human text", () => {
   assert.ok(r.stdout.includes(`format_version: ${FORMAT_VERSION}`));
 });
 
-// ─── Drift guard: every flag listed in SUBCOMMANDS must actually be
-// accepted by the CLI (and vice versa for consumer-facing flags) ──
+// ─── Drift guard: every flag listed in SUBCOMMANDS must be
+// accepted by the CLI, AND every consumer-surface flag accepted
+// by the CLI must be declared in SUBCOMMANDS. Both directions are
+// enforced here so adding a flag to cli.mjs without updating
+// contract.mjs (or vice versa) fails CI. ──
 
 test("every flag in SUBCOMMANDS is accepted by the CLI's shared parser", () => {
   const c = getContract();
@@ -183,6 +186,35 @@ function extractFlagSet(source, name) {
   }
   return new Set(flags);
 }
+
+test("every consumer-facing flag accepted by the CLI appears in SUBCOMMANDS", () => {
+  // Reverse-direction drift: if someone adds a flag to
+  // FLAG_WITH_VALUE / FLAG_BOOLEAN without declaring it in any
+  // SUBCOMMANDS[*].flags, consumers gating on the contract will
+  // silently miss the new flag. Enforce both directions.
+  const c = getContract();
+  const cliSource = readFileSync(CLI_PATH, "utf8");
+  const valueFlags = extractFlagSet(cliSource, "FLAG_WITH_VALUE");
+  const booleanFlags = extractFlagSet(cliSource, "FLAG_BOOLEAN");
+
+  // Legacy aliases accepted by the CLI but deliberately not
+  // exposed in the contract. Consumers must adopt the canonical
+  // form; see scripts/lib/contract.mjs SUBCOMMANDS comment.
+  const LEGACY_ALIASES = new Set(["--json-errors"]);
+
+  const declared = new Set();
+  for (const spec of Object.values(c.subcommands)) {
+    for (const f of spec.flags) declared.add(f);
+  }
+
+  for (const flag of [...valueFlags, ...booleanFlags]) {
+    if (LEGACY_ALIASES.has(flag)) continue;
+    assert.ok(
+      declared.has(flag),
+      `cli.mjs accepts ${flag} but it is not declared in any contract.subcommands[*].flags — consumers gating on the contract will not know about it`,
+    );
+  }
+});
 
 test("contract covers every top-level consumer-facing subcommand", () => {
   const c = getContract();

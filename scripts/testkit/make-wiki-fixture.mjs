@@ -115,10 +115,14 @@ export async function makeWikiFixture({
     throw new Error("makeWikiFixture: { path } is required");
   }
   const rootAbs = resolve(path);
-  // Root-level check: if the parent chain leading down to the
-  // fixture root contains any symlink, refuse. Once we've
-  // validated the root, subsequent refuseSymlink calls pass
-  // rootAbs so they only walk the SEGMENTS inside the fixture.
+  // Root-level check: refuse if the fixture root path ITSELF is a
+  // pre-existing symlink. We intentionally do NOT walk parent
+  // directories above rootAbs here; OS-level symlinks in the path
+  // above the tmp dir (e.g. macOS's /var → /private/var) are a
+  // user-environment concern, not a fixture concern, and flagging
+  // them would fail every test on macOS. Subsequent
+  // refuseSymlink calls pass rootAbs so they inspect every
+  // segment INSIDE the fixture tree.
   await refuseSymlink(rootAbs);
   await mkdir(rootAbs, { recursive: true });
 

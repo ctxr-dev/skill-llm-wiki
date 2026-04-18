@@ -101,8 +101,12 @@ const EXIT_CODES = {
 // cli.mjs printUsage() top-level operations.
 // Keep this table in sync with scripts/cli.mjs. A drift test in
 // tests/unit/contract.test.mjs asserts every flag listed here is
-// actually accepted by the CLI, and every consumer-surface flag
-// accepted by the CLI is listed here.
+// actually accepted by the CLI's shared parser or one of the
+// per-subcommand handlers. `SUBCOMMANDS[*].flags` lists canonical
+// consumer-surface flags only; legacy aliases accepted by the CLI
+// (for example `--json-errors` as an alias of `--json`) are
+// deliberately omitted so consumers standardise on the current
+// flag form.
 const SUBCOMMANDS = {
   build: {
     positionals: ["source"],
@@ -155,6 +159,12 @@ const ENVELOPE_SCHEMA = {
     diagnostics: { kind: "object[]" },
     artifacts: { kind: "object" },
     timing_ms: { kind: "integer" },
+    // `next` is optional: present only when the subcommand wants
+    // to hand the consumer a machine-readable follow-up command
+    // (init emits `{command:"skill-llm-wiki", args:["build",...]}`,
+    // heal emits the fix/rebuild invocation). When absent, the
+    // consumer has nothing to run.
+    next: { kind: "object|null", fields: { command: "string", args: "string[]" } },
   },
 };
 
