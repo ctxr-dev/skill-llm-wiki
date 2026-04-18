@@ -51,6 +51,35 @@ function assertInsideRoot(rootAbs, entryRel) {
   return resolved;
 }
 
+// Walk UP from `absPath` to the first existing ancestor and
+// lstat it. Refuse if that ancestor is a symbolic link. Catches
+// the attack where a pre-existing symlink on the path TO the
+// fixture root would let `mkdir(rootAbs, {recursive:true})`
+// follow it and create the fixture outside the caller's
+// intended tree. Non-existent segments are safe — mkdir creates
+// them fresh. We stop at the first existing ancestor, so OS-
+// level symlinks above the caller-supplied tmp dir (macOS's
+// /var → /private/var) don't false-positive.
+async function refuseSymlinkOnExistingAncestor(absPath) {
+  let cursor = absPath;
+  while (true) {
+    try {
+      const st = await lstat(cursor);
+      if (st.isSymbolicLink()) {
+        throw new Error(
+          `makeWikiFixture: ${cursor} is a symbolic link on the path to ${absPath}; refusing to write through it`,
+        );
+      }
+      return; // found first existing, and it's not a symlink
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      const parent = dirname(cursor);
+      if (parent === cursor) return; // filesystem root, no anchor
+      cursor = parent;
+    }
+  }
+}
+
 // Refuse to write through a pre-existing symlink.
 //
 // When called with a single `absPath` (no `rootAbs`), only that
@@ -115,15 +144,16 @@ export async function makeWikiFixture({
     throw new Error("makeWikiFixture: { path } is required");
   }
   const rootAbs = resolve(path);
-  // Root-level check: refuse if the fixture root path ITSELF is a
-  // pre-existing symlink. We intentionally do NOT walk parent
-  // directories above rootAbs here; OS-level symlinks in the path
-  // above the tmp dir (e.g. macOS's /var → /private/var) are a
-  // user-environment concern, not a fixture concern, and flagging
-  // them would fail every test on macOS. Subsequent
-  // refuseSymlink calls pass rootAbs so they inspect every
-  // segment INSIDE the fixture tree.
-  await refuseSymlink(rootAbs);
+  // Root-level check: walk UP from rootAbs to the first existing
+  // ancestor, lstat it, and refuse if it's a symlink. This catches
+  // an attacker-planted intermediate segment (e.g. `/tmp/foo -> /etc`
+  // before init runs `makeWikiFixture({ path: "/tmp/foo/wiki" })`,
+  // where mkdir(recursive:true) would otherwise follow the symlink
+  // and create the fixture outside the caller's intended tree.
+  // The walker stops at the first existing ancestor so OS-level
+  // symlinks above the caller's path (macOS's /var → /private/var)
+  // don't false-positive.
+  await refuseSymlinkOnExistingAncestor(rootAbs);
   await mkdir(rootAbs, { recursive: true });
 
   // Pick a template. `templatesDir()` returns the absolute path;

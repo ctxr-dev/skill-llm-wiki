@@ -130,6 +130,29 @@ test("makeWikiFixture honours explicit --template", async () => {
   }
 });
 
+test("makeWikiFixture refuses a symlinked ancestor on the path TO rootAbs", async () => {
+  // Attack: `<tmpRoot>/parent -> elsewhere` exists BEFORE the
+  // fixture root (`<tmpRoot>/parent/wiki`) is ever created. A
+  // naive `mkdir(rootAbs, {recursive:true})` would follow the
+  // symlink and create the fixture under the attacker target.
+  // The new ancestor walker catches this before mkdir runs.
+  const tmpRoot = mktmp("fixture-ancestor");
+  const realTarget = join(tmpRoot, "elsewhere");
+  const hostileParent = join(tmpRoot, "parent");
+  mkdirSync(realTarget, { recursive: true });
+  symlinkSync(realTarget, hostileParent, "dir");
+  try {
+    await assert.rejects(
+      () => makeWikiFixture({ path: join(hostileParent, "wiki"), kind: "dated" }),
+      /symbolic link/,
+    );
+    // Real target remained empty — no fixture was written through the symlink.
+    assert.equal(existsSync(join(realTarget, "wiki")), false);
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
 test("makeWikiFixture refuses symlinks in intermediate path segments", async () => {
   // A lexical `..`-traversal check cannot detect this shape: the
   // attacker plants a symlinked sub-directory INSIDE the fixture

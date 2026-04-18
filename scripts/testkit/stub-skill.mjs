@@ -11,7 +11,7 @@
 // Zero runtime deps; pure Node built-ins.
 
 import { lstat, mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { FORMAT_VERSION } from "../lib/contract.mjs";
 
 // The kit's ARTIFACT_TYPES.skill enumerates these install layouts.
@@ -30,17 +30,24 @@ export const STUB_SKILL_NAME = "ctxr-skill-llm-wiki";
 // we never inspect OS-level directories above the caller-supplied
 // home (macOS's /var → /private/var, for example, would false-
 // positive otherwise).
+//
+// Containment is validated with path.resolve + path.relative
+// rather than a string-prefix check, so `/tmp/home2/x` is NOT
+// misclassified as "under /tmp/home" and path separators /
+// trailing slashes don't matter.
 async function refuseSymlinkChain(base, target) {
-  const segments = [base];
-  if (target !== base) {
-    if (!target.startsWith(base)) {
+  const baseAbs = resolve(base);
+  const targetAbs = resolve(target);
+  const segments = [baseAbs];
+  if (targetAbs !== baseAbs) {
+    const rel = relative(baseAbs, targetAbs);
+    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
       throw new Error(
         `stubSkill: internal error, target ${target} is not under base ${base}`,
       );
     }
-    const tail = target.slice(base.length).replace(/^[\\/]+/, "");
-    const parts = tail.split(/[\\/]/).filter(Boolean);
-    let cursor = base;
+    const parts = rel.split(/[\\/]/).filter(Boolean);
+    let cursor = baseAbs;
     for (const part of parts) {
       cursor = join(cursor, part);
       segments.push(cursor);
