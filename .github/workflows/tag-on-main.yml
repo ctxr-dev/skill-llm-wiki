@@ -1,0 +1,68 @@
+name: Tag release on main
+
+# Fires on every push to main and creates the `v<version>` tag that
+# matches the current package.json version, IF that tag does not
+# already exist on the remote. The tag push is NOT blocked by the
+# branch ruleset (rules target refs/heads/main only; refs/tags/*
+# is a separate namespace), so the default GITHUB_TOKEN is
+# sufficient and no bypass actor is needed.
+#
+# Idempotent by design: if the tag already exists (e.g. a rebuild
+# of the same commit, or a non-release commit landed on main),
+# the workflow is a no-op.
+#
+# The paired `release.yml` workflow opens a bump PR; merging that
+# PR triggers this workflow, which then creates the tag, which
+# then triggers `publish.yml` (push: tags: ["v*"]).
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  maybe-tag:
+    name: Tag current main if package.json version is new
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Read package.json version
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether the tag already exists on the remote
+        id: check
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          # Query the remote directly so we don't rely on the local
+          # checkout's tag namespace.
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} already exists on the remote; nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push the tag
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          TAG="${{ steps.version.outputs.tag }}"
+          git tag -a "${TAG}" -m "release ${TAG}"
+          git push origin "refs/tags/${TAG}"
+          echo "Created and pushed tag ${TAG}"

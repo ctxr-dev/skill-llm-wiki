@@ -1,5 +1,13 @@
 name: Release
 
+# Opens a release PR that bumps package.json (and package-lock.json
+# if present) to the next semver. The PR goes through the standard
+# branch-protection gates (Copilot review, code scanning, CODEOWNERS
+# approval, thread resolution) exactly like any other change — the
+# bot does not push directly to main. Once the PR merges, a separate
+# `tag-on-main.yml` workflow creates the matching `v<version>` tag,
+# which in turn fires `publish.yml`.
+
 on:
   workflow_dispatch:
     inputs:
@@ -14,10 +22,11 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
-  release:
-    name: Bump version & tag
+  open-release-pr:
+    name: Open release PR
     runs-on: ubuntu-latest
 
     steps:
@@ -34,14 +43,57 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Bump version
+      - name: Bump version on a release branch
+        id: bump
         run: |
+          # Read current to detect no-op bumps (shouldn't happen with
+          # npm version <bump>, but bail loudly if it does).
+          BEFORE=$(node -p "require('./package.json').version")
           npm version ${{ inputs.bump }} --no-git-tag-version
-          VERSION=$(node -p "require('./package.json').version")
+          AFTER=$(node -p "require('./package.json').version")
+          if [ "$BEFORE" = "$AFTER" ]; then
+            echo "::error::npm version produced no change ($BEFORE == $AFTER)"
+            exit 1
+          fi
+
+          BRANCH="release/v${AFTER}"
+          echo "version=${AFTER}" >> "$GITHUB_OUTPUT"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+          # Use -B so a stale branch from a prior failed attempt is
+          # reset in place rather than making us error out.
+          git checkout -B "${BRANCH}"
           git add package.json
           if [ -f package-lock.json ]; then
             git add package-lock.json
           fi
-          git commit -m "release: v${VERSION}"
-          git tag "v${VERSION}"
-          git push origin main --tags
+          git commit -m "release: v${AFTER}"
+
+          # --force-with-lease is a no-op on the first push and only
+          # overwrites a pre-existing branch if its remote ref matches
+          # what we fetched — safe replacement of a stale release
+          # branch from a prior failed run.
+          git push --force-with-lease origin "${BRANCH}"
+
+      - name: Open or update the release PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.bump.outputs.version }}"
+          BRANCH="${{ steps.bump.outputs.branch }}"
+          BODY="Automated release PR created by \`release.yml\`. Bumps package.json (and package-lock.json, if present) to \`v${VERSION}\`.
+
+          Once this PR merges to main, \`tag-on-main.yml\` creates the matching \`v${VERSION}\` tag, which triggers \`publish.yml\` to publish the package to npm.
+
+          Review the diff for any surprises (package-lock.json regeneration drift, etc.) before approving."
+
+          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
+            gh pr edit "$BRANCH" --title "release: v${VERSION}" --body "$BODY"
+            echo "Updated existing release PR for $BRANCH"
+          else
+            gh pr create \
+              --base main \
+              --head "$BRANCH" \
+              --title "release: v${VERSION}" \
+              --body "$BODY"
+          fi
