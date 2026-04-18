@@ -1,0 +1,33 @@
+# Layout contract for a subject-categorised runbooks topic.
+#
+# Copy this file to <topic>/.llmwiki.layout.yaml (or let `skill-llm-wiki init`
+# seed it for you) before building in hosted mode:
+#
+#   skill-llm-wiki init <topic> --kind subject --template runbooks
+#
+# Runbooks group by subject, not date. The hierarchy grows as you add
+# subjects; pick a category subfolder on the first leaf, and create a new
+# subfolder whenever two or more leaves share a defensible grouping.
+
+mode: hosted
+
+versioning:
+  style: in-place
+  backup_before_mutate: true
+  backup_dir: .llmwiki.backups
+
+purpose: "Operational runbooks and playbooks, grouped by subject (e.g. deploy/, incident/, database/, onboarding/)."
+
+global_invariants:
+  - "no flat list of runbook leaves at the topic root once more than three exist"
+  - "category subfolders are created on the first write; never 'later when there are enough files'"
+  - "no date prefixes or timestamp suffixes in filenames; history lives in the private git"
+
+layout:
+  - path: .
+    purpose: "runbooks grouped by subject"
+    allow_entry_types: [primary, index]
+    content_rules:
+      - "root-level leaves are reserved for the 3-5 most general runbooks; everything else nests"
+      - "subject subfolders name the domain, not a ticket or date"
+      - "nested subcategories are preferred over long filenames"

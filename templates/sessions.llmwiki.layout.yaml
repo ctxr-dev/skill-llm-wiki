@@ -1,0 +1,34 @@
+# Layout contract for a dated sessions topic.
+#
+# Copy this file to <topic>/.llmwiki.layout.yaml (or let `skill-llm-wiki init`
+# seed it for you) before building in hosted mode:
+#
+#   skill-llm-wiki init <topic> --kind dated --template sessions
+#
+# Sessions are per-day log-style entries (pair-programming sessions, daily
+# working logs, standup notes). The day is the path; the slug is the
+# topic or ticket, never the date.
+
+mode: hosted
+
+versioning:
+  style: in-place
+  backup_before_mutate: true
+  backup_dir: .llmwiki.backups
+
+purpose: "Daily session logs (working sessions, pair-programming notes, standup records), filed by date."
+
+global_invariants:
+  - "no flat date-prefixed leaves at the topic root; sessions live under {yyyy}/{mm}/{dd}/"
+  - "slug encodes the subject or ticket, not the date"
+
+layout:
+  - path: .
+    purpose: "sessions filed by date"
+    dynamic_subdirs:
+      template: "{yyyy}/{mm}/{dd}"
+      purpose: "all sessions started on a given day"
+      allow_entry_types: [primary]
+      content_rules:
+        - "one leaf per discrete session; append to the leaf if the same session resumes same day"
+        - "link to related plans/reports via parents[] rather than inlining them"

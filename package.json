@@ -31,7 +31,8 @@
     "LICENSE",
     "CHANGELOG.md",
     "scripts/",
-    "guide/"
+    "guide/",
+    "templates/"
   ],
   "ctxr": {
     "type": "skill",
