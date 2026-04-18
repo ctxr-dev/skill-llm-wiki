@@ -51,15 +51,22 @@ That is the entire step. Do not invoke `validate`, `fix`, or `rebuild` directly;
     { "code": "IDX-01", "severity": "warning", "path": "...", "message": "..." },
     { "code": "NEXT-01", "severity": "info",    "path": "...", "message": "next: skill-llm-wiki fix ... --json" }
   ],
+  "next": { "command": "skill-llm-wiki", "args": ["fix", "/abs/.../reports", "--json"] },
   "timing_ms": 23
 }
 ```
 
+> The `next` field is the canonical machine-readable form. The `NEXT-01`
+> info diagnostic carries the same hint as a human-readable string for
+> operators tailing stdout; consumers should prefer `env.next` and only
+> fall back to parsing the diagnostic when running against a pre-v1
+> skill that does not emit it.
+
 | Verdict | What the consumer does |
 |---|---|
 | `ok` | Nothing. Move on. |
-| `fixable` | Run the `NEXT-01` command (`skill-llm-wiki fix <wiki> --json`). |
-| `needs-rebuild` | Run the `NEXT-01` command (`skill-llm-wiki rebuild <wiki> --json`). |
+| `fixable` | Invoke `env.next.command` with `env.next.args` (typically `skill-llm-wiki fix <wiki> --json`). |
+| `needs-rebuild` | Invoke `env.next.command` with `env.next.args` (typically `skill-llm-wiki rebuild <wiki> --json`). |
 | `broken` | Surface every `severity: "error"` diagnostic to the user. Do not auto-mutate. |
 | `ambiguous` | `validate` itself failed; inspect `HEAL-00` diagnostic for the error. |
 
@@ -80,11 +87,11 @@ function healAfterWrite(wikiPath) {
       return;
     case "fixable":
     case "needs-rebuild": {
-      const next = env.diagnostics.find((d) => d.code === "NEXT-01");
-      if (!next) throw new Error("heal returned fixable/needs-rebuild without a NEXT-01 hint");
-      // Extract the command from the message and invoke it.
-      const cmd = next.message.replace(/^next:\s*/, "").split(/\s+/);
-      spawnSync(cmd[0], cmd.slice(1), { stdio: "inherit" });
+      if (!env.next) throw new Error("heal returned fixable/needs-rebuild without a `next` field");
+      const result = spawnSync(env.next.command, env.next.args, { stdio: "inherit" });
+      if (result.status !== 0) {
+        throw new Error(`follow-up ${env.next.command} exited ${result.status}`);
+      }
       return;
     }
     case "broken":

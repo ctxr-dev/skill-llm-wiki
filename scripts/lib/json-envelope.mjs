@@ -17,7 +17,7 @@
 //              | "aborted" | "ambiguous",
 //     "exit": <integer>,
 //     "diagnostics": [
-//       { "code": "IDX-01", "severity": "warn", "path": "...", "message": "..." }
+//       { "code": "IDX-01", "severity": "warning", "path": "...", "message": "..." }
 //     ],
 //     "artifacts": { "created": [...], "modified": [...], "deleted": [...] },
 //     "timing_ms": <integer>

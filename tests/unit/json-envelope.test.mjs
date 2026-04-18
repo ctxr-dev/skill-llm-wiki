@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
+import { mktmp } from "../helpers/tmp.mjs";
 import {
   ENVELOPE_SCHEMA,
   VERDICTS,
@@ -193,7 +193,7 @@ tags: []
 }
 
 test("validate --json emits a parseable envelope with correct schema", () => {
-  const wiki = join(tmpdir(), `envelope-validate-${process.pid}-${Date.now()}`);
+  const wiki = join(mktmp("envelope-validate"), "wiki");
   try {
     makeMinimalWiki(wiki);
     const r = spawnSync(process.execPath, [CLI_PATH, "validate", wiki, "--json"], {
@@ -218,10 +218,7 @@ test("validate --json emits a parseable envelope with correct schema", () => {
 });
 
 test("validate --json-errors is treated as an alias for --json", () => {
-  const wiki = join(
-    tmpdir(),
-    `envelope-validate-alias-${process.pid}-${Date.now()}`,
-  );
+  const wiki = join(mktmp("envelope-validate-alias"), "wiki");
   try {
     makeMinimalWiki(wiki);
     const r = spawnSync(

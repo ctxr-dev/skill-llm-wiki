@@ -94,6 +94,7 @@ function initSubject(topicPath, template = "runbooks") {
 
 - `verdict: "ambiguous"` with `INIT-05`: `--kind subject` does not match a dated template (`reports`, `sessions`, `regressions`, `plans`).
 - `verdict: "ambiguous"` with `INIT-07`: contract already exists; use `--force` or `rebuild`.
+- `verdict: "ambiguous"` with `INIT-08`: the topic path (or the contract path inside it) is a symbolic link. `init` refuses to follow symlinks for security. Resolve it explicitly or remove it before retrying.
 
 ## Do not
 

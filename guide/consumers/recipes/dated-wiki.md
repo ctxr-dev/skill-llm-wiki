@@ -108,6 +108,7 @@ function initDated(topicPath, template = "reports") {
 - `verdict: "ambiguous"` with `INIT-02`: you passed neither `--kind` nor `--template`.
 - `verdict: "ambiguous"` with `INIT-05`: `--kind` and `--template` disagree (e.g. `--kind dated --template runbooks`).
 - `verdict: "ambiguous"` with `INIT-07`: a `.llmwiki.layout.yaml` already exists. Pass `--force` only if you are sure the existing contract is wrong; otherwise `skill-llm-wiki rebuild` against the existing contract instead.
+- `verdict: "ambiguous"` with `INIT-08`: the topic path (or the contract path inside it) exists as a symbolic link. `init` refuses to follow symlinks into unknown targets for security. Resolve the symlink explicitly (`realpath <topic>`) and pass the resolved path, or remove the symlink.
 
 ## Do not
 

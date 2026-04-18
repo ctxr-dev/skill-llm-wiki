@@ -477,7 +477,8 @@ async function main() {
   // wiki state.
   if (argv[0] === "contract") {
     const { getContract, renderContractText } = await import("./lib/contract.mjs");
-    const wantJson = argv.slice(1).includes("--json");
+    const { hasJsonFlag } = await import("./lib/json-envelope.mjs");
+    const wantJson = hasJsonFlag(argv.slice(1));
     const contract = getContract();
     if (wantJson) {
       process.stdout.write(JSON.stringify(contract, null, 2) + "\n");
@@ -488,7 +489,8 @@ async function main() {
   }
   if (argv[0] === "where") {
     const { getWhere, renderWhereText } = await import("./lib/where.mjs");
-    const wantJson = argv.slice(1).includes("--json");
+    const { hasJsonFlag } = await import("./lib/json-envelope.mjs");
+    const wantJson = hasJsonFlag(argv.slice(1));
     const info = getWhere();
     if (wantJson) {
       process.stdout.write(JSON.stringify(info, null, 2) + "\n");
@@ -686,8 +688,8 @@ async function main() {
   if (INTENT_SUBCOMMANDS.has(cmd)) {
     const parsed = parseSubArgv(args);
     if (parsed.error) {
-      const jsonMode =
-        args.includes("--json-errors") || args.includes("--json");
+      const { hasJsonFlag } = await import("./lib/json-envelope.mjs");
+      const jsonMode = hasJsonFlag(args);
       emitIntentError(
         {
           code: "INT-11",
@@ -1227,9 +1229,14 @@ async function cmdHeal(args) {
 
 // Map init error codes to the skill's documented exit scheme.
 // INIT-00 / INIT-01 are CLI usage errors (missing flag, unknown
-// flag) → exit 1. INIT-02..07 are validation / ambiguity conditions
-// (bad --kind, template mismatch, contract collision) → exit 2,
-// matching how build/extend etc. surface validation failures.
+// flag) → exit 1. INIT-02..08 are validation / ambiguity conditions
+// (bad --kind, template mismatch, contract collision, topic-as-
+// file, symlink refusal) → exit 2, matching how build/extend etc.
+// surface validation failures. INIT-08 specifically covers the
+// symlink-guard path (scripts/lib/init.mjs): the input path exists
+// but is a symbolic link we refuse to write through; consistent
+// with INIT-06 ("exists but not a directory") in both severity and
+// consumer recovery (fix the path, retry).
 const INIT_USAGE_CODES = new Set(["INIT-00", "INIT-01"]);
 
 function initError(code, message, wantJson, topic, envelopeHelpers) {
