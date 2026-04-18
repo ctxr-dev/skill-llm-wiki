@@ -56,7 +56,12 @@ jobs:
           # Read current to detect no-op bumps (shouldn't happen with
           # npm version <bump>, but bail loudly if it does).
           BEFORE=$(node -p "require('./package.json').version")
-          npm version ${{ inputs.bump }} --no-git-tag-version
+          # --ignore-scripts: npm version runs preversion/version/
+          # postversion lifecycle scripts by default. None are defined
+          # today, but a future addition (or a transitive one via a
+          # config change) would silently run in CI with write access
+          # to the repo. Keep the bump bounded to version files only.
+          npm version ${{ inputs.bump }} --no-git-tag-version --ignore-scripts
           AFTER=$(node -p "require('./package.json').version")
           if [ "$BEFORE" = "$AFTER" ]; then
             echo "::error::npm version produced no change ($BEFORE == $AFTER)"
