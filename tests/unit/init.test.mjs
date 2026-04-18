@@ -7,6 +7,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -147,6 +148,47 @@ test("runInit rejects unknown --kind", () => {
     );
   } finally {
     rmSync(dirname(topic), { recursive: true, force: true });
+  }
+});
+
+test("runInit refuses to write through a symlink at the topic path", () => {
+  const root = mktmp("symlink-topic");
+  const realTarget = join(root, "real-target");
+  const topic = join(root, "symlinked-topic");
+  mkdirSync(realTarget, { recursive: true });
+  try {
+    symlinkSync(realTarget, topic, "dir");
+    assert.throws(
+      () => runInit({ topic, kind: "dated" }),
+      (err) => err instanceof InitError && err.code === "INIT-08",
+    );
+    // Confirm the target dir was NOT touched through the symlink.
+    assert.equal(
+      existsSync(join(realTarget, ".llmwiki.layout.yaml")),
+      false,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runInit refuses to write through a symlink at the contract path", () => {
+  const root = mktmp("symlink-contract");
+  const topic = join(root, "topic");
+  const realTarget = join(root, "real-target.yaml");
+  mkdirSync(topic, { recursive: true });
+  writeFileSync(realTarget, "some content\n");
+  const contractLink = join(topic, ".llmwiki.layout.yaml");
+  try {
+    symlinkSync(realTarget, contractLink, "file");
+    assert.throws(
+      () => runInit({ topic, kind: "dated", force: true }),
+      (err) => err instanceof InitError && err.code === "INIT-08",
+    );
+    // Confirm the real target was NOT overwritten.
+    assert.equal(readFileSync(realTarget, "utf8"), "some content\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

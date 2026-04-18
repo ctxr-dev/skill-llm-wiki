@@ -22,6 +22,7 @@
 
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   statSync,
@@ -90,11 +91,22 @@ export function runInit({
     );
   }
 
-  // Ensure the topic is a directory. `mkdirSync(recursive: true)` is
-  // a no-op if the directory already exists; it throws only if the
-  // path exists as a file.
+  // Ensure the topic is a directory. Use lstat so a pre-existing
+  // symlink at <topic> does not silently let us mkdir/writeFile
+  // through it into an attacker-controlled target. This is the
+  // classic TOCTOU shape: an attacker plants
+  // `<topic> -> /home/user/.ssh/` before `init` runs; without
+  // lstat, writeFileSync would create .ssh/.llmwiki.layout.yaml.
+  // `mkdirSync(recursive: true)` is a no-op if the directory
+  // already exists; it throws only if the path exists as a file.
   if (existsSync(absTopic)) {
-    const st = statSync(absTopic);
+    const st = lstatSync(absTopic);
+    if (st.isSymbolicLink()) {
+      throw new InitError(
+        "INIT-08",
+        `init: ${absTopic} is a symbolic link; refusing to write through it. Remove or resolve the symlink explicitly before initialising.`,
+      );
+    }
     if (!st.isDirectory()) {
       throw new InitError(
         "INIT-06",
@@ -106,6 +118,19 @@ export function runInit({
   }
 
   const contractPath = join(absTopic, CONTRACT_FILENAME);
+  // Same symlink guard for the contract file itself. An attacker
+  // who controls the topic directory could plant a symlink at
+  // <topic>/.llmwiki.layout.yaml pointing anywhere; without lstat
+  // we'd follow it on writeFileSync.
+  if (existsSync(contractPath)) {
+    const cst = lstatSync(contractPath);
+    if (cst.isSymbolicLink()) {
+      throw new InitError(
+        "INIT-08",
+        `init: ${contractPath} is a symbolic link; refusing to overwrite through it.`,
+      );
+    }
+  }
   const alreadyPresent = existsSync(contractPath);
   if (alreadyPresent && !force) {
     throw new InitError(

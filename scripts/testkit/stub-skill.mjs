@@ -10,7 +10,7 @@
 //
 // Zero runtime deps; pure Node built-ins.
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 // The kit's ARTIFACT_TYPES.skill enumerates these install layouts.
@@ -36,8 +36,32 @@ export async function stubSkill({ home, layout = "claude-skills" } = {}) {
     );
   }
   const dir = join(home, ...parts, STUB_SKILL_NAME);
+  // Refuse to follow a pre-existing symlink at the stub directory.
+  // Test harnesses run in shared tmp dirs; a hostile fixture in
+  // CI could plant a symlink here and redirect writeFile elsewhere.
+  try {
+    const st = await lstat(dir);
+    if (st.isSymbolicLink()) {
+      throw new Error(
+        `stubSkill: ${dir} is a symbolic link; refusing to write through it`,
+      );
+    }
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
   await mkdir(dir, { recursive: true });
   const skillMd = join(dir, "SKILL.md");
+  // Same guard on the file itself.
+  try {
+    const st = await lstat(skillMd);
+    if (st.isSymbolicLink()) {
+      throw new Error(
+        `stubSkill: ${skillMd} is a symbolic link; refusing to overwrite through it`,
+      );
+    }
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
   const body = [
     "---",
     "name: skill-llm-wiki",

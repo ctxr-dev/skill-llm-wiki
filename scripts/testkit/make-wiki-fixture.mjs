@@ -14,12 +14,29 @@
 
 import {
   copyFile,
+  lstat,
   mkdir,
   writeFile,
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { templatesDir } from "../lib/templates.mjs";
+
+// Refuse to write through a pre-existing symlink. Fixture builders
+// run in shared tmp dirs; a hostile sibling test could plant a
+// symlink and redirect fixture writes elsewhere.
+async function refuseSymlink(absPath) {
+  try {
+    const st = await lstat(absPath);
+    if (st.isSymbolicLink()) {
+      throw new Error(
+        `makeWikiFixture: ${absPath} is a symbolic link; refusing to write through it`,
+      );
+    }
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+}
 
 export const CONTRACT_FILENAME = ".llmwiki.layout.yaml";
 
@@ -32,6 +49,7 @@ export async function makeWikiFixture({
   if (!path || typeof path !== "string") {
     throw new Error("makeWikiFixture: { path } is required");
   }
+  await refuseSymlink(path);
   await mkdir(path, { recursive: true });
 
   // Pick a template. `templatesDir()` returns the absolute path;
@@ -44,6 +62,7 @@ export async function makeWikiFixture({
     );
   }
   const contractPath = join(path, CONTRACT_FILENAME);
+  await refuseSymlink(contractPath);
   await copyFile(tmplPath, contractPath);
 
   // Seed any requested leaves. Each entry is either:
@@ -56,6 +75,7 @@ export async function makeWikiFixture({
       typeof raw === "string" ? { path: raw, body: null } : raw;
     const abs = join(path, entry.path);
     await mkdir(dirname(abs), { recursive: true });
+    await refuseSymlink(abs);
     const body = entry.body ?? defaultLeafBody(entry.path);
     await writeFile(abs, body, "utf8");
     createdLeaves.push(abs);
