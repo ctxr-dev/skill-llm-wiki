@@ -1,19 +1,27 @@
 name: Tag release on main
 
-# Fires on every push to main and creates the `v<version>` tag that
-# matches the current package.json version, IF that tag does not
-# already exist on the remote. The tag push is NOT blocked by the
-# branch ruleset (rules target refs/heads/main only; refs/tags/*
-# is a separate namespace), so the default GITHUB_TOKEN is
-# sufficient and no bypass actor is needed.
-#
-# Idempotent by design: if the tag already exists (e.g. a rebuild
-# of the same commit, or a non-release commit landed on main),
-# the workflow is a no-op.
+# Fires on every push to main. Decides whether this push IS a
+# release (package.json version changed relative to the previous
+# main SHA) and, if so, creates the matching `v<version>` tag.
+# Non-release commits are a fast no-op.
 #
 # The paired `release.yml` workflow opens a bump PR; merging that
 # PR triggers this workflow, which then creates the tag, which
 # then triggers `publish.yml` (push: tags: ["v*"]).
+#
+# Why the version-change gate: without it, any non-release commit
+# landing on main after a release would see the existing
+# `v<current-version>` tag at a different commit than HEAD and
+# (correctly, in isolation) flag it as the orphan-tag failure
+# mode. But after a normal release, the tag SHOULD keep pointing
+# at the release commit while main moves forward — that's the
+# canonical state, not an error. We only treat "tag exists
+# elsewhere" as an error when THIS push was itself a release
+# (i.e. the version number just changed).
+#
+# Tag push is NOT blocked by the branch ruleset: rules target
+# refs/heads/main only; refs/tags/* is a separate namespace. The
+# default GITHUB_TOKEN is sufficient; no bypass actor needed.
 
 on:
   push:
@@ -44,50 +52,91 @@ jobs:
         with:
           node-version: 20
 
-      - name: Read package.json version
+      - name: Detect whether this push changed the package version
         id: version
+        env:
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          TAG="v${VERSION}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          TAG="v${CURRENT_VERSION}"
+          echo "version=${CURRENT_VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          # `github.event.before` is 40 zeros on the very first push
+          # to a new branch (or for unusual event shapes). In those
+          # cases we can't compute a diff; be conservative and treat
+          # the push as a release attempt so the tag gets created.
+          ZERO_SHA="0000000000000000000000000000000000000000"
+          if [ -z "$GITHUB_EVENT_BEFORE" ] || [ "$GITHUB_EVENT_BEFORE" = "$ZERO_SHA" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "No previous SHA on this push; treating as release by default."
+            exit 0
+          fi
+
+          # Compare the version at this push's starting SHA to HEAD.
+          # If git can't read package.json at the before-SHA (e.g.
+          # the file is new), we also treat it as a change.
+          PREV_VERSION=$(git show "${GITHUB_EVENT_BEFORE}:package.json" 2>/dev/null | node -e "
+            let buf = ''
+            process.stdin.on('data', c => buf += c)
+            process.stdin.on('end', () => {
+              try { process.stdout.write(JSON.parse(buf).version || '') }
+              catch { process.stdout.write('') }
+            })
+          ")
+          if [ -z "$PREV_VERSION" ] || [ "$PREV_VERSION" != "$CURRENT_VERSION" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Version changed: ${PREV_VERSION:-<unknown>} -> ${CURRENT_VERSION}; this is a release commit."
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Version unchanged at ${CURRENT_VERSION}; non-release commit, no-op."
+          fi
 
       - name: Check whether the tag already exists on the remote
         id: check
+        if: steps.version.outputs.changed == 'true'
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           HEAD_SHA=$(git rev-parse HEAD)
-          # Query the remote directly so we don't rely on the local
-          # checkout's tag namespace. `ls-remote --tags` returns the
-          # tag's target SHA when it exists, and exits non-zero when
-          # it doesn't.
+
+          # `git ls-remote --tags` prints two lines for annotated
+          # tags — the tag OBJECT sha (refs/tags/<tag>) and the
+          # dereferenced commit sha (refs/tags/<tag>^{}). For
+          # lightweight tags it prints only the first. Since we
+          # create tags with `git tag -a`, the `^{}` line is the
+          # one that actually identifies the tagged commit. Prefer
+          # it, and fall back to the non-deref line for lightweight
+          # tags created out of band.
           REMOTE_OUT=$(git ls-remote --tags origin "refs/tags/${TAG}" 2>/dev/null || true)
           if [ -z "$REMOTE_OUT" ]; then
             echo "exists=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          REMOTE_SHA=$(echo "$REMOTE_OUT" | awk '{print $1}')
+          # Prefer the dereferenced sha if present.
+          REMOTE_SHA=$(echo "$REMOTE_OUT" | awk '/\^\{\}$/ {print $1}')
+          if [ -z "$REMOTE_SHA" ]; then
+            REMOTE_SHA=$(echo "$REMOTE_OUT" | awk '{print $1; exit}')
+          fi
+
           if [ "$REMOTE_SHA" = "$HEAD_SHA" ]; then
             # Tag already points at the commit we'd tag anyway —
-            # a legitimate rerun of tag-on-main on the same main
-            # commit. No-op.
+            # a legitimate rerun on the same main commit. No-op.
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Tag ${TAG} already points at HEAD ($HEAD_SHA); nothing to do."
           else
-            # Tag exists but points somewhere else. That's exactly
-            # the orphan-tag failure mode this workflow was built
-            # to prevent: publish.yml never fires because no new
-            # tag is pushed, and the current release commit goes
-            # untagged silently. Fail loudly with actionable info.
+            # This push changed the version AND a tag for the new
+            # version already exists at a different commit. Classic
+            # orphan-tag failure mode: publish.yml would not fire
+            # for the current release, and the tag would stay
+            # pointed at a stale commit. Fail loudly.
             echo "::error::Tag ${TAG} exists on the remote but points at ${REMOTE_SHA}, not the current main HEAD ${HEAD_SHA}."
-            echo "::error::This is the orphan-tag failure mode. Delete the stale tag before this release merges:"
+            echo "::error::This is the orphan-tag failure mode. Delete the stale tag and re-run:"
             echo "::error::  git push origin --delete ${TAG}"
-            echo "::error::then re-run this workflow (or re-push to main)."
             exit 1
           fi
 
       - name: Create and push the tag
-        if: steps.check.outputs.exists == 'false'
+        if: steps.version.outputs.changed == 'true' && steps.check.outputs.exists == 'false'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
