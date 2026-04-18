@@ -216,6 +216,37 @@ test("validate --json emits a parseable envelope with correct schema", () => {
   }
 });
 
+test("validate --json emits a JSON envelope on usage errors", () => {
+  // --json must affect both success and error paths. Previously
+  // validate's usageError emitted plain stderr text even when
+  // --json was present, breaking consumer stdout parsers.
+  const r = spawnSync(
+    process.execPath,
+    [CLI_PATH, "validate", "--json", "--not-a-flag"],
+    { encoding: "utf8" },
+  );
+  assert.notEqual(r.status, 0);
+  const env = JSON.parse(r.stdout.trim().split("\n").pop());
+  assert.equal(env.schema, "skill-llm-wiki/v1");
+  assert.equal(env.command, "validate");
+  assert.equal(env.verdict, "ambiguous");
+  assert.equal(env.diagnostics[0].code, "VALIDATE-USAGE");
+});
+
+test("heal --json emits a JSON envelope on missing positional", () => {
+  const r = spawnSync(
+    process.execPath,
+    [CLI_PATH, "heal", "--json"],
+    { encoding: "utf8" },
+  );
+  assert.notEqual(r.status, 0);
+  const env = JSON.parse(r.stdout.trim().split("\n").pop());
+  assert.equal(env.schema, "skill-llm-wiki/v1");
+  assert.equal(env.command, "heal");
+  assert.equal(env.verdict, "ambiguous");
+  assert.equal(env.diagnostics[0].code, "HEAL-USAGE");
+});
+
 test("validate --json-errors is treated as an alias for --json", () => {
   const wiki = join(mktmp("envelope-validate-alias"), "wiki");
   try {

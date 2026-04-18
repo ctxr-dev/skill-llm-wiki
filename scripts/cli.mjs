@@ -335,7 +335,8 @@ UX flags:
   --json                           Emit JSON on stdout. Operational
                                    commands (validate, init, heal, rollback)
                                    use the envelope schema
-                                   skill-llm-wiki/v1. Probe commands
+                                   skill-llm-wiki/v1 for both success and
+                                   usage-error paths. Probe commands
                                    (contract, where) emit their own
                                    command-specific schemas
                                    (skill-llm-wiki/contract/v1 and
@@ -949,24 +950,37 @@ async function main() {
     case "validate": {
       // Parse flags so that `validate --json <wiki>` works as well
       // as `validate <wiki> --json`, and unknown flags are rejected
-      // loudly. Previously args[0] was taken as the wiki path
-      // unconditionally, which accepted the positional-anywhere
-      // pattern only by accident.
+      // loudly. Pre-scan --json first so usage errors emitted below
+      // respect the JSON contract.
+      const { hasJsonFlag } = await import("./lib/json-envelope.mjs");
+      const wantJson = hasJsonFlag(args);
       const positionals = [];
-      let wantJson = false;
       for (const tok of args) {
-        if (tok === "--json" || tok === "--json-errors") {
-          wantJson = true;
-          continue;
-        }
+        if (tok === "--json" || tok === "--json-errors") continue;
         if (typeof tok === "string" && tok.startsWith("--")) {
-          usageError(`validate does not support option ${tok}`);
+          await emitConsumerUsageError(
+            "validate",
+            "VALIDATE-USAGE",
+            `validate does not support option ${tok}`,
+            wantJson,
+          );
         }
         positionals.push(tok);
       }
-      if (positionals.length < 1) usageError("validate requires <wiki>");
+      if (positionals.length < 1)
+        await emitConsumerUsageError(
+          "validate",
+          "VALIDATE-USAGE",
+          "validate requires <wiki>",
+          wantJson,
+        );
       if (positionals.length > 1)
-        usageError("validate accepts exactly one <wiki>");
+        await emitConsumerUsageError(
+          "validate",
+          "VALIDATE-USAGE",
+          "validate accepts exactly one <wiki>",
+          wantJson,
+        );
       const wiki = resolve(positionals[0]);
       const startMs = Date.now();
       const findings = validateWiki(wiki);
@@ -1099,18 +1113,34 @@ async function cmdInit(args) {
     }
     if (tok === "--kind") {
       kind = args[++i];
+      if (kind === undefined || kind === "" || kind.startsWith("--")) {
+        fail("INIT-00", `init: flag "--kind" requires a value`);
+      }
       continue;
     }
     if (tok.startsWith("--kind=")) {
       kind = tok.slice("--kind=".length);
+      if (kind === "") {
+        fail("INIT-00", `init: flag "--kind" requires a value`);
+      }
       continue;
     }
     if (tok === "--template") {
       template = args[++i];
+      if (
+        template === undefined ||
+        template === "" ||
+        template.startsWith("--")
+      ) {
+        fail("INIT-00", `init: flag "--template" requires a value`);
+      }
       continue;
     }
     if (tok.startsWith("--template=")) {
       template = tok.slice("--template=".length);
+      if (template === "") {
+        fail("INIT-00", `init: flag "--template" requires a value`);
+      }
       continue;
     }
     if (tok.startsWith("--")) {
@@ -1179,19 +1209,31 @@ async function cmdHeal(args) {
     if (tok === "--json" || tok === "--json-errors") continue;
     if (tok === "--dry-run") continue;
     if (tok.startsWith("--")) {
-      process.stderr.write(`error: heal: unknown flag "${tok}"\n`);
-      process.exit(1);
+      await emitConsumerUsageError(
+        "heal",
+        "HEAL-USAGE",
+        `heal: unknown flag "${tok}"`,
+        wantJson,
+      );
     }
     if (wikiPath === null) {
       wikiPath = tok;
       continue;
     }
-    process.stderr.write(`error: heal: unexpected positional "${tok}"\n`);
-    process.exit(1);
+    await emitConsumerUsageError(
+      "heal",
+      "HEAL-USAGE",
+      `heal: unexpected positional "${tok}"`,
+      wantJson,
+    );
   }
   if (!wikiPath) {
-    process.stderr.write("error: heal requires <wiki> as its first argument\n");
-    process.exit(1);
+    await emitConsumerUsageError(
+      "heal",
+      "HEAL-USAGE",
+      "heal requires <wiki> as its first argument",
+      wantJson,
+    );
   }
 
   const absWiki = resolve(wikiPath);
@@ -1246,6 +1288,26 @@ async function cmdHeal(args) {
 
   process.stdout.write(renderHealText(result));
   process.exit(exit);
+}
+
+// Shared usage-error emitter for operational subcommands that
+// need to honour --json on the error path as well as success.
+// Emits the envelope (verdict="ambiguous", exit=1 for usage)
+// when wantJson, otherwise a plain-text stderr line + exit.
+// Used by validate, heal, and any future consumer-facing op
+// whose usage errors must stay parseable.
+async function emitConsumerUsageError(command, code, message, wantJson) {
+  if (wantJson) {
+    const { makeErrorEnvelope, writeEnvelope } = await import(
+      "./lib/json-envelope.mjs"
+    );
+    writeEnvelope(
+      makeErrorEnvelope({ command, code, message, exit: 1 }),
+    );
+    process.exit(1);
+  }
+  process.stderr.write(`error: ${message}\n`);
+  process.exit(1);
 }
 
 // Map init error codes to the skill's documented exit scheme.

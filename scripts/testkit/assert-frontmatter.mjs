@@ -86,7 +86,7 @@ export function readLeafFrontmatter(absLeafPath) {
     if (val === "") {
       // Empty RHS: open a pending key; the first continuation
       // picks list vs map. Default to an empty object until
-      // decided — consumers that asserts a key exists without
+      // decided — consumers that assert a key exists without
       // inspecting its type still pass.
       data[key] = {};
       pendingKey = key;

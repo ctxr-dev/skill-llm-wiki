@@ -27,7 +27,7 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve as pathResolve } from "node:path";
+import { dirname, join, resolve as pathResolve } from "node:path";
 import {
   defaultTemplateForKind,
   getTemplate,
@@ -35,6 +35,32 @@ import {
 } from "./templates.mjs";
 
 const CONTRACT_FILENAME = ".llmwiki.layout.yaml";
+
+// Walk UP from `absTopic` to the first existing ancestor and
+// lstat it. Refuse if that ancestor is a symbolic link. This
+// catches the attack where a pre-existing symlink on the path to
+// absTopic would let `mkdirSync(recursive: true)` follow it and
+// create directories outside the user's intended tree.
+//
+// Non-existent segments need no check — mkdir creates them fresh.
+// Segments ABOVE the first existing ancestor are user-environment
+// territory (including OS symlinks like macOS's /var), not our
+// concern, and walking into them would produce false positives.
+function refuseSymlinkOnExistingAncestor(absTopic) {
+  let cursor = absTopic;
+  while (!existsSync(cursor)) {
+    const parent = dirname(cursor);
+    if (parent === cursor) return; // reached filesystem root, no anchor
+    cursor = parent;
+  }
+  const st = lstatSync(cursor);
+  if (st.isSymbolicLink()) {
+    throw new InitError(
+      "INIT-08",
+      `init: ${cursor} is a symbolic link on the path to ${absTopic}; refusing to write through it. Remove or resolve the symlink explicitly before initialising.`,
+    );
+  }
+}
 
 export class InitError extends Error {
   constructor(code, message) {
@@ -90,22 +116,26 @@ export function runInit({
     );
   }
 
-  // Ensure the topic is a directory. Use lstat so a pre-existing
-  // symlink at <topic> does not silently let us mkdir/writeFile
-  // through it into an attacker-controlled target. This is the
-  // classic TOCTOU shape: an attacker plants
-  // `<topic> -> /home/user/.ssh/` before `init` runs; without
-  // lstat, writeFileSync would create .ssh/.llmwiki.layout.yaml.
-  // `mkdirSync(recursive: true)` is a no-op if the directory
-  // already exists; it throws only if the path exists as a file.
+  // Refuse to write through a pre-existing symlink in the topic
+  // path. Two shapes to catch:
+  //   (a) absTopic itself is a symbolic link — covered by the
+  //       existing-path branch below.
+  //   (b) an intermediate segment on the way to absTopic is a
+  //       symlink (e.g. `<parent>/sub -> /etc/` before init runs).
+  //       `mkdirSync(recursive: true)` would follow it and create
+  //       directories outside the user's intended topic tree.
+  //
+  // Algorithm: walk UP from absTopic until we find the first
+  // existing ancestor (the "anchor"), then lstat it. If the
+  // anchor is a symlink, refuse. Segments that do NOT yet exist
+  // are safe — mkdir creates them fresh. We deliberately do NOT
+  // walk past the anchor upward: OS-level symlinks above the
+  // user-chosen path (macOS's /var → /private/var on tmpdirs)
+  // would false-positive and block every test.
+  refuseSymlinkOnExistingAncestor(absTopic);
+
   if (existsSync(absTopic)) {
     const st = lstatSync(absTopic);
-    if (st.isSymbolicLink()) {
-      throw new InitError(
-        "INIT-08",
-        `init: ${absTopic} is a symbolic link; refusing to write through it. Remove or resolve the symlink explicitly before initialising.`,
-      );
-    }
     if (!st.isDirectory()) {
       throw new InitError(
         "INIT-06",

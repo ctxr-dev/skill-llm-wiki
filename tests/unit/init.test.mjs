@@ -160,6 +160,33 @@ test("runInit rejects unknown --kind", () => {
   }
 });
 
+test("runInit refuses when an intermediate path segment is a symlink", () => {
+  // Attack: `<root>/parent` is a symlink to elsewhere; user runs
+  // `init <root>/parent/topic`. mkdirSync(recursive:true) would
+  // follow the symlink and create the topic under the attacker-
+  // controlled target. The ancestor walker must catch this BEFORE
+  // mkdir runs.
+  const root = mktmp("init-intermediate");
+  const realTarget = join(root, "elsewhere");
+  mkdirSync(realTarget, { recursive: true });
+  const hostileParent = join(root, "parent");
+  symlinkSync(realTarget, hostileParent, "dir");
+  const topic = join(hostileParent, "reports");
+  try {
+    assert.throws(
+      () => runInit({ topic, kind: "dated" }),
+      (err) => err instanceof InitError && err.code === "INIT-08",
+    );
+    // Confirm the real target was not populated through the symlink.
+    assert.equal(
+      existsSync(join(realTarget, "reports", ".llmwiki.layout.yaml")),
+      false,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runInit refuses to write through a symlink at the topic path", () => {
   const root = mktmp("symlink-topic");
   const realTarget = join(root, "real-target");
@@ -256,6 +283,43 @@ test("`init` without --kind or --template fails with INIT-02 (exit 2)", () => {
     assert.equal(env.verdict, "ambiguous");
     assert.equal(env.exit, 2);
     assert.equal(env.diagnostics[0].code, "INIT-02");
+  } finally {
+    rmSync(dirname(topic), { recursive: true, force: true });
+  }
+});
+
+test("`init --kind` without a value fails fast with INIT-00", () => {
+  const topic = join(mktmp("empty-kind"), "x");
+  try {
+    const r = spawnSync(
+      process.execPath,
+      [CLI_PATH, "init", topic, "--kind", "--json"],
+      { encoding: "utf8" },
+    );
+    // INIT-00 is a CLI usage error → exit 1. Previously this fell
+    // through to INIT-03 (unknown --kind "--json") which is
+    // misleading: the real problem is the missing value.
+    assert.equal(r.status, 1);
+    const env = JSON.parse(r.stdout);
+    assert.equal(env.diagnostics[0].code, "INIT-00");
+    assert.match(env.diagnostics[0].message, /"--kind" requires a value/);
+  } finally {
+    rmSync(dirname(topic), { recursive: true, force: true });
+  }
+});
+
+test("`init --template=` (empty) fails fast with INIT-00", () => {
+  const topic = join(mktmp("empty-template"), "x");
+  try {
+    const r = spawnSync(
+      process.execPath,
+      [CLI_PATH, "init", topic, "--kind", "dated", "--template=", "--json"],
+      { encoding: "utf8" },
+    );
+    assert.equal(r.status, 1);
+    const env = JSON.parse(r.stdout);
+    assert.equal(env.diagnostics[0].code, "INIT-00");
+    assert.match(env.diagnostics[0].message, /"--template" requires a value/);
   } finally {
     rmSync(dirname(topic), { recursive: true, force: true });
   }
