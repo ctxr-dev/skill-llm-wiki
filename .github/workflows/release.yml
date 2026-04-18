@@ -35,18 +35,26 @@ jobs:
   open-release-pr:
     name: Open release PR
     runs-on: ubuntu-latest
-    # `workflow_dispatch` can be fired from the UI against any ref.
-    # Releases always cut from main; refuse to run if dispatched
-    # from a feature branch so an operator can't accidentally
-    # produce a release PR rooted at a work-in-progress commit.
-    if: github.ref == 'refs/heads/main'
 
     steps:
+      - name: Refuse dispatch from non-main refs
+        # `workflow_dispatch` can be fired from the UI against any
+        # ref. We want the run to show as FAILED with a clear
+        # error when an operator accidentally picks a feature
+        # branch, not skipped/green the way a job-level `if` would
+        # render. Releases always cut from main.
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Release workflow must be dispatched from main; got ${{ github.ref }}."
+          echo "::error::Switch the branch selector in the Actions UI to \`main\` and retry."
+          exit 1
+
       - uses: actions/checkout@v4
         with:
-          # Defensive double-belt: even if the `if` above somehow
-          # lets a non-main dispatch through, explicitly check out
-          # main so the bump commit is always parented to it.
+          # Defensive double-belt: even if the dispatch came from
+          # a non-main ref and the early step above is somehow
+          # bypassed, explicitly check out main so the bump commit
+          # is always parented to it.
           ref: main
           fetch-depth: 0
 

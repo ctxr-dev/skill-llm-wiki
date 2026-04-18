@@ -113,20 +113,28 @@ jobs:
           TAG="${{ steps.version.outputs.tag }}"
           HEAD_SHA=$(git rev-parse HEAD)
 
-          # `git ls-remote --tags` prints two lines for annotated
-          # tags — the tag OBJECT sha (refs/tags/<tag>) and the
-          # dereferenced commit sha (refs/tags/<tag>^{}). For
-          # lightweight tags it prints only the first. Since we
-          # create tags with `git tag -a`, the `^{}` line is the
-          # one that actually identifies the tagged commit. Prefer
-          # it, and fall back to the non-deref line for lightweight
-          # tags created out of band.
-          REMOTE_OUT=$(git ls-remote --tags origin "refs/tags/${TAG}" 2>/dev/null || true)
+          # `git ls-remote --tags` distinguishes tag shapes:
+          #   - annotated tag: two lines — tag OBJECT sha
+          #     (refs/tags/<tag>) and dereferenced commit sha
+          #     (refs/tags/<tag>^{})
+          #   - lightweight tag: one line — commit sha under
+          #     refs/tags/<tag>
+          # Filtering on the exact refname (refs/tags/<tag>)
+          # suppresses the ^{} line, so we MUST ask for both
+          # refspecs explicitly. Otherwise the comparison below
+          # would pick the tag-object sha on annotated tags and
+          # always fail the legitimate-rerun equality check.
+          REMOTE_OUT=$(git ls-remote --tags origin \
+            "refs/tags/${TAG}" \
+            "refs/tags/${TAG}^{}" \
+            2>/dev/null || true)
           if [ -z "$REMOTE_OUT" ]; then
             echo "exists=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Prefer the dereferenced sha if present.
+          # Prefer the dereferenced sha (commit) when the remote
+          # returns both. Fall back to the single-line form for
+          # lightweight tags.
           REMOTE_SHA=$(echo "$REMOTE_OUT" | awk '/\^\{\}$/ {print $1}')
           if [ -z "$REMOTE_SHA" ]; then
             REMOTE_SHA=$(echo "$REMOTE_OUT" | awk '{print $1; exit}')
