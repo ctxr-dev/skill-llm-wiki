@@ -295,6 +295,13 @@ Remote mirroring (explicit user-invoked only, never auto-pushes):
   remote <wiki> list               List configured remotes
   sync <wiki> [--remote <name>]    Fetch + push tag refs explicitly
 
+Consumer-facing scaffolding:
+  init <topic> --kind dated|subject [--template <name>] [--force] [--json]
+                                   Seed a topic directory with a shipped
+                                   layout contract. Prints the exact build
+                                   command to run next. Replaces the
+                                   cp + edit + build-flag dance.
+
 Low-level script helpers (deterministic, called by Claude):
   ingest <source>                  Walk source, emit candidate JSON
   draft-leaf <candidate-file>       Script-first frontmatter draft for one candidate
@@ -946,10 +953,144 @@ async function main() {
       process.stdout.write(`current → ${args[1]}\n`);
       break;
     }
+    case "init": {
+      // `init` seeds a topic directory with a shipped layout contract
+      // so consumers can start building hosted wikis without the
+      // cp-then-build dance. No orchestrator invocation here — that
+      // remains the consumer's explicit `build` call so error paths
+      // stay where they already are.
+      await cmdInit(args);
+      break;
+    }
     default:
       printUsage();
       process.exit(1);
   }
+}
+
+async function cmdInit(args) {
+  const { runInit, InitError } = await import("./lib/init.mjs");
+  const { hasJsonFlag, makeEnvelope, writeEnvelope } = await import(
+    "./lib/json-envelope.mjs"
+  );
+  const wantJson = hasJsonFlag(args);
+
+  // Minimal flag parse for init. Positional is <topic>; flags are
+  // --kind <dated|subject>, --template <name>, --force, --json.
+  let topic = null;
+  let kind = null;
+  let template = null;
+  let force = false;
+  for (let i = 0; i < args.length; i++) {
+    const tok = args[i];
+    if (tok === "--force") {
+      force = true;
+      continue;
+    }
+    if (tok === "--json" || tok === "--json-errors") {
+      continue;
+    }
+    if (tok === "--kind") {
+      kind = args[++i];
+      continue;
+    }
+    if (tok.startsWith("--kind=")) {
+      kind = tok.slice("--kind=".length);
+      continue;
+    }
+    if (tok === "--template") {
+      template = args[++i];
+      continue;
+    }
+    if (tok.startsWith("--template=")) {
+      template = tok.slice("--template=".length);
+      continue;
+    }
+    if (tok.startsWith("--")) {
+      initError(
+        "INIT-00",
+        `init: unknown flag "${tok}"`,
+        wantJson,
+        null,
+      );
+    }
+    if (topic === null) {
+      topic = tok;
+      continue;
+    }
+    initError(
+      "INIT-00",
+      `init: unexpected positional "${tok}"`,
+      wantJson,
+      null,
+    );
+  }
+  if (!topic) {
+    initError("INIT-01", "init requires a <topic> path", wantJson, null);
+  }
+
+  const startMs = Date.now();
+  let result;
+  try {
+    result = runInit({ topic, kind, template, force, cwd: process.cwd() });
+  } catch (err) {
+    if (err instanceof InitError) {
+      initError(err.code, err.message, wantJson, null);
+    }
+    throw err;
+  }
+
+  if (wantJson) {
+    writeEnvelope(
+      makeEnvelope({
+        command: "init",
+        target: result.topic,
+        verdict: "initialised",
+        exit: 0,
+        diagnostics: [
+          {
+            code: "NEXT-01",
+            severity: "info",
+            path: result.topic,
+            message:
+              `contract seeded; next step: ` +
+              result.build_command.join(" "),
+          },
+        ],
+        artifacts: { created: [result.contract_path] },
+        timing_ms: Date.now() - startMs,
+      }),
+    );
+    return;
+  }
+  process.stdout.write(
+    `init: seeded ${result.contract_path}\n` +
+      `  template: ${result.template} (kind=${result.kind})\n` +
+      (result.overwrote ? `  overwrote existing contract\n` : "") +
+      `  next: ${result.build_command.join(" ")}\n`,
+  );
+}
+
+function initError(code, message, wantJson, topic) {
+  if (wantJson) {
+    process.stdout.write(
+      JSON.stringify({
+        schema: "skill-llm-wiki/v1",
+        command: "init",
+        target: topic,
+        verdict: "ambiguous",
+        exit: 1,
+        diagnostics: [
+          { code, severity: "error", path: topic, message },
+        ],
+        artifacts: { created: [], modified: [], deleted: [] },
+        timing_ms: 0,
+      }) + "\n",
+    );
+    process.exit(1);
+  }
+  process.stderr.write(`error: ${code} ${message}\n`);
+  process.exit(1);
 }
 
 function usageError(msg) {
