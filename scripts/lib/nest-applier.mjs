@@ -308,14 +308,23 @@ function walkWikiIds(wikiRoot, parentDir, memberPaths, forbidden) {
       //
       // EXCEPTION: parent's own index.md. The parent-dir walk
       // explicitly skips index.md because in the nested case its id
-      // equals the parent-directory basename (a separate collision
-      // class that applyNest's existsSync check catches). But when
-      // parentDir === wikiRoot, the root index.md id is NOT the
-      // root directory name — it is whatever the wiki author wrote,
-      // often the wiki's public name — and a slug equal to that id
-      // would slip past both walks and surface only at post-apply
-      // DUP-ID validation. Parse index.md here to close that gap.
-      // Cheap: one extra frontmatter-stream read per walk.
+      // equals the parent-directory basename (`validate.mjs` enforces
+      // `type: index` id === `basename(dirname(index.md))` for every
+      // index depth), and a slug-vs-parent-name collision is caught
+      // by applyNest's existsSync(targetDir) check — different class.
+      //
+      // But when parentDir === wikiRoot, the parent-dir walk is the
+      // ONLY walk pass that would surface the root index.md (this
+      // tree walk starts at wikiRoot and only visits its CHILDREN as
+      // directory entries, never wikiRoot itself; so the wiki-root
+      // basename is never added via the `entry.isDirectory()` branch
+      // either). Without parsing root/index.md, a slug equal to
+      // `basename(wikiRoot)` — the mandatory root id — would slip
+      // past both walks and surface only at post-apply DUP-ID
+      // validation.
+      //
+      // Parse index.md specifically to close that gap. One extra
+      // frontmatter-stream read per walk on a small, bounded file.
       if (dir === parentDir && entry.name !== "index.md") continue;
       if (memberPaths.has(entryPath)) continue;
       try {

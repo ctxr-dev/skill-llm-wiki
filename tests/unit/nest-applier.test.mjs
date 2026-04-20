@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseFrontmatter, renderFrontmatter } from "../../scripts/lib/frontmatter.mjs";
 import {
@@ -832,26 +832,36 @@ test("resolveNestSlug: caller-driven wikiIndex mutation reflects applied NESTs",
 });
 
 test("resolveNestSlug: collides with wiki-root index.md id even without wikiIndex", () => {
-  // Copilot PR #5 review (line 278): walkWikiIds' `dir === parentDir`
-  // skip previously dropped every file at wikiRoot, including
-  // wikiRoot/index.md. A slug equal to the root id would slip past the
-  // resolver entirely and surface only at post-apply DUP-ID. Fixed by
-  // parsing parent's index.md as an exception while continuing to skip
-  // other parent-dir leaves for the hot-path optimization. This test
-  // drives the legacy (no opts.wikiIndex) path directly; the
-  // buildWikiForbiddenIndex route already covered this case because it
-  // walks every non-dot file unconditionally.
-  const wiki = tmpWiki("resolve-root-index");
+  // walkWikiIds' `dir === parentDir` skip used to drop every file at
+  // wikiRoot, including wikiRoot/index.md. Under the validator contract
+  // (validate.mjs enforces `type: index` id === `basename(dirname(
+  // index.md))`), the root index id is mandatorily equal to
+  // basename(wikiRoot). walkWikiIds starts iteration AT wikiRoot, so
+  // wikiRoot is never encountered as a subdirectory entry and
+  // basename(wikiRoot) is never added to forbidden via the
+  // `entry.isDirectory()` branch. The old skip therefore left
+  // basename(wikiRoot) unrepresented in the forbidden set, and a slug
+  // equal to that name would slip past the resolver and surface only
+  // at post-apply DUP-ID. Fixed by parsing parent's index.md as an
+  // exception.
+  //
+  // Use a custom short-basename wiki path so (a) basename(wikiRoot)
+  // passes `validateSlug` (kebab-case, ≤ 64 chars) and (b) the test
+  // asserts the invariant-compliant root-id shape instead of a
+  // hypothetical "public name" shape the validator would reject.
+  const parent = tmpWiki("resolve-root-index");
+  const wiki = join(parent, "short-wiki");
+  mkdirSync(wiki, { recursive: true });
   try {
-    // Plant a root-level index.md with a distinctive id the naïve
-    // walker would have missed.
-    writeLeaf(wiki, "index.md", "wiki-public-name");
+    const rootId = basename(wiki); // "short-wiki"
+    writeLeaf(wiki, "index.md", rootId);
     const l1 = writeLeaf(wiki, "alpha.md", "alpha");
     const l2 = writeLeaf(wiki, "beta.md", "beta");
-    // Slug equals the root index id → collision, must auto-suffix.
+    // Slug equals the root index id (== basename(wikiRoot)) → collision,
+    // must auto-suffix.
     assert.equal(
-      resolveNestSlug("wiki-public-name", { leaves: [l1, l2] }, wiki),
-      "wiki-public-name-group",
+      resolveNestSlug(rootId, { leaves: [l1, l2] }, wiki),
+      `${rootId}-group`,
       "wiki-root index.md id must enter the forbidden set",
     );
     // Control: a slug that matches no live id returns unchanged.
@@ -860,7 +870,7 @@ test("resolveNestSlug: collides with wiki-root index.md id even without wikiInde
       "fresh-slug",
     );
   } finally {
-    rmSync(wiki, { recursive: true, force: true });
+    rmSync(parent, { recursive: true, force: true });
   }
 });
 
