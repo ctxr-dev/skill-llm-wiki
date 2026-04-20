@@ -727,19 +727,25 @@ test("buildWikiForbiddenIndex: captures every leaf id + dir basename", () => {
   // and every leaf frontmatter id under wikiRoot. Consumers use this as
   // a reusable snapshot in multi-NEST iterations to avoid paying for a
   // full-tree walk on every resolveNestSlug call.
-  const wiki = tmpWiki("forbidden-index");
+  //
+  // Use a custom short-basename wikiRoot (like the `short-wiki` test
+  // further down) so the root `index.md` id can legitimately equal
+  // `basename(wikiRoot)` — which is what the validator enforces for
+  // every index entry (`type: index` id === basename(dirname(index.md))).
+  // A made-up id like "wiki-root" would violate that invariant and
+  // diverge from production shape.
+  const parent = tmpWiki("forbidden-index-parent");
+  const wiki = join(parent, "root-wiki");
+  mkdirSync(wiki, { recursive: true });
   try {
+    const rootId = basename(wiki); // "root-wiki"
     writeLeaf(wiki, "alpha.md", "alpha");
     writeLeaf(wiki, "beta.md", "beta");
     writeLeaf(wiki, "sub/gamma.md", "gamma");
     writeLeaf(wiki, "sub/delta.md", "delta");
     writeLeaf(wiki, "other/epsilon.md", "epsilon");
-    // index.md at root — must be included (this is the case the v1.0.0
-    // walkWikiIds path missed for parent=wikiRoot NESTs). Writing it
-    // with index-shaped frontmatter so the fixture matches what the
-    // validator enforces in a real wiki (type: "index",
-    // depth_role: "category").
-    writeIndex(wiki, "index.md", "wiki-root");
+    // Root index.md — id must match basename(wikiRoot) per validator.
+    writeIndex(wiki, "index.md", rootId);
     // Dot-directory — must be skipped.
     writeLeaf(wiki, ".cache/ignored.md", "ignored");
 
@@ -750,7 +756,7 @@ test("buildWikiForbiddenIndex: captures every leaf id + dir basename", () => {
       "gamma",
       "delta",
       "epsilon",
-      "wiki-root",
+      rootId,
       "sub",
       "other",
     ]) {
@@ -767,7 +773,7 @@ test("buildWikiForbiddenIndex: captures every leaf id + dir basename", () => {
       "dot-directory basenames must be skipped",
     );
   } finally {
-    rmSync(wiki, { recursive: true, force: true });
+    rmSync(parent, { recursive: true, force: true });
   }
 });
 
@@ -846,6 +852,58 @@ test("resolveNestSlug: caller-driven wikiIndex mutation reflects applied NESTs",
     );
   } finally {
     rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: slug matching a parent-index alias auto-suffixes", () => {
+  // The parent-dir walk explicitly skips `index.md` (its id is covered
+  // by the `basename(parentDir)` add). But the parent's own
+  // `aliases[]` aren't reconstructible from the directory name, so
+  // they get harvested via a targeted streaming read separate from
+  // the loop. Without that read, a slug equal to a parent-index alias
+  // would slip past every other guard and trip ALIAS-COLLIDES-ID at
+  // validate time.
+  //
+  // This test uses the legacy (no-wikiRoot) path to exercise the
+  // parent-index-alias branch directly. The full-tree walkers
+  // (walkWikiIds / buildWikiForbiddenIndex) already harvest every
+  // entry's aliases including indices, so they're covered by the
+  // preceding test.
+  const parent = tmpWiki("parent-index-alias");
+  const wiki = join(parent, "root-wiki");
+  mkdirSync(wiki, { recursive: true });
+  try {
+    // Cluster parent carries an alias `canonical-patterns` on its
+    // own index.md. A cluster proposal with slug "canonical-patterns"
+    // would otherwise pass every other guard.
+    const clusterParent = join(wiki, "mod");
+    mkdirSync(clusterParent, { recursive: true });
+    writeFileSync(
+      join(clusterParent, "index.md"),
+      renderFrontmatter(
+        {
+          id: "mod",
+          type: "index",
+          depth_role: "subcategory",
+          focus: "mod category",
+          parents: ["../index.md"],
+          aliases: ["canonical-patterns"],
+          tags: ["default"],
+        },
+        "\n# mod\n",
+      ),
+      "utf8",
+    );
+    const l1 = writeLeaf(clusterParent, "alpha.md", "alpha");
+    const l2 = writeLeaf(clusterParent, "beta.md", "beta");
+
+    assert.equal(
+      resolveNestSlug("canonical-patterns", { leaves: [l1, l2] }),
+      "canonical-patterns-group",
+      "parent-index alias must enter the forbidden set via its targeted streaming read",
+    );
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
   }
 });
 

@@ -197,11 +197,15 @@ function collectForbiddenIdsPredicate(
     // frontmatter could spuriously poison the forbidden set and force
     // a valid slug to auto-suffix for no legitimate reason.
     if (entry.name.startsWith(".")) continue;
-    // Skip the parent's own index.md: its id is always
-    // `basename(parentDir)` (per the validator invariant), and that
-    // value was explicitly added to `local` above so parent-name
-    // collisions route through the normal `-group` suffix branch in
-    // resolveNestSlug. Nothing extra to collect from index.md here.
+    // Skip the parent's own index.md inside this loop: its id is
+    // always `basename(parentDir)` (per the validator invariant) and
+    // that value was explicitly added to `local` above. The parent's
+    // `aliases[]` ARE harvested — separately, after this loop — so a
+    // slug matching a parent-index alias doesn't slip past the
+    // resolver and trip ALIAS-COLLIDES-ID at validate time. That has
+    // to be a one-shot streaming read rather than inline here because
+    // we deliberately skip the rest of index.md's record on this
+    // hot-path loop (no point re-parsing its id).
     if (entry.name === "index.md") continue;
     const entryPath = join(parentDir, entry.name);
     if (memberPaths.has(entryPath)) continue;
@@ -234,6 +238,28 @@ function collectForbiddenIdsPredicate(
     } catch {
       /* skip unreadable / malformed frontmatter */
     }
+  }
+
+  // Harvest the parent's own index.md aliases. The inline loop above
+  // skips `index.md` wholesale because its id is already covered by
+  // the explicit `basename(parentDir)` add, but the aliases it carries
+  // aren't reconstructible from the directory name. A slug matching a
+  // parent-index alias would slip past every other collision check
+  // here and surface only as ALIAS-COLLIDES-ID at validate time. One
+  // targeted streaming read closes that gap.
+  const parentIndexPath = join(parentDir, "index.md");
+  try {
+    const captured = readFrontmatterStreaming(parentIndexPath);
+    if (captured !== null) {
+      const { data } = parseFrontmatter(captured.frontmatterText, parentIndexPath);
+      if (Array.isArray(data?.aliases)) {
+        for (const alias of data.aliases) {
+          if (typeof alias === "string" && alias) local.add(alias);
+        }
+      }
+    }
+  } catch {
+    /* skip unreadable parent index (or no index.md at the root) */
   }
 
   // Wiki-wide path. Precomputed index short-circuits the walk AND we
