@@ -211,8 +211,15 @@ function collectForbiddenIdsPredicate(
     }
     if (!entry.name.endsWith(".md")) continue;
     try {
-      const raw = readFileSync(entryPath, "utf8");
-      const { data } = parseFrontmatter(raw, entryPath);
+      // Use the streaming frontmatter reader (bounded to
+      // MAX_FRONTMATTER_BYTES) instead of slurping the whole file
+      // via readFileSync. Keeps sibling-id collection scale-safe
+      // when a parent directory contains large leaves, and stays
+      // consistent with walkWikiIds + buildWikiForbiddenIndex
+      // which both read the same way.
+      const captured = readFrontmatterStreaming(entryPath);
+      if (captured === null) continue;
+      const { data } = parseFrontmatter(captured.frontmatterText, entryPath);
       if (data?.id) local.add(data.id);
       // Also reserve any declared aliases. A new NEST stub carrying
       // id === slug would trip ALIAS-COLLIDES-ID at validate time if
@@ -225,7 +232,7 @@ function collectForbiddenIdsPredicate(
         }
       }
     } catch {
-      /* skip unreadable siblings */
+      /* skip unreadable / malformed frontmatter */
     }
   }
 
@@ -259,10 +266,18 @@ function collectForbiddenIdsPredicate(
 }
 
 // Build a wiki-wide forbidden-id index: the set of every leaf
-// frontmatter id and every non-hidden directory basename under
-// `wikiRoot`. Exposed as a reusable snapshot the caller can build
-// once and pass to `resolveNestSlug` via `opts.wikiIndex` instead of
-// paying for a full-tree walk on every invocation.
+// frontmatter id, every leaf frontmatter alias (from `aliases[]`),
+// and every non-hidden directory basename under `wikiRoot`. Exposed
+// as a reusable snapshot the caller can build once and pass to
+// `resolveNestSlug` via `opts.wikiIndex` instead of paying for a
+// full-tree walk on every invocation.
+//
+// Aliases are included so the resolver pre-empts both DUP-ID (slug
+// === some leaf's `id`) AND ALIAS-COLLIDES-ID (slug === some leaf's
+// alias) validation failures in one pass. Directory basenames cover
+// the sibling-subdirectory class — a NEST creating `<parent>/<slug>/`
+// where `<slug>` matches an existing directory anywhere in the tree
+// would collide on `type: index` id at validate time.
 //
 // Mutation contract: after a successful NEST apply, the caller must
 // call `wikiIndex.add(resolvedSlug)` so subsequent `resolveNestSlug`

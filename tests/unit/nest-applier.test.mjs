@@ -542,16 +542,12 @@ test("resolveNestSlug: cross-depth leaf-id collision in another branch → suffi
   // wikiRoot, the walk catches it and auto-suffixes.
   const wiki = tmpWiki("resolve-cross-depth-leaf");
   try {
-    // Seed the `arch/event-patterns/` branch
-    mkdirSync(join(wiki, "arch", "event-patterns"), { recursive: true });
-    writeFileSync(
-      join(wiki, "arch", "event-patterns", "index.md"),
-      renderFrontmatter(
-        { id: "event-patterns", type: "index", depth_role: "subcategory" },
-        "\n",
-      ),
-      "utf8",
-    );
+    // Seed the `arch/event-patterns/` branch. writeIndex writes
+    // validator-shaped index frontmatter (`type: "index"`,
+    // `depth_role: "subcategory"`) and auto-mkdirs the parent.
+    writeIndex(wiki, "arch/event-patterns/index.md", "event-patterns", {
+      depth_role: "subcategory",
+    });
     writeLeaf(wiki, "arch/event-patterns/cqrs.md", "cqrs");
     // Seed the cluster parent
     mkdirSync(join(wiki, "design-patterns"), { recursive: true });
@@ -586,16 +582,13 @@ test("resolveNestSlug: cross-depth subdir-basename collision → suffixed", () =
   // directories with the same basename id in the corpus — prevent it.
   const wiki = tmpWiki("resolve-cross-depth-subdir");
   try {
-    // Unrelated branch with a subdirectory named "patterns"
-    mkdirSync(join(wiki, "other-branch", "patterns"), { recursive: true });
-    writeFileSync(
-      join(wiki, "other-branch", "patterns", "index.md"),
-      renderFrontmatter(
-        { id: "patterns", type: "index", depth_role: "subcategory" },
-        "\n",
-      ),
-      "utf8",
-    );
+    // Unrelated branch with a subdirectory named "patterns".
+    // writeIndex writes validator-shaped frontmatter and auto-mkdirs
+    // the parent, reusing the same helper every other index fixture
+    // in this suite goes through.
+    writeIndex(wiki, "other-branch/patterns/index.md", "patterns", {
+      depth_role: "subcategory",
+    });
     // Cluster parent
     mkdirSync(join(wiki, "cluster-parent"), { recursive: true });
     const l1 = writeLeaf(wiki, "cluster-parent/alpha.md", "alpha");
