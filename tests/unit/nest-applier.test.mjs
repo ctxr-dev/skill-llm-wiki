@@ -831,6 +831,39 @@ test("resolveNestSlug: caller-driven wikiIndex mutation reflects applied NESTs",
   }
 });
 
+test("resolveNestSlug: collides with wiki-root index.md id even without wikiIndex", () => {
+  // Copilot PR #5 review (line 278): walkWikiIds' `dir === parentDir`
+  // skip previously dropped every file at wikiRoot, including
+  // wikiRoot/index.md. A slug equal to the root id would slip past the
+  // resolver entirely and surface only at post-apply DUP-ID. Fixed by
+  // parsing parent's index.md as an exception while continuing to skip
+  // other parent-dir leaves for the hot-path optimization. This test
+  // drives the legacy (no opts.wikiIndex) path directly; the
+  // buildWikiForbiddenIndex route already covered this case because it
+  // walks every non-dot file unconditionally.
+  const wiki = tmpWiki("resolve-root-index");
+  try {
+    // Plant a root-level index.md with a distinctive id the naïve
+    // walker would have missed.
+    writeLeaf(wiki, "index.md", "wiki-public-name");
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "beta.md", "beta");
+    // Slug equals the root index id → collision, must auto-suffix.
+    assert.equal(
+      resolveNestSlug("wiki-public-name", { leaves: [l1, l2] }, wiki),
+      "wiki-public-name-group",
+      "wiki-root index.md id must enter the forbidden set",
+    );
+    // Control: a slug that matches no live id returns unchanged.
+    assert.equal(
+      resolveNestSlug("fresh-slug", { leaves: [l1, l2] }, wiki),
+      "fresh-slug",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("resolveNestSlug: same-depth behaviour preserved when wikiRoot is provided", () => {
   // Regression: the v1.0.0 same-depth collision logic must still fire
   // with wikiRoot present. Tests the classical observed case — slug

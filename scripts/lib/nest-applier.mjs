@@ -271,11 +271,22 @@ function walkWikiIds(wikiRoot, parentDir, memberPaths, forbidden) {
         continue;
       }
       if (!entry.name.endsWith(".md")) continue;
-      // Skip leaves that are in the cluster's own parent dir — the
-      // parent-dir walk above has already handled them (including the
-      // member-exclusion logic). Skipping here avoids double-reading
-      // frontmatter on the hot path.
-      if (dir === parentDir) continue;
+      // Skip ordinary leaves that are in the cluster's own parent
+      // dir — the parent-dir walk above has already handled them
+      // (including the member-exclusion logic). Skipping avoids
+      // double-reading frontmatter on the hot path.
+      //
+      // EXCEPTION: parent's own index.md. The parent-dir walk
+      // explicitly skips index.md because in the nested case its id
+      // equals the parent-directory basename (a separate collision
+      // class that applyNest's existsSync check catches). But when
+      // parentDir === wikiRoot, the root index.md id is NOT the
+      // root directory name — it is whatever the wiki author wrote,
+      // often the wiki's public name — and a slug equal to that id
+      // would slip past both walks and surface only at post-apply
+      // DUP-ID validation. Parse index.md here to close that gap.
+      // Cheap: one extra frontmatter-stream read per walk.
+      if (dir === parentDir && entry.name !== "index.md") continue;
       if (memberPaths.has(entryPath)) continue;
       try {
         const captured = readFrontmatterStreaming(entryPath);
