@@ -139,8 +139,25 @@ function collectForbiddenIdsPredicate(
   const parentDir = dirname(proposal.leaves[0].path);
   const memberPaths = new Set(proposal.leaves.map((l) => l.path));
 
-  // Parent-dir walk (preserved for backward compatibility when wikiRoot
-  // is not supplied, and as the fast path when it is).
+  // Parent-dir walk. When wikiRoot is not supplied this walk is the
+  // ONLY source of "live ids at this depth" — the legacy slot used by
+  // unit tests that predate cross-depth awareness. When wikiRoot IS
+  // supplied, the parent-dir walk runs first as a cheap O(siblings)
+  // seed before the wiki-wide walk / precomputed-index path below.
+  //
+  // Note: this loop now skips dot-prefixed entries (`.DS_Store`,
+  // `.foo.md`, `.git/`, etc) to match the skill's repo-wide dot-skip
+  // convention (walkWikiIds, buildWikiForbiddenIndex, indices::
+  // listChildren all do the same). That IS a behavioural change vs.
+  // the v1.0.0 parent-dir-only path, which iterated every entry
+  // regardless of name prefix. The change is intentional: v1.0.0's
+  // non-skip was a latent bug — a stray dotfile carrying frontmatter
+  // with a conflicting id would have spuriously forced a valid slug
+  // to auto-suffix, a false positive the validator would never have
+  // caught. No production consumer has reported hitting that path,
+  // so aligning with the repo convention is strictly an improvement.
+  // Legacy callers that DO pass dotfiles into the cluster's parent
+  // directory see different (but correct) resolver output.
   let entries;
   try {
     entries = readdirSync(parentDir, { withFileTypes: true });
