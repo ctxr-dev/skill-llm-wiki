@@ -4,6 +4,16 @@ All notable changes to `skill-llm-wiki` are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Cross-depth slug collision guard in `resolveNestSlug`.** The v1.0.0 collision resolver checked only the cluster's immediate parent directory, missing collisions with leaf ids or subdirectory basenames elsewhere in the tree. On real-world multi-branch wikis (first observed during a 596-leaf novel-corpus build in the consumer skill `skill-code-review`), Tier 2's `propose_structure` picked slug `event-patterns` for a cluster under `design-patterns-group/` — colliding with an existing leaf at `arch/event-patterns/index.md` (id: `event-patterns`) in a completely different branch. The parent-dir-only walk missed it; validation caught `DUP-ID` post-apply and forced a rollback. `collectForbiddenIds` now accepts an optional `wikiRoot` argument and, when provided, walks the entire tree (skipping `.llmwiki/` and `.work/` internals) to collect every live leaf id and directory basename into the forbidden set. `resolveNestSlug` accepts `wikiRoot` as an optional third argument and passes it through; `operators.mjs::tryClusterNestIteration` now provides it. Legacy callers that don't pass `wikiRoot` continue to get the parent-dir-only behaviour, so the change is backward-compatible. See `tests/unit/nest-applier.test.mjs` for 6 new scenarios (cross-depth leaf id, cross-depth subdir basename, chain fallback, `.llmwiki/`+`.work/` skip, clean-tree no-op, same-depth regression). Fixes issue [#4](https://github.com/ctxr-dev/skill-llm-wiki/issues/4) bug 2.
+
+### Tests
+
+- 6 new scenarios in `tests/unit/nest-applier.test.mjs` for cross-depth collision, subdir-basename collision, `-group-N` chain fallback, `.llmwiki/` and `.work/` skip, clean-tree no-op, and same-depth regression guard. All pre-existing tests pass unchanged.
+
 ## [1.0.0] — 2026-04-16
 
 First stable release. The semantic-routing substrate landed in v0.4.0, multi-NEST convergence landed in v0.4.1, and 1.0.0 closes the remaining sharp edge — a DUP-ID collision path discovered during the v0.4.1 deferred novel-corpus validation — plus the Windows CI parity gap. The v0.4.1 "Known remaining gaps" novel-corpus validation item is **resolved**: the combined `skill-code-review/reviewers/` + `overlays/` corpus (45 leaves) now builds end-to-end on the first try, `validate` returns 0 errors / 0 warnings, and multi-NEST applies atomically in a single convergence iteration. Semver commitments are now in effect: the six public operations (Build, Extend, Validate, Rebuild, Fix, Join), the CLI exit-code surface, the layout-mode contract, and the private-git history shape are stable and will not break in 1.x.

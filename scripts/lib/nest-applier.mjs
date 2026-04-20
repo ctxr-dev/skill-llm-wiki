@@ -42,19 +42,29 @@ export function validateSlug(slug) {
   return SLUG_RE.test(slug);
 }
 
-// Resolve a slug that won't collide with a member leaf's id or with a
-// non-member sibling in the same parent directory. The observed
-// collision case (v0.4.1 novel-corpus run): Tier 2's propose_structure
-// response picked slug="security" for a cluster whose members included
-// a leaf with id="security", so after apply both the new subcategory's
-// stub index.md AND the moved leaf carried id="security" — DUP-ID at
-// validate time, forcing a full pipeline rollback. Pre-resolving here
-// auto-suffixes the slug (deterministically: `-group`, then `-group-N`)
-// until it's non-colliding, letting the NEST land on the first try.
+// Resolve a slug that won't collide with any live id in the wiki. The
+// original observed collision case (v0.4.1 novel-corpus run): Tier 2's
+// propose_structure response picked slug="security" for a cluster whose
+// members included a leaf with id="security", so after apply both the
+// new subcategory's stub index.md AND the moved leaf carried
+// id="security" — DUP-ID at validate time, forcing a full pipeline
+// rollback. A later scenario added cross-depth collisions: a leaf at
+// arch/event-patterns/index.md in one branch made the slug
+// "event-patterns" unsafe for a cluster under design-patterns-group/
+// in a different branch — even though the two are at different depths
+// and not siblings.
+//
+// Pre-resolving here auto-suffixes the slug (deterministically:
+// `-group`, then `-group-N`) until it's non-colliding, letting the
+// NEST land on the first try. When wikiRoot is provided, the resolver
+// checks the full-tree id namespace; when omitted (e.g. legacy unit
+// tests that predate cross-depth awareness), it falls back to the
+// parent-dir-only check for backward compatibility.
+//
 // Non-collision slugs are returned unchanged; invalid slugs are left
 // alone so applyNest's own validation can reject them with its usual
 // error message.
-export function resolveNestSlug(slug, proposal) {
+export function resolveNestSlug(slug, proposal, wikiRoot) {
   if (!validateSlug(slug)) return slug;
   if (
     !proposal ||
@@ -63,7 +73,7 @@ export function resolveNestSlug(slug, proposal) {
   ) {
     return slug;
   }
-  const forbidden = collectForbiddenIds(proposal);
+  const forbidden = collectForbiddenIds(proposal, wikiRoot);
   if (!forbidden.has(slug)) return slug;
   // Try "-group" first (the natural human reading: "the group of X
   // leaves"); fall back to numeric suffixes starting at -group-2
@@ -85,18 +95,21 @@ export function resolveNestSlug(slug, proposal) {
   return slug;
 }
 
-function collectForbiddenIds(proposal) {
+function collectForbiddenIds(proposal, wikiRoot) {
   const forbidden = new Set();
   for (const leaf of proposal.leaves) {
     if (leaf?.data?.id) forbidden.add(leaf.data.id);
   }
   const parentDir = dirname(proposal.leaves[0].path);
   const memberPaths = new Set(proposal.leaves.map((l) => l.path));
+
+  // Parent-dir walk (preserved for backward compatibility when wikiRoot
+  // is not supplied, and as the fast path when it is).
   let entries;
   try {
     entries = readdirSync(parentDir, { withFileTypes: true });
   } catch {
-    return forbidden;
+    entries = [];
   }
   for (const entry of entries) {
     // Skip the parent's own index.md: its id is the parent's basename
@@ -120,7 +133,72 @@ function collectForbiddenIds(proposal) {
       /* skip unreadable siblings */
     }
   }
+
+  // Full-tree walk: catch cross-depth collisions that the parent-dir
+  // walk alone misses. Observed case: a leaf at
+  // `arch/event-patterns/index.md` (id "event-patterns") makes the
+  // slug "event-patterns" unsafe for a cluster proposed under
+  // `design-patterns-group/` in a different branch — even though the
+  // two are at different depths and not siblings. Validation catches
+  // this post-apply as DUP-ID, forcing rollback; the pre-apply walk
+  // here prevents the wasted round-trip.
+  //
+  // wikiRoot is optional: when absent (legacy callers / unit tests
+  // that predate cross-depth awareness), the parent-dir-only walk
+  // above is the effective behaviour, preserving prior semantics.
+  if (wikiRoot) {
+    walkWikiIds(wikiRoot, parentDir, memberPaths, forbidden);
+  }
+
   return forbidden;
+}
+
+// Walk the entire wiki under wikiRoot, adding every leaf frontmatter
+// id and every directory basename (except `.llmwiki` internals) to the
+// `forbidden` set. `parentDir` and `memberPaths` are the cluster's
+// own context — leaves already inside the cluster are excluded because
+// they'll be moved into the new subdirectory and their id will live
+// there, not collide. The parent-dir walk above has already collected
+// direct siblings; this pass covers every OTHER directory in the tree.
+function walkWikiIds(wikiRoot, parentDir, memberPaths, forbidden) {
+  const stack = [wikiRoot];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      // Skip skill-llm-wiki internals so we never traverse the private
+      // git under `.llmwiki/git/` or scratch space under `.work/`.
+      if (entry.name === ".llmwiki" || entry.name === ".work") continue;
+      const entryPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        // Directory basename is a potential slug collision (a NEST
+        // elsewhere in the tree carrying the same slug would produce
+        // two directories with the same id).
+        forbidden.add(entry.name);
+        stack.push(entryPath);
+        continue;
+      }
+      if (!entry.name.endsWith(".md")) continue;
+      // Skip leaves that are in the cluster's own parent dir — the
+      // parent-dir walk above has already handled them (including the
+      // member-exclusion logic). Skipping here avoids double-reading
+      // frontmatter on the hot path.
+      if (dir === parentDir) continue;
+      if (memberPaths.has(entryPath)) continue;
+      try {
+        const raw = readFileSync(entryPath, "utf8");
+        const { data } = parseFrontmatter(raw, entryPath);
+        if (data?.id) forbidden.add(data.id);
+      } catch {
+        /* skip unreadable siblings */
+      }
+    }
+  }
 }
 
 export function applyNest(wikiRoot, proposal, slug, opts = {}) {

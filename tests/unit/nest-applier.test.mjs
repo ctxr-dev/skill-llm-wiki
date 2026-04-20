@@ -486,3 +486,223 @@ test("applyNest: slug pre-resolved against member collision lands cleanly", () =
     rmSync(wiki, { recursive: true, force: true });
   }
 });
+
+// ─── resolveNestSlug: full-tree cross-depth collision (Bug 2 fix) ──
+//
+// The v1.0.0 resolver checked only the cluster's immediate parent
+// directory for collisions. On real-world multi-branch wikis (first
+// observed during the skill-code-review 596-leaf build), a slug like
+// "event-patterns" proposed for a cluster in one branch could collide
+// with a leaf id or subdirectory at a completely different depth in
+// another branch — and the resolver would miss it, causing a
+// DUP-ID rollback downstream at validation.
+//
+// The fix: when wikiRoot is provided, walk the full tree and collect
+// every live id + directory basename into the forbidden set. These
+// tests exercise the new paths and confirm the parent-dir-only
+// behaviour is preserved when wikiRoot is absent (backward-compat).
+
+test("resolveNestSlug: cross-depth leaf-id collision in another branch → suffixed", () => {
+  // Structure:
+  //   <wiki>/
+  //     arch/
+  //       event-patterns/
+  //         index.md            (id: event-patterns)
+  //         cqrs.md             (id: cqrs)
+  //     design-patterns/        (cluster parent)
+  //       observer.md           (member)
+  //       publish-subscribe.md  (member)
+  //
+  // Proposal: NEST the two design-patterns/*.md leaves under a new
+  // subcategory with slug "event-patterns". Without full-tree walk,
+  // the resolver misses the arch/event-patterns/ collision; with
+  // wikiRoot, the walk catches it and auto-suffixes.
+  const wiki = tmpWiki("resolve-cross-depth-leaf");
+  try {
+    // Seed the `arch/event-patterns/` branch
+    mkdirSync(join(wiki, "arch", "event-patterns"), { recursive: true });
+    writeFileSync(
+      join(wiki, "arch", "event-patterns", "index.md"),
+      renderFrontmatter(
+        { id: "event-patterns", type: "index", depth_role: "subcategory" },
+        "\n",
+      ),
+      "utf8",
+    );
+    writeLeaf(wiki, "arch/event-patterns/cqrs.md", "cqrs");
+    // Seed the cluster parent
+    mkdirSync(join(wiki, "design-patterns"), { recursive: true });
+    const l1 = writeLeaf(wiki, "design-patterns/observer.md", "observer");
+    const l2 = writeLeaf(
+      wiki,
+      "design-patterns/publish-subscribe.md",
+      "publish-subscribe",
+    );
+
+    // Without wikiRoot — cross-depth collision missed (legacy behaviour)
+    assert.equal(
+      resolveNestSlug("event-patterns", { leaves: [l1, l2] }),
+      "event-patterns",
+      "parent-dir-only walk should NOT see the cross-depth collision",
+    );
+
+    // With wikiRoot — collision caught, suffixed
+    assert.equal(
+      resolveNestSlug("event-patterns", { leaves: [l1, l2] }, wiki),
+      "event-patterns-group",
+      "full-tree walk should catch the cross-depth collision",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: cross-depth subdir-basename collision → suffixed", () => {
+  // A subdirectory elsewhere in the tree carries a name that matches
+  // the proposed slug. Applying NEST with that slug would create two
+  // directories with the same basename id in the corpus — prevent it.
+  const wiki = tmpWiki("resolve-cross-depth-subdir");
+  try {
+    // Unrelated branch with a subdirectory named "patterns"
+    mkdirSync(join(wiki, "other-branch", "patterns"), { recursive: true });
+    writeFileSync(
+      join(wiki, "other-branch", "patterns", "index.md"),
+      renderFrontmatter(
+        { id: "patterns", type: "index", depth_role: "subcategory" },
+        "\n",
+      ),
+      "utf8",
+    );
+    // Cluster parent
+    mkdirSync(join(wiki, "cluster-parent"), { recursive: true });
+    const l1 = writeLeaf(wiki, "cluster-parent/alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "cluster-parent/beta.md", "beta");
+
+    assert.equal(
+      resolveNestSlug("patterns", { leaves: [l1, l2] }, wiki),
+      "patterns-group",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: full-tree walk still returns unchanged when no collision anywhere", () => {
+  // Regression guard: don't over-suffix on wikis with no real
+  // collision just because wikiRoot is provided.
+  const wiki = tmpWiki("resolve-cross-depth-clean");
+  try {
+    // Unrelated branch
+    mkdirSync(join(wiki, "other"), { recursive: true });
+    writeLeaf(wiki, "other/gamma.md", "gamma");
+    // Cluster parent
+    mkdirSync(join(wiki, "parent"), { recursive: true });
+    const l1 = writeLeaf(wiki, "parent/alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "parent/beta.md", "beta");
+
+    assert.equal(
+      resolveNestSlug("greek-letters", { leaves: [l1, l2] }, wiki),
+      "greek-letters",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: full-tree walk skips .llmwiki internals", () => {
+  // The private git lives under .llmwiki/git/ and scratch under
+  // .work/. The walk must never descend into those — otherwise
+  // arbitrary git-object filenames could poison the forbidden set.
+  const wiki = tmpWiki("resolve-cross-depth-internals");
+  try {
+    // Seed fake internals with deliberately colliding names
+    mkdirSync(join(wiki, ".llmwiki", "git", "refs"), { recursive: true });
+    writeFileSync(
+      join(wiki, ".llmwiki", "git", "refs", "greek"),
+      "ref data\n",
+      "utf8",
+    );
+    mkdirSync(join(wiki, ".work", "tier2"), { recursive: true });
+    writeFileSync(
+      join(wiki, ".work", "tier2", "greek.json"),
+      "{}\n",
+      "utf8",
+    );
+    // A real sibling leaf NOT named greek — confirms the walk still
+    // finds actual content.
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "beta.md", "beta");
+
+    // "greek" should pass through unchanged — .llmwiki and .work
+    // contents must not poison the forbidden set.
+    assert.equal(
+      resolveNestSlug("greek", { leaves: [l1, l2] }, wiki),
+      "greek",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: cross-depth collision chains to -group-N numeric fallback", () => {
+  // Both "event-patterns" and "event-patterns-group" exist at
+  // different depths in the tree. The resolver should fall through
+  // "-group" (collides) and land on "-group-2".
+  const wiki = tmpWiki("resolve-cross-depth-chain");
+  try {
+    // Branch 1: id "event-patterns"
+    mkdirSync(join(wiki, "branch-a", "event-patterns"), { recursive: true });
+    writeFileSync(
+      join(wiki, "branch-a", "event-patterns", "index.md"),
+      renderFrontmatter(
+        { id: "event-patterns", type: "index", depth_role: "subcategory" },
+        "\n",
+      ),
+      "utf8",
+    );
+    // Branch 2: id "event-patterns-group"
+    mkdirSync(join(wiki, "branch-b", "event-patterns-group"), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(wiki, "branch-b", "event-patterns-group", "index.md"),
+      renderFrontmatter(
+        { id: "event-patterns-group", type: "index", depth_role: "subcategory" },
+        "\n",
+      ),
+      "utf8",
+    );
+    // Cluster parent
+    mkdirSync(join(wiki, "cluster-parent"), { recursive: true });
+    const l1 = writeLeaf(wiki, "cluster-parent/alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "cluster-parent/beta.md", "beta");
+
+    assert.equal(
+      resolveNestSlug("event-patterns", { leaves: [l1, l2] }, wiki),
+      "event-patterns-group-2",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: same-depth behaviour preserved when wikiRoot is provided", () => {
+  // Regression: the v1.0.0 same-depth collision logic must still fire
+  // with wikiRoot present. Tests the classical observed case — slug
+  // matches a member leaf's id — but with the new full-tree path
+  // exercised.
+  const wiki = tmpWiki("resolve-cross-depth-regression");
+  try {
+    const l1 = writeLeaf(wiki, "security.md", "security");
+    const l2 = writeLeaf(wiki, "audit.md", "audit");
+    const l3 = writeLeaf(wiki, "hardening.md", "hardening");
+
+    assert.equal(
+      resolveNestSlug("security", { leaves: [l1, l2, l3] }, wiki),
+      "security-group",
+      "member-id collision detection still works with full-tree walk",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});

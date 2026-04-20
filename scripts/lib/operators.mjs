@@ -957,7 +957,7 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
     // is written AFTER applyNest succeeds so decisions.yaml never
     // records a rename for an op that ultimately failed.
     const originalSlug = proposal.slug;
-    const resolvedSlug = resolveNestSlug(originalSlug, proposal);
+    const resolvedSlug = resolveNestSlug(originalSlug, proposal, wikiRoot);
     let result;
     try {
       result = applyNest(wikiRoot, proposal, resolvedSlug);
