@@ -609,10 +609,14 @@ test("resolveNestSlug: full-tree walk still returns unchanged when no collision 
   }
 });
 
-test("resolveNestSlug: full-tree walk skips .llmwiki internals", () => {
-  // The private git lives under .llmwiki/git/ and scratch under
-  // .work/. The walk must never descend into those — otherwise
-  // arbitrary git-object filenames could poison the forbidden set.
+test("resolveNestSlug: full-tree walk skips every dot-directory (blanket rule)", () => {
+  // Per Copilot review on PR #5: the walk uses a blanket
+  // `entry.name.startsWith(".")` rule consistent with
+  // `scripts/lib/chunk.mjs::collectEntryPaths`. This covers not only
+  // `.llmwiki/` and `.work/` (skill-owned) but any user dotfile the
+  // corpus might carry: `.git/`, `.github/`, `.shape/`, etc.
+  // Arbitrary files under these locations must never poison the
+  // forbidden set.
   const wiki = tmpWiki("resolve-cross-depth-internals");
   try {
     // Seed fake internals with deliberately colliding names
@@ -620,6 +624,22 @@ test("resolveNestSlug: full-tree walk skips .llmwiki internals", () => {
     writeFileSync(
       join(wiki, ".llmwiki", "git", "refs", "greek"),
       "ref data\n",
+      "utf8",
+    );
+    // User `.git/` dir — common in corpora hosted inside a real repo.
+    // A markdown file under `.git/` with a colliding frontmatter id
+    // must NOT leak into the forbidden set.
+    mkdirSync(join(wiki, ".git", "logs"), { recursive: true });
+    writeFileSync(
+      join(wiki, ".git", "greek.md"),
+      renderFrontmatter({ id: "greek", type: "primary" }, "\n"),
+      "utf8",
+    );
+    // User `.github/` workflows dir — similar reasoning.
+    mkdirSync(join(wiki, ".github"), { recursive: true });
+    writeFileSync(
+      join(wiki, ".github", "greek.md"),
+      renderFrontmatter({ id: "greek", type: "primary" }, "\n"),
       "utf8",
     );
     mkdirSync(join(wiki, ".work", "tier2"), { recursive: true });

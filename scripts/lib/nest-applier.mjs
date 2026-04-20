@@ -33,6 +33,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { readFrontmatterStreaming } from "./chunk.mjs";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
 
 const SLUG_RE = /^[a-z][a-z0-9-]{0,63}$/;
@@ -154,12 +155,26 @@ function collectForbiddenIds(proposal, wikiRoot) {
 }
 
 // Walk the entire wiki under wikiRoot, adding every leaf frontmatter
-// id and every directory basename (except `.llmwiki` internals) to the
-// `forbidden` set. `parentDir` and `memberPaths` are the cluster's
-// own context — leaves already inside the cluster are excluded because
-// they'll be moved into the new subdirectory and their id will live
-// there, not collide. The parent-dir walk above has already collected
-// direct siblings; this pass covers every OTHER directory in the tree.
+// id and every non-hidden directory basename to the `forbidden` set.
+// `parentDir` and `memberPaths` are the cluster's own context — leaves
+// already inside the cluster are excluded because they'll be moved
+// into the new subdirectory and their id will live there, not collide.
+// The parent-dir walk above has already collected direct siblings;
+// this pass covers every OTHER directory in the tree.
+//
+// Dot-directories are skipped as a blanket rule — this matches the
+// discipline in `scripts/lib/chunk.mjs::collectEntryPaths` and covers
+// every metadata surface the skill owns (`.llmwiki/`, `.work/`,
+// `.shape/`) plus any user dotfile directory the corpus might carry
+// (`.git/`, `.github/`, etc). There is no allow-list: if a dotfile
+// is worth considering as a routable entry, rename it.
+//
+// Per-file frontmatter is extracted via the streaming reader so this
+// collision pass reads bounded (≤ `MAX_FRONTMATTER_BYTES`) from each
+// file rather than the full body — a real concern on large corpora
+// (the frontmatter-bearing leaves at the consumer 596-leaf scale
+// already parse through `readFrontmatterStreaming` elsewhere in the
+// pipeline for the same reason).
 function walkWikiIds(wikiRoot, parentDir, memberPaths, forbidden) {
   const stack = [wikiRoot];
   while (stack.length > 0) {
@@ -171,9 +186,10 @@ function walkWikiIds(wikiRoot, parentDir, memberPaths, forbidden) {
       continue;
     }
     for (const entry of entries) {
-      // Skip skill-llm-wiki internals so we never traverse the private
-      // git under `.llmwiki/git/` or scratch space under `.work/`.
-      if (entry.name === ".llmwiki" || entry.name === ".work") continue;
+      // Skip hidden directories (including skill-llm-wiki internals
+      // like `.llmwiki/` and scratch `.work/`) so we do not treat
+      // metadata as wiki content.
+      if (entry.name.startsWith(".")) continue;
       const entryPath = join(dir, entry.name);
       if (entry.isDirectory()) {
         // Directory basename is a potential slug collision (a NEST
@@ -191,11 +207,12 @@ function walkWikiIds(wikiRoot, parentDir, memberPaths, forbidden) {
       if (dir === parentDir) continue;
       if (memberPaths.has(entryPath)) continue;
       try {
-        const raw = readFileSync(entryPath, "utf8");
-        const { data } = parseFrontmatter(raw, entryPath);
+        const captured = readFrontmatterStreaming(entryPath);
+        if (captured === null) continue;
+        const { data } = parseFrontmatter(captured.frontmatterText, entryPath);
         if (data?.id) forbidden.add(data.id);
       } catch {
-        /* skip unreadable siblings */
+        /* skip unreadable / malformed frontmatter */
       }
     }
   }
