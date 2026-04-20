@@ -83,8 +83,12 @@ export function resolveNestSlug(slug, proposal, wikiRoot, opts = {}) {
   ) {
     return slug;
   }
-  const forbidden = collectForbiddenIds(proposal, wikiRoot, opts.wikiIndex);
-  if (!forbidden.has(slug)) return slug;
+  const isForbidden = collectForbiddenIdsPredicate(
+    proposal,
+    wikiRoot,
+    opts.wikiIndex,
+  );
+  if (!isForbidden(slug)) return slug;
   // Try "-group" first (the natural human reading: "the group of X
   // leaves"); fall back to numeric suffixes starting at -group-2
   // because "-group" itself already occupies the slot that would
@@ -97,18 +101,40 @@ export function resolveNestSlug(slug, proposal, wikiRoot, opts = {}) {
   // exists" error — strictly better than a silent spin.
   const primary = `${slug}-group`;
   if (!validateSlug(primary)) return slug;
-  if (!forbidden.has(primary)) return primary;
+  if (!isForbidden(primary)) return primary;
   for (let i = 2; i < 100; i++) {
     const candidate = `${slug}-group-${i}`;
-    if (!forbidden.has(candidate)) return candidate;
+    if (!isForbidden(candidate)) return candidate;
   }
   return slug;
 }
 
-function collectForbiddenIds(proposal, wikiRoot, precomputedWikiIndex = null) {
-  const forbidden = new Set();
+// Build a predicate `(id) => boolean` that returns `true` when `id`
+// collides with any already-claimed id in the wiki — member ids,
+// parent-dir sibling ids, parent-dir subdir basenames, and either the
+// caller's precomputed wiki-wide index (preferred) or a fresh
+// walkWikiIds fallback (legacy path).
+//
+// Why a predicate instead of a materialized Set: when the caller
+// passes a precomputed `wikiIndex`, that index can easily be 10⁴+
+// entries on a large corpus. Copying the whole index into a new
+// per-call Set costs O(|wikiIndex|) memory + time on every
+// resolveNestSlug invocation, which defeats the entire point of the
+// iteration-level precompute. A predicate keeps the wiki-wide index
+// by reference and queries it directly, making each `isForbidden(x)`
+// check O(1) and each resolveNestSlug call O(|members| + |parent-
+// siblings|) regardless of wiki size.
+function collectForbiddenIdsPredicate(
+  proposal,
+  wikiRoot,
+  precomputedWikiIndex = null,
+) {
+  // Local set: member ids + parent-dir sibling ids/subdirs. Always
+  // small (bounded by one directory's children), so materializing it
+  // is fine.
+  const local = new Set();
   for (const leaf of proposal.leaves) {
-    if (leaf?.data?.id) forbidden.add(leaf.data.id);
+    if (leaf?.data?.id) local.add(leaf.data.id);
   }
   const parentDir = dirname(proposal.leaves[0].path);
   const memberPaths = new Set(proposal.leaves.map((l) => l.path));
@@ -131,20 +157,27 @@ function collectForbiddenIds(proposal, wikiRoot, precomputedWikiIndex = null) {
     const entryPath = join(parentDir, entry.name);
     if (memberPaths.has(entryPath)) continue;
     if (entry.isDirectory()) {
-      forbidden.add(entry.name);
+      local.add(entry.name);
       continue;
     }
     if (!entry.name.endsWith(".md")) continue;
     try {
       const raw = readFileSync(entryPath, "utf8");
       const { data } = parseFrontmatter(raw, entryPath);
-      if (data?.id) forbidden.add(data.id);
+      if (data?.id) local.add(data.id);
     } catch {
       /* skip unreadable siblings */
     }
   }
 
-  // Full-tree walk: catch cross-depth collisions that the parent-dir
+  // Wiki-wide path. Precomputed index short-circuits the walk AND we
+  // keep it by reference inside the predicate instead of copying it
+  // into `local`. Legacy callers without precomputedWikiIndex fall
+  // back to the one-shot walkWikiIds, which materializes into `local`
+  // (the walk's output is bounded to "this call only" so no memory
+  // concern there).
+  //
+  // Full-tree walk catches cross-depth collisions that the parent-dir
   // walk alone misses. Observed case: a leaf at
   // `arch/event-patterns/index.md` (id "event-patterns") makes the
   // slug "event-patterns" unsafe for a cluster proposed under
@@ -156,23 +189,14 @@ function collectForbiddenIds(proposal, wikiRoot, precomputedWikiIndex = null) {
   // wikiRoot is optional: when absent (legacy callers / unit tests
   // that predate cross-depth awareness), the parent-dir-only walk
   // above is the effective behaviour, preserving prior semantics.
-  //
-  // When `precomputedWikiIndex` is supplied, the caller has already
-  // walked the tree once (via `buildWikiForbiddenIndex`) and we merge
-  // its contents into the forbidden set instead of re-walking. The
-  // precomputed set is a superset of what walkWikiIds would add — it
-  // includes every leaf id and directory basename in the wiki, so
-  // parent-dir entries (skipped by walkWikiIds via `dir === parentDir`)
-  // are redundantly covered but harmless: the parent-dir walk above
-  // already captured them and the entries already in `forbidden` are
-  // idempotent under Set.add.
-  if (precomputedWikiIndex) {
-    for (const id of precomputedWikiIndex) forbidden.add(id);
-  } else if (wikiRoot) {
-    walkWikiIds(wikiRoot, parentDir, memberPaths, forbidden);
+  if (!precomputedWikiIndex && wikiRoot) {
+    walkWikiIds(wikiRoot, parentDir, memberPaths, local);
   }
 
-  return forbidden;
+  if (precomputedWikiIndex) {
+    return (id) => local.has(id) || precomputedWikiIndex.has(id);
+  }
+  return (id) => local.has(id);
 }
 
 // Build a wiki-wide forbidden-id index: the set of every leaf
@@ -187,10 +211,14 @@ function collectForbiddenIds(proposal, wikiRoot, precomputedWikiIndex = null) {
 // No other mutations are needed — leaf ids don't change when leaves
 // move into the new subdir, and nothing is deleted by a NEST apply.
 //
-// Dot-directories are skipped under the same blanket rule as
-// `walkWikiIds` / `collectEntryPaths` (covers `.llmwiki/`, `.work/`,
-// `.git/`, `.github/`, etc). Per-file frontmatter is extracted via
-// `readFrontmatterStreaming` for bounded reads on large corpora.
+// Dot-prefixed entries (directories AND files — anything whose name
+// starts with `.`) are skipped under the same blanket rule as
+// `walkWikiIds` / `collectEntryPaths`. Covers skill-owned internals
+// (`.llmwiki/`, `.work/`, `.shape/`), the user's git metadata
+// (`.git/`, `.github/`), transient dotfiles (`.DS_Store`, editor
+// backups), and hypothetical `.foo.md` leaves. Per-file frontmatter
+// is extracted via `readFrontmatterStreaming` for bounded reads on
+// large corpora.
 export function buildWikiForbiddenIndex(wikiRoot) {
   const set = new Set();
   if (!wikiRoot) return set;
@@ -233,12 +261,14 @@ export function buildWikiForbiddenIndex(wikiRoot) {
 // The parent-dir walk above has already collected direct siblings;
 // this pass covers every OTHER directory in the tree.
 //
-// Dot-directories are skipped as a blanket rule — this matches the
-// discipline in `scripts/lib/chunk.mjs::collectEntryPaths` and covers
-// every metadata surface the skill owns (`.llmwiki/`, `.work/`,
-// `.shape/`) plus any user dotfile directory the corpus might carry
-// (`.git/`, `.github/`, etc). There is no allow-list: if a dotfile
-// is worth considering as a routable entry, rename it.
+// Dot-prefixed entries (directories AND files) are skipped as a
+// blanket rule — this matches the discipline in
+// `scripts/lib/chunk.mjs::collectEntryPaths` and covers every
+// metadata surface the skill owns (`.llmwiki/`, `.work/`, `.shape/`),
+// any user dotfile directory the corpus might carry (`.git/`,
+// `.github/`, etc), AND any stray dotfiles (`.DS_Store`, hypothetical
+// `.foo.md` leaves). There is no allow-list: if a dot-prefixed entry
+// is worth considering as a routable leaf, rename it.
 //
 // Per-file frontmatter is extracted via the streaming reader so this
 // collision pass reads bounded (≤ `MAX_FRONTMATTER_BYTES`) from each
