@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { parseFrontmatter, renderFrontmatter } from "../../scripts/lib/frontmatter.mjs";
 import {
   applyNest,
+  buildWikiForbiddenIndex,
   resolveNestSlug,
   validateSlug,
 } from "../../scripts/lib/nest-applier.mjs";
@@ -700,6 +701,130 @@ test("resolveNestSlug: cross-depth collision chains to -group-N numeric fallback
     assert.equal(
       resolveNestSlug("event-patterns", { leaves: [l1, l2] }, wiki),
       "event-patterns-group-2",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("buildWikiForbiddenIndex: captures every leaf id + dir basename", () => {
+  // Snapshot contract: index contains every non-dot directory basename
+  // and every leaf frontmatter id under wikiRoot. Consumers use this as
+  // a reusable snapshot in multi-NEST iterations to avoid paying for a
+  // full-tree walk on every resolveNestSlug call.
+  const wiki = tmpWiki("forbidden-index");
+  try {
+    writeLeaf(wiki, "alpha.md", "alpha");
+    writeLeaf(wiki, "beta.md", "beta");
+    writeLeaf(wiki, "sub/gamma.md", "gamma");
+    writeLeaf(wiki, "sub/delta.md", "delta");
+    writeLeaf(wiki, "other/epsilon.md", "epsilon");
+    // index.md at root — must be included (this is the case the v1.0.0
+    // walkWikiIds path missed for parent=wikiRoot NESTs).
+    writeLeaf(wiki, "index.md", "wiki-root");
+    // Dot-directory — must be skipped.
+    writeLeaf(wiki, ".cache/ignored.md", "ignored");
+
+    const index = buildWikiForbiddenIndex(wiki);
+    for (const id of [
+      "alpha",
+      "beta",
+      "gamma",
+      "delta",
+      "epsilon",
+      "wiki-root",
+      "sub",
+      "other",
+    ]) {
+      assert.ok(index.has(id), `index should contain "${id}"`);
+    }
+    assert.equal(
+      index.has("ignored"),
+      false,
+      "dot-directory entries must be skipped",
+    );
+    assert.equal(
+      index.has(".cache"),
+      false,
+      "dot-directory basenames must be skipped",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: opts.wikiIndex short-circuits the full-tree walk", () => {
+  // Performance contract: when a precomputed index is supplied, the
+  // resolver must NOT re-walk wiki-wide. We verify behaviourally by
+  // constructing a tree, building the index, then deleting the files
+  // that the walk would have consulted — a post-build deletion would
+  // flip the result if the resolver re-read them. With the precomputed
+  // path the result must stay consistent with the snapshot.
+  const wiki = tmpWiki("wiki-index-short-circuit");
+  try {
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "beta.md", "beta");
+    // Seed a collider leaf in a sibling branch at snapshot time.
+    writeLeaf(wiki, "arch/event-patterns.md", "event-patterns");
+    const wikiIndex = buildWikiForbiddenIndex(wiki);
+    // Delete the collider AFTER the snapshot. The snapshot still
+    // "remembers" it — so the resolver must auto-suffix.
+    rmSync(join(wiki, "arch"), { recursive: true, force: true });
+    assert.equal(
+      resolveNestSlug(
+        "event-patterns",
+        { leaves: [l1, l2] },
+        wiki,
+        { wikiIndex },
+      ),
+      "event-patterns-group",
+      "precomputed wikiIndex drives the decision even after tree mutates",
+    );
+    // And a non-collider stays unchanged via the precomputed set.
+    assert.equal(
+      resolveNestSlug("fresh-slug", { leaves: [l1, l2] }, wiki, { wikiIndex }),
+      "fresh-slug",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: caller-driven wikiIndex mutation reflects applied NESTs", () => {
+  // Integration contract: the multi-NEST caller mutates the index after
+  // each successful apply by `wikiIndex.add(resolvedSlug)`. The NEXT
+  // resolveNestSlug call must see the new directory as occupied and
+  // auto-suffix. This is the sequencing guarantee operators.mjs relies
+  // on when applying multiple non-conflicting NESTs in one iteration.
+  const wiki = tmpWiki("wiki-index-mutation");
+  try {
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "beta.md", "beta");
+    const l3 = writeLeaf(wiki, "gamma.md", "gamma");
+    const l4 = writeLeaf(wiki, "delta.md", "delta");
+    const wikiIndex = buildWikiForbiddenIndex(wiki);
+    // First proposal: slug "patterns" — no collision anywhere.
+    const first = resolveNestSlug(
+      "patterns",
+      { leaves: [l1, l2] },
+      wiki,
+      { wikiIndex },
+    );
+    assert.equal(first, "patterns");
+    // Simulate a successful apply.
+    wikiIndex.add(first);
+    // Second proposal wants the same slug — must auto-suffix because
+    // the first pick has taken it.
+    const second = resolveNestSlug(
+      "patterns",
+      { leaves: [l3, l4] },
+      wiki,
+      { wikiIndex },
+    );
+    assert.equal(
+      second,
+      "patterns-group",
+      "second pick in same iteration must see the first pick's slug as occupied",
     );
   } finally {
     rmSync(wiki, { recursive: true, force: true });

@@ -59,7 +59,12 @@ import {
   MIN_MATH_CLUSTER_SIZE,
   MIN_TIER2_CLUSTER_SIZE,
 } from "./cluster-detect.mjs";
-import { applyNest, resolveNestSlug, validateSlug } from "./nest-applier.mjs";
+import {
+  applyNest,
+  buildWikiForbiddenIndex,
+  resolveNestSlug,
+  validateSlug,
+} from "./nest-applier.mjs";
 import { computeRoutingCost } from "./quality-metric.mjs";
 import { loadFixture, resolveFromFixture } from "./tier2-protocol.mjs";
 import { appendMetricTrajectory, appendNestDecision } from "./decision-log.mjs";
@@ -923,6 +928,15 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
     /* best effort: indices may not be set up yet on a fresh wiki */
   }
 
+  // Precompute the wiki-wide forbidden-id index once per convergence
+  // iteration. resolveNestSlug below reuses it via opts.wikiIndex so
+  // each picked proposal's slug resolution is O(parent-dir) instead of
+  // O(full-tree). After each successful apply, we mutate the index
+  // (`wikiIndex.add(resolvedSlug)`) so the next proposal sees the new
+  // directory/id as occupied. Total cost across a multi-NEST iteration
+  // drops from O(#applies × #files) to O(#files + #applies).
+  const wikiIndex = buildWikiForbiddenIndex(wikiRoot);
+
   let appliedCount = 0;
   for (const proposal of picked) {
     // Re-check freshness RIGHT BEFORE apply. An earlier pick in the
@@ -957,7 +971,9 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
     // is written AFTER applyNest succeeds so decisions.yaml never
     // records a rename for an op that ultimately failed.
     const originalSlug = proposal.slug;
-    const resolvedSlug = resolveNestSlug(originalSlug, proposal, wikiRoot);
+    const resolvedSlug = resolveNestSlug(originalSlug, proposal, wikiRoot, {
+      wikiIndex,
+    });
     let result;
     try {
       result = applyNest(wikiRoot, proposal, resolvedSlug);
@@ -1080,6 +1096,12 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
     // recursively sub-cluster it in later iterations of the
     // same run.
     nestedParents.add(result.target_dir);
+    // Update the wiki-wide forbidden index with the new slug so later
+    // picks in this same iteration see the directory as occupied and
+    // auto-suffix against it. Only the slug needs adding — member leaf
+    // ids were already in the index (NEST moves files but preserves
+    // ids) and the applier doesn't delete anything.
+    wikiIndex.add(resolvedSlug);
     appliedCount++;
   }
 

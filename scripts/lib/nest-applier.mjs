@@ -65,7 +65,16 @@ export function validateSlug(slug) {
 // Non-collision slugs are returned unchanged; invalid slugs are left
 // alone so applyNest's own validation can reject them with its usual
 // error message.
-export function resolveNestSlug(slug, proposal, wikiRoot) {
+//
+// `opts.wikiIndex` is an optional precomputed Set of every live id and
+// directory basename in the wiki (see `buildWikiForbiddenIndex`). When
+// supplied, the full-tree walk is skipped and the precomputed set is
+// merged into the per-proposal forbidden set instead. A multi-NEST
+// convergence iteration builds the index once before the apply loop
+// and mutates it incrementally (adds the resolved slug after each
+// successful apply), reducing the slug-resolver cost from
+// O(#applies × #files) to O(#files + #applies).
+export function resolveNestSlug(slug, proposal, wikiRoot, opts = {}) {
   if (!validateSlug(slug)) return slug;
   if (
     !proposal ||
@@ -74,7 +83,7 @@ export function resolveNestSlug(slug, proposal, wikiRoot) {
   ) {
     return slug;
   }
-  const forbidden = collectForbiddenIds(proposal, wikiRoot);
+  const forbidden = collectForbiddenIds(proposal, wikiRoot, opts.wikiIndex);
   if (!forbidden.has(slug)) return slug;
   // Try "-group" first (the natural human reading: "the group of X
   // leaves"); fall back to numeric suffixes starting at -group-2
@@ -96,7 +105,7 @@ export function resolveNestSlug(slug, proposal, wikiRoot) {
   return slug;
 }
 
-function collectForbiddenIds(proposal, wikiRoot) {
+function collectForbiddenIds(proposal, wikiRoot, precomputedWikiIndex = null) {
   const forbidden = new Set();
   for (const leaf of proposal.leaves) {
     if (leaf?.data?.id) forbidden.add(leaf.data.id);
@@ -147,11 +156,73 @@ function collectForbiddenIds(proposal, wikiRoot) {
   // wikiRoot is optional: when absent (legacy callers / unit tests
   // that predate cross-depth awareness), the parent-dir-only walk
   // above is the effective behaviour, preserving prior semantics.
-  if (wikiRoot) {
+  //
+  // When `precomputedWikiIndex` is supplied, the caller has already
+  // walked the tree once (via `buildWikiForbiddenIndex`) and we merge
+  // its contents into the forbidden set instead of re-walking. The
+  // precomputed set is a superset of what walkWikiIds would add — it
+  // includes every leaf id and directory basename in the wiki, so
+  // parent-dir entries (skipped by walkWikiIds via `dir === parentDir`)
+  // are redundantly covered but harmless: the parent-dir walk above
+  // already captured them and the entries already in `forbidden` are
+  // idempotent under Set.add.
+  if (precomputedWikiIndex) {
+    for (const id of precomputedWikiIndex) forbidden.add(id);
+  } else if (wikiRoot) {
     walkWikiIds(wikiRoot, parentDir, memberPaths, forbidden);
   }
 
   return forbidden;
+}
+
+// Build a wiki-wide forbidden-id index: the set of every leaf
+// frontmatter id and every non-hidden directory basename under
+// `wikiRoot`. Exposed as a reusable snapshot the caller can build
+// once and pass to `resolveNestSlug` via `opts.wikiIndex` instead of
+// paying for a full-tree walk on every invocation.
+//
+// Mutation contract: after a successful NEST apply, the caller must
+// call `wikiIndex.add(resolvedSlug)` so subsequent `resolveNestSlug`
+// calls in the same iteration see the new directory as occupied.
+// No other mutations are needed — leaf ids don't change when leaves
+// move into the new subdir, and nothing is deleted by a NEST apply.
+//
+// Dot-directories are skipped under the same blanket rule as
+// `walkWikiIds` / `collectEntryPaths` (covers `.llmwiki/`, `.work/`,
+// `.git/`, `.github/`, etc). Per-file frontmatter is extracted via
+// `readFrontmatterStreaming` for bounded reads on large corpora.
+export function buildWikiForbiddenIndex(wikiRoot) {
+  const set = new Set();
+  if (!wikiRoot) return set;
+  const stack = [wikiRoot];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      const entryPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        set.add(entry.name);
+        stack.push(entryPath);
+        continue;
+      }
+      if (!entry.name.endsWith(".md")) continue;
+      try {
+        const captured = readFrontmatterStreaming(entryPath);
+        if (captured === null) continue;
+        const { data } = parseFrontmatter(captured.frontmatterText, entryPath);
+        if (data?.id) set.add(data.id);
+      } catch {
+        /* skip unreadable / malformed frontmatter */
+      }
+    }
+  }
+  return set;
 }
 
 // Walk the entire wiki under wikiRoot, adding every leaf frontmatter
