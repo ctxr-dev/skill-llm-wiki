@@ -148,6 +148,13 @@ function collectForbiddenIdsPredicate(
     entries = [];
   }
   for (const entry of entries) {
+    // Skip dot-prefixed entries (directories AND files) on the same
+    // blanket-rule basis the full-tree walkers use (`walkWikiIds`,
+    // `buildWikiForbiddenIndex`, `indices.mjs::listChildren`). Without
+    // this skip, a stray `.DS_Store` or a `.foo.md` dotfile carrying
+    // frontmatter could spuriously poison the forbidden set and force
+    // a valid slug to auto-suffix for no legitimate reason.
+    if (entry.name.startsWith(".")) continue;
     // Skip the parent's own index.md: its id is the parent's basename
     // (i.e., the parent directory name), not something the new
     // subcategory could collide with. Parent-name collisions — where
