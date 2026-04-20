@@ -96,9 +96,16 @@ export function resolveNestSlug(slug, proposal, wikiRoot, opts = {}) {
   // "${slug}-group" overflows the 64-char SLUG_RE cap, short-circuit:
   // all numeric candidates share the same prefix and will fail
   // validation identically, so there's no point spinning the loop.
-  // Returning the original (colliding) slug propagates the failure
-  // to applyNest, which throws a clear "target subcategory already
-  // exists" error — strictly better than a silent spin.
+  // Returning the original (colliding) slug in that overflow case
+  // propagates the collision downstream. Which failure surfaces
+  // depends on the collision class: an existing sibling directory
+  // makes `applyNest`'s `existsSync(targetDir)` check throw "target
+  // subcategory already exists"; a member-id / cross-depth /
+  // alias-id collision slips past applyNest (the directory does not
+  // pre-exist) and surfaces later as `DUP-ID` or
+  // `ALIAS-COLLIDES-ID` at validate time, triggering the usual
+  // rollback. Either way, failing loudly beats silently spinning
+  // through a hundred failed validateSlug() checks.
   const primary = `${slug}-group`;
   if (!validateSlug(primary)) return slug;
   if (!isForbidden(primary)) return primary;
@@ -207,6 +214,16 @@ function collectForbiddenIdsPredicate(
       const raw = readFileSync(entryPath, "utf8");
       const { data } = parseFrontmatter(raw, entryPath);
       if (data?.id) local.add(data.id);
+      // Also reserve any declared aliases. A new NEST stub carrying
+      // id === slug would trip ALIAS-COLLIDES-ID at validate time if
+      // the slug matches an existing alias on any live entry, and
+      // the pre-apply guard is the only place we can pre-empt that
+      // class of rollback.
+      if (Array.isArray(data?.aliases)) {
+        for (const alias of data.aliases) {
+          if (typeof alias === "string" && alias) local.add(alias);
+        }
+      }
     } catch {
       /* skip unreadable siblings */
     }
@@ -287,6 +304,16 @@ export function buildWikiForbiddenIndex(wikiRoot) {
         if (captured === null) continue;
         const { data } = parseFrontmatter(captured.frontmatterText, entryPath);
         if (data?.id) set.add(data.id);
+        // Aliases are also reserved — a slug matching an existing
+        // alias is the other DUP-adjacent class the validator flags
+        // (ALIAS-COLLIDES-ID). Including them here keeps
+        // opts.wikiIndex callers in sync with the full-tree walk
+        // path's guarantee.
+        if (Array.isArray(data?.aliases)) {
+          for (const alias of data.aliases) {
+            if (typeof alias === "string" && alias) set.add(alias);
+          }
+        }
       } catch {
         /* skip unreadable / malformed frontmatter */
       }
@@ -370,6 +397,13 @@ function walkWikiIds(wikiRoot, parentDir, memberPaths, forbidden) {
         if (captured === null) continue;
         const { data } = parseFrontmatter(captured.frontmatterText, entryPath);
         if (data?.id) forbidden.add(data.id);
+        // Reserve aliases too so the full-tree fallback path has the
+        // same ALIAS-COLLIDES-ID coverage as buildWikiForbiddenIndex.
+        if (Array.isArray(data?.aliases)) {
+          for (const alias of data.aliases) {
+            if (typeof alias === "string" && alias) forbidden.add(alias);
+          }
+        }
       } catch {
         /* skip unreadable / malformed frontmatter */
       }

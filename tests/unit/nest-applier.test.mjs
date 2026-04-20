@@ -856,6 +856,76 @@ test("resolveNestSlug: caller-driven wikiIndex mutation reflects applied NESTs",
   }
 });
 
+test("resolveNestSlug: slug matching an existing alias auto-suffixes (ALIAS-COLLIDES-ID guard)", () => {
+  // The validator enforces ALIAS-COLLIDES-ID in addition to DUP-ID.
+  // Before this guard, the forbidden set collected only frontmatter
+  // `id`s, so a slug equal to an existing alias would pass
+  // resolveNestSlug but trip ALIAS-COLLIDES-ID at validate-time,
+  // forcing a rollback. Now aliases are reserved alongside ids in
+  // every walk (parent-dir, walkWikiIds fallback, buildWikiForbiddenIndex
+  // precompute). This test pins the three walk paths:
+  //   (a) wikiRoot omitted → legacy parent-dir walk
+  //   (b) wikiRoot provided → walkWikiIds fallback
+  //   (c) opts.wikiIndex provided → precomputed path
+  const wiki = tmpWiki("alias-collision");
+  try {
+    // Plant a sibling leaf with an alias the cluster slug will match.
+    // (filename matches the leaf's id to keep the fixture
+    // invariant-clean; the alias is the collision surface.)
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "beta.md", "beta");
+    writeLeaf(wiki, "gamma.md", "gamma", { tags: ["default"] });
+    // Manually rewrite gamma to carry an alias.
+    const gammaPath = join(wiki, "gamma.md");
+    const gammaFrontmatter = {
+      id: "gamma",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "gamma focus",
+      parents: ["index.md"],
+      covers: ["gamma cover"],
+      tags: ["default"],
+      aliases: ["claimed-slug"],
+      activation: { keyword_matches: ["gamma"] },
+    };
+    writeFileSync(
+      gammaPath,
+      renderFrontmatter(gammaFrontmatter, "\n# gamma\n"),
+      "utf8",
+    );
+
+    // (a) Legacy parent-dir walk.
+    assert.equal(
+      resolveNestSlug("claimed-slug", { leaves: [l1, l2] }),
+      "claimed-slug-group",
+      "parent-dir walk must reserve aliases",
+    );
+
+    // (b) Full-tree walkWikiIds path.
+    assert.equal(
+      resolveNestSlug("claimed-slug", { leaves: [l1, l2] }, wiki),
+      "claimed-slug-group",
+      "walkWikiIds fallback must reserve aliases",
+    );
+
+    // (c) Precomputed wikiIndex path.
+    const idx = buildWikiForbiddenIndex(wiki);
+    assert.ok(
+      idx.has("claimed-slug"),
+      "buildWikiForbiddenIndex must include aliases",
+    );
+    assert.equal(
+      resolveNestSlug("claimed-slug", { leaves: [l1, l2] }, wiki, {
+        wikiIndex: idx,
+      }),
+      "claimed-slug-group",
+      "opts.wikiIndex path must reserve aliases",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("resolveNestSlug: slug equal to parent-dir basename auto-suffixes (DUP-ID guard)", () => {
   // The parent's `index.md` carries id === basename(parentDir) under
   // the validator invariant. If NEST's slug equals that basename, the
