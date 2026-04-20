@@ -41,6 +41,28 @@ function writeLeaf(wikiRoot, relPath, id, extra = {}) {
   return { path: full, data };
 }
 
+// Write an `index.md` with index-shaped frontmatter (type: "index",
+// depth_role: "category"), matching what the validator enforces for
+// every index entry in a real wiki (id == basename(dirname), type ==
+// "index"). Use this instead of writeLeaf whenever a test plants a
+// directory index, so fixtures mirror the production shape and
+// future stricter validators don't start failing these tests for
+// type/depth_role mismatches.
+function writeIndex(wikiRoot, relPath, id, extra = {}) {
+  const full = join(wikiRoot, relPath);
+  mkdirSync(join(full, ".."), { recursive: true });
+  const data = {
+    id,
+    type: "index",
+    depth_role: extra.depth_role ?? "category",
+    focus: `${id} category`,
+    parents: extra.parents ?? [],
+    tags: extra.tags ?? ["default"],
+  };
+  writeFileSync(full, renderFrontmatter(data, "\n# " + id + "\n"), "utf8");
+  return { path: full, data };
+}
+
 test("validateSlug: accepts kebab-case, rejects everything else", () => {
   assert.equal(validateSlug("operations"), true);
   assert.equal(validateSlug("layout-modes"), true);
@@ -720,8 +742,11 @@ test("buildWikiForbiddenIndex: captures every leaf id + dir basename", () => {
     writeLeaf(wiki, "sub/delta.md", "delta");
     writeLeaf(wiki, "other/epsilon.md", "epsilon");
     // index.md at root — must be included (this is the case the v1.0.0
-    // walkWikiIds path missed for parent=wikiRoot NESTs).
-    writeLeaf(wiki, "index.md", "wiki-root");
+    // walkWikiIds path missed for parent=wikiRoot NESTs). Writing it
+    // with index-shaped frontmatter so the fixture matches what the
+    // validator enforces in a real wiki (type: "index",
+    // depth_role: "category").
+    writeIndex(wiki, "index.md", "wiki-root");
     // Dot-directory — must be skipped.
     writeLeaf(wiki, ".cache/ignored.md", "ignored");
 
@@ -831,6 +856,39 @@ test("resolveNestSlug: caller-driven wikiIndex mutation reflects applied NESTs",
   }
 });
 
+test("resolveNestSlug: slug equal to parent-dir basename auto-suffixes (DUP-ID guard)", () => {
+  // The parent's `index.md` carries id === basename(parentDir) under
+  // the validator invariant. If NEST's slug equals that basename, the
+  // new subdir's stub index.md would also carry id === slug ===
+  // basename(parentDir) → two index.md files with the same id →
+  // DUP-ID at validate time. Earlier versions of this function's doc
+  // claimed `applyNest`'s `existsSync(targetDir)` check caught this;
+  // it doesn't, because `<parentDir>/<basename(parentDir)>/` normally
+  // does NOT exist (applyNest is about to create it). The fix: add
+  // basename(parentDir) to the forbidden set explicitly. This test
+  // pins that behaviour.
+  const parent = tmpWiki("resolve-parent-name");
+  const wiki = join(parent, "root-wiki");
+  mkdirSync(wiki, { recursive: true });
+  try {
+    const parentName = "mod-group"; // basename(cluster's parentDir)
+    const clusterParent = join(wiki, parentName);
+    mkdirSync(clusterParent, { recursive: true });
+    writeIndex(clusterParent, "index.md", parentName);
+    const l1 = writeLeaf(clusterParent, "alpha.md", "alpha");
+    const l2 = writeLeaf(clusterParent, "beta.md", "beta");
+
+    // Slug equal to parent basename must auto-suffix, NOT pass through.
+    assert.equal(
+      resolveNestSlug(parentName, { leaves: [l1, l2] }, wiki),
+      `${parentName}-group`,
+      "slug equal to basename(parentDir) must route through -group",
+    );
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("resolveNestSlug: collides with wiki-root index.md id even without wikiIndex", () => {
   // walkWikiIds' `dir === parentDir` skip used to drop every file at
   // wikiRoot, including wikiRoot/index.md. Under the validator contract
@@ -854,7 +912,10 @@ test("resolveNestSlug: collides with wiki-root index.md id even without wikiInde
   mkdirSync(wiki, { recursive: true });
   try {
     const rootId = basename(wiki); // "short-wiki"
-    writeLeaf(wiki, "index.md", rootId);
+    // Root index is written with index-shaped frontmatter so the
+    // fixture mirrors a real wiki's root shape (type: "index",
+    // depth_role: "category") — the validator enforces both.
+    writeIndex(wiki, "index.md", rootId);
     const l1 = writeLeaf(wiki, "alpha.md", "alpha");
     const l2 = writeLeaf(wiki, "beta.md", "beta");
     // Slug equals the root index id (== basename(wikiRoot)) → collision,

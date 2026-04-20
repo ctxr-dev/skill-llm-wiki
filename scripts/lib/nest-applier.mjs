@@ -139,6 +139,24 @@ function collectForbiddenIdsPredicate(
   const parentDir = dirname(proposal.leaves[0].path);
   const memberPaths = new Set(proposal.leaves.map((l) => l.path));
 
+  // Explicitly forbid the parent directory's OWN basename. Under the
+  // validator's invariant (`type: index` id === `basename(dirname(
+  // index.md))` at every depth), the parent's `index.md` carries
+  // id === basename(parentDir). The NEST applier writes the new
+  // subdir's stub `index.md` with id === slug, so a slug equal to the
+  // parent's basename produces TWO index.md files with the same id
+  // (parent + new child) and trips DUP-ID at validate time.
+  //
+  // Earlier versions of this function's documentation claimed
+  // applyNest's `existsSync(targetDir)` check caught this class, but
+  // that check only fires when `<parentDir>/<slug>/` already EXISTS —
+  // which it doesn't, because we're about to create it. The
+  // parent-name collision is only reachable at validate-time unless
+  // we pre-empt it here. Adding basename(parentDir) to the local set
+  // redirects the collision into the deterministic `-group` suffix
+  // branch above.
+  local.add(basename(parentDir));
+
   // Parent-dir walk. When wikiRoot is not supplied this walk is the
   // ONLY source of "live ids at this depth" — the legacy slot used by
   // unit tests that predate cross-depth awareness. When wikiRoot IS
@@ -172,11 +190,11 @@ function collectForbiddenIdsPredicate(
     // frontmatter could spuriously poison the forbidden set and force
     // a valid slug to auto-suffix for no legitimate reason.
     if (entry.name.startsWith(".")) continue;
-    // Skip the parent's own index.md: its id is the parent's basename
-    // (i.e., the parent directory name), not something the new
-    // subcategory could collide with. Parent-name collisions — where
-    // the slug equals the parent dir's name — are a separate case that
-    // applyNest itself rejects via its existsSync(targetDir) check.
+    // Skip the parent's own index.md: its id is always
+    // `basename(parentDir)` (per the validator invariant), and that
+    // value was explicitly added to `local` above so parent-name
+    // collisions route through the normal `-group` suffix branch in
+    // resolveNestSlug. Nothing extra to collect from index.md here.
     if (entry.name === "index.md") continue;
     const entryPath = join(parentDir, entry.name);
     if (memberPaths.has(entryPath)) continue;
@@ -330,25 +348,21 @@ function walkWikiIds(wikiRoot, parentDir, memberPaths, forbidden) {
       // (including the member-exclusion logic). Skipping avoids
       // double-reading frontmatter on the hot path.
       //
-      // EXCEPTION: parent's own index.md. The parent-dir walk
-      // explicitly skips index.md because in the nested case its id
-      // equals the parent-directory basename (`validate.mjs` enforces
-      // `type: index` id === `basename(dirname(index.md))` for every
-      // index depth), and a slug-vs-parent-name collision is caught
-      // by applyNest's existsSync(targetDir) check — different class.
-      //
-      // But when parentDir === wikiRoot, the parent-dir walk is the
-      // ONLY walk pass that would surface the root index.md (this
-      // tree walk starts at wikiRoot and only visits its CHILDREN as
-      // directory entries, never wikiRoot itself; so the wiki-root
-      // basename is never added via the `entry.isDirectory()` branch
-      // either). Without parsing root/index.md, a slug equal to
-      // `basename(wikiRoot)` — the mandatory root id — would slip
-      // past both walks and surface only at post-apply DUP-ID
-      // validation.
-      //
-      // Parse index.md specifically to close that gap. One extra
-      // frontmatter-stream read per walk on a small, bounded file.
+      // EXCEPTION: parent's own index.md. Normally the parent-dir
+      // walk above already injects `basename(parentDir)` into the
+      // forbidden set (see the explicit `local.add(basename(parentDir))`
+      // right before this loop), so a slug matching the parent's id
+      // would auto-suffix without our help. But when
+      // parentDir === wikiRoot, this walk is the ONLY pass that sees
+      // the root at all — it starts AT wikiRoot and only visits
+      // children as directory entries, never wikiRoot itself, so the
+      // wiki-root basename isn't added via the `entry.isDirectory()`
+      // branch either. Parsing root/index.md picks up the canonical
+      // root id (also equal to basename(wikiRoot) under the validator
+      // invariant) via the frontmatter read; the explicit add above
+      // would cover the name but parsing also catches any alias
+      // entries the root might carry. Cheap: one extra
+      // frontmatter-stream read per walk.
       if (dir === parentDir && entry.name !== "index.md") continue;
       if (memberPaths.has(entryPath)) continue;
       try {
