@@ -28,13 +28,24 @@ import { cacheSize, writeCached } from "../../scripts/lib/similarity-cache.mjs";
 import {
   DEFAULT_QUALITY_MODE,
   QUALITY_MODES,
+  TIER1_DETERMINISTIC_THRESHOLD,
   decide,
   resolveQualityMode,
 } from "../../scripts/lib/tiered.mjs";
 import {
+  TIER1_DECISIVE_DIFFERENT,
+  TIER1_DECISIVE_SAME,
   _isTier1LoaderTouched,
   _resetTier1LoadState,
+  embed,
+  embeddingCosine,
 } from "../../scripts/lib/embeddings.mjs";
+import {
+  TIER0_DECISIVE_DIFFERENT,
+  TIER0_DECISIVE_SAME,
+  compareEntries,
+  entryText,
+} from "../../scripts/lib/similarity.mjs";
 
 process.env.LLM_WIKI_MOCK_TIER1 = "1";
 
@@ -90,7 +101,10 @@ test("resolveQualityMode: unknown mode throws", () => {
 });
 
 test("QUALITY_MODES is the canonical allow-list", () => {
-  assert.deepEqual([...QUALITY_MODES], ["tiered-fast", "claude-first", "tier0-only"]);
+  assert.deepEqual(
+    [...QUALITY_MODES],
+    ["tiered-fast", "claude-first", "tier0-only", "deterministic"],
+  );
 });
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -245,6 +259,256 @@ test("decide: tier0-only returns undecidable for mid-band pairs", async () => {
     assert.equal(r.tier, 0);
     assert.equal(r.decision, "undecidable");
     assert.match(r.reason, /tier0-only/);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("decide: deterministic mode resolves Tier 0 mid-band without Tier 2", async () => {
+  // Deterministic mode must never return "undecidable" / "pending-tier2"
+  // and must never call tier2Handler. The mid-band pair used here lands
+  // at Tier 1 — it may be decisive at Tier 1 (no mid-band resolution
+  // needed) or mid-band (deterministic threshold fires). Either way
+  // the decision is concrete and Tier 2 is never consulted.
+  const wiki = tmpWiki("deterministic");
+  try {
+    const a = midBandA();
+    const b = midBandB();
+    let tier2Called = false;
+    const r = await decide(a, b, midBandContext(), {
+      wikiRoot: wiki,
+      opId: "op-1",
+      operator: "MERGE",
+      qualityMode: "deterministic",
+      tier2Handler: async () => {
+        tier2Called = true;
+        return { decision: "same", reason: "should-never-fire" };
+      },
+    });
+    assert.equal(tier2Called, false, "deterministic mode must not call Tier 2");
+    assert.ok(r.tier >= 0 && r.tier <= 1, `unexpected tier ${r.tier}`);
+    assert.ok(
+      ["same", "different"].includes(r.decision),
+      `expected same/different, got ${r.decision}`,
+    );
+    assert.notEqual(r.decision, "pending-tier2");
+    assert.notEqual(r.decision, "undecidable");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("TIER1_DETERMINISTIC_THRESHOLD is derived from the Tier 1 decisive bounds", () => {
+  // Constant-level pin: if anyone tunes TIER1_DECISIVE_SAME or
+  // TIER1_DECISIVE_DIFFERENT without touching the derivation, this
+  // test fires instead of silently drifting mid-band classification.
+  assert.equal(
+    TIER1_DETERMINISTIC_THRESHOLD,
+    (TIER1_DECISIVE_SAME + TIER1_DECISIVE_DIFFERENT) / 2,
+  );
+});
+
+test("decide: deterministic-mid-band band fires when Tier 1 cosine lands in-band", async () => {
+  // Deterministic branch-firing test. The mock Tier 1 embedder hashes
+  // token bags into the unit sphere, so pairs with varying token
+  // overlap produce cosines that sweep monotonically (in expectation)
+  // from ~1.0 down toward ~0. We generate pairs with progressively
+  // decreasing token overlap and scan the resulting cosines for one
+  // landing in (TIER1_DECISIVE_DIFFERENT, TIER1_DECISIVE_SAME). The
+  // sweep is dense enough that at least one k is guaranteed to hit
+  // the mid-band — if the mock implementation ever changes so that
+  // this guarantee breaks, the test fails LOUDLY via `assert.fail`
+  // instead of silently skipping, so a regression in the mock or in
+  // threshold tuning surfaces immediately.
+  const wiki = tmpWiki("deterministic-midband-branch");
+  try {
+    const sharedTokens = [
+      "alpha", "beta", "gamma", "delta", "epsilon",
+      "zeta", "eta", "theta", "iota", "kappa",
+      "lambda", "mu", "nu", "xi", "omicron", "pi",
+      "rho2", "sigma2", "tau2", "ups2",
+    ];
+    const variantTokens = [
+      "omega", "sigma", "tau", "rho", "phi",
+      "chi", "psi", "upsilon", "alef", "bet",
+      "gimel", "dalet", "he", "vav", "zayin", "het",
+      "tet", "yod", "kaf", "lamed",
+    ];
+    const total = sharedTokens.length; // == variantTokens.length
+
+    // Padding corpus documents — adding a third+ doc to the IDF corpus
+    // keeps TIER 0's IDF weights stable as k varies. Without these,
+    // the 2-doc IDF collapses and a and b either score
+    // decisive-different (few overlap) or decisive-same (many
+    // overlap), skipping the escalation to Tier 1. The padding
+    // "unrelated" document contributes diversity to the IDF denominator
+    // so intermediate overlaps land in the TIER 0 mid-band.
+    const padCorpus = [
+      {
+        id: "pad-corpus-1",
+        focus: "unrelated padding doc for idf stability one",
+        covers: ["unrelated cover one"],
+        tags: ["padding"],
+      },
+      {
+        id: "pad-corpus-2",
+        focus: "different padding doc for idf stability two",
+        covers: ["different cover two"],
+        tags: ["padding"],
+      },
+    ];
+
+    // Joint search: find a k where BOTH Tier 0 TF-IDF AND Tier 1 mock
+    // cosine land in their respective mid-bands. Need both because
+    // `decide()` short-circuits at Tier 0 if Tier 0 is decisive — the
+    // deterministic-mid-band branch only fires when Tier 0 says
+    // "escalate" AND Tier 1 lands in (0.45, 0.80).
+    let inBandPair = null;
+    for (let k = 1; k < total; k++) {
+      const aTokens = sharedTokens.slice();
+      const bTokens = [
+        ...sharedTokens.slice(0, k),
+        ...variantTokens.slice(k, total),
+      ];
+      const textA = aTokens.join(" ");
+      const textB = bTokens.join(" ");
+      const aEntry = { id: `a-overlap${k}`, focus: textA, covers: [], tags: [] };
+      const bEntry = { id: `b-overlap${k}`, focus: textB, covers: [], tags: [] };
+      const ctx = [aEntry, bEntry, ...padCorpus];
+
+      const tier0 = compareEntries(aEntry, bEntry, ctx);
+      if (
+        tier0.similarity <= TIER0_DECISIVE_DIFFERENT ||
+        tier0.similarity >= TIER0_DECISIVE_SAME
+      ) {
+        continue;
+      }
+
+      // Mirror decide()'s Tier 1 input exactly: `embed(wiki,
+      // entryText(entry))` — entryText doubles focus + appends
+      // covers/tags/domains. Using raw `textA` here would compute a
+      // different cosine than decide() sees, so the branch-firing
+      // assertion would be racing against a phantom pair.
+      const [vecA, vecB] = await Promise.all([
+        embed(wiki, entryText(aEntry)),
+        embed(wiki, entryText(bEntry)),
+      ]);
+      const tier1Sim = embeddingCosine(vecA, vecB);
+      if (tier1Sim > TIER1_DECISIVE_DIFFERENT && tier1Sim < TIER1_DECISIVE_SAME) {
+        inBandPair = { a: aEntry, b: bEntry, ctx, sim: tier1Sim };
+        break;
+      }
+    }
+
+    if (!inBandPair) {
+      // The mock embedder's cosine surface changed, or the Tier 1
+      // threshold window shifted. This test relied on at least one
+      // progressive-overlap pair landing in-band. Fail loudly so the
+      // mock drift / threshold change is noticed, rather than letting
+      // the threshold branch silently slip out of coverage.
+      assert.fail(
+        "progressive-overlap sweep produced no mock Tier 1 cosine in " +
+          `(${TIER1_DECISIVE_DIFFERENT}, ${TIER1_DECISIVE_SAME}); ` +
+          "mock embedder or Tier 1 thresholds drifted — update this test.",
+      );
+    }
+
+    const { a, b, ctx, sim } = inBandPair;
+    const r = await decide(a, b, ctx, {
+      wikiRoot: wiki,
+      opId: "op-midband",
+      operator: "MERGE",
+      qualityMode: "deterministic",
+    });
+    assert.equal(r.tier, 1, `expected tier=1 for in-band pair (sim=${sim.toFixed(3)})`);
+    assert.equal(r.confidence_band, "deterministic-mid-band");
+    const expected = sim > TIER1_DETERMINISTIC_THRESHOLD ? "same" : "different";
+    assert.equal(r.decision, expected);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("decide: deterministic mode never escalates to Tier 2 even when Tier 1 is mid-band-adjacent", async () => {
+  // Soft assertion: whatever band the mock cosine happens to land in,
+  // deterministic mode must produce a concrete decision without ever
+  // calling tier2Handler. This is the mode's core contract.
+  const wiki = tmpWiki("deterministic-no-escalate");
+  try {
+    let tier2Called = false;
+    const r = await decide(midBandA(), midBandB(), midBandContext(), {
+      wikiRoot: wiki,
+      opId: "op-no-escalate",
+      operator: "MERGE",
+      qualityMode: "deterministic",
+      tier2Handler: async () => {
+        tier2Called = true;
+        return { decision: "same", reason: "should-never-fire" };
+      },
+    });
+    assert.equal(tier2Called, false);
+    assert.ok(["same", "different"].includes(r.decision));
+    assert.notEqual(r.decision, "pending-tier2");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("decide: deterministic mode is byte-stable across runs", async () => {
+  // Two back-to-back calls on the same pair must return identical
+  // decisions. We clear the similarity cache between calls to prove
+  // the determinism comes from the decide() path itself rather than
+  // the cache short-circuit.
+  const wiki = tmpWiki("deterministic-stable");
+  try {
+    const a = midBandA();
+    const b = midBandB();
+    const r1 = await decide(a, b, midBandContext(), {
+      wikiRoot: wiki,
+      opId: "op-1",
+      operator: "MERGE",
+      qualityMode: "deterministic",
+    });
+    rmSync(join(wiki, ".llmwiki"), { recursive: true, force: true });
+    const r2 = await decide(a, b, midBandContext(), {
+      wikiRoot: wiki,
+      opId: "op-1",
+      operator: "MERGE",
+      qualityMode: "deterministic",
+    });
+    assert.equal(r1.decision, r2.decision);
+    assert.equal(r1.similarity, r2.similarity);
+    assert.equal(r1.confidence_band, r2.confidence_band);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("decide: deterministic mode preserves Tier 0 decisive paths", async () => {
+  // Decisive Tier 0 pairs short-circuit the ladder regardless of
+  // quality mode. Verify that the decisive-same / decisive-different
+  // bands still fire cleanly under deterministic mode, so users
+  // switching modes don't see a regression on obvious pairs.
+  const wiki = tmpWiki("deterministic-decisive");
+  try {
+    const similar = await decide(similarA(), similarB(), [similarA(), similarB()], {
+      wikiRoot: wiki,
+      opId: "op-1",
+      operator: "MERGE",
+      qualityMode: "deterministic",
+    });
+    assert.equal(similar.tier, 0);
+    assert.equal(similar.decision, "same");
+    assert.equal(similar.confidence_band, "decisive-same");
+
+    const diff = await decide(unrelatedA(), unrelatedB(), [unrelatedA(), unrelatedB()], {
+      wikiRoot: wiki,
+      opId: "op-2",
+      operator: "MERGE",
+      qualityMode: "deterministic",
+    });
+    assert.equal(diff.tier, 0);
+    assert.equal(diff.decision, "different");
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }

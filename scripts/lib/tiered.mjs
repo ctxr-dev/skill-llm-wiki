@@ -9,7 +9,7 @@
 // the residual ambiguous cases. A similarity-cache hit short-
 // circuits the whole ladder.
 //
-// Three quality modes, selected via --quality-mode or the
+// Four quality modes, selected via --quality-mode or the
 // LLM_WIKI_QUALITY_MODE env var:
 //
 //   tiered-fast (default):
@@ -24,6 +24,17 @@
 //   tier0-only:
 //     Tier 0 decisions only. Mid-band becomes an explicit
 //     "undecidable" marker that the caller must resolve manually.
+//
+//   deterministic:
+//     Tier 0 + Tier 1 ladder, but the ladder terminates at Tier 1:
+//     mid-band Tier 0 escalates to Tier 1 (as in tiered-fast), but
+//     mid-band Tier 1 is resolved by a deterministic threshold
+//     (`TIER1_DETERMINISTIC_THRESHOLD`) instead of escalating to
+//     Tier 2. No LLM/sub-agent is ever consulted — every decision
+//     is produced from TF-IDF + MiniLM cosine alone, so repeated
+//     runs on the same inputs are byte-reproducible. This is the
+//     mode the clustering pipeline pairs with algorithmic HAC +
+//     auto-slug to produce deterministic wiki builds end-to-end.
 //
 // Tier 2 escalation contract: the skill's CLI runs under Node with
 // no access to Claude Code's `Agent` tool, so it cannot spawn
@@ -65,9 +76,26 @@ export const QUALITY_MODES = Object.freeze([
   "tiered-fast",
   "claude-first",
   "tier0-only",
+  "deterministic",
 ]);
 
 export const DEFAULT_QUALITY_MODE = "tiered-fast";
+
+// Deterministic-mode split point for resolving mid-band Tier 1
+// similarities. Derived as the midpoint of the Tier 1 mid-band so
+// future tuning of the decisive-same / decisive-different thresholds
+// propagates here without a separate code-change — no drift between
+// "where the ladder says 'escalate'" and "where deterministic mode
+// says 'same vs different'". Any pair whose Tier 1 cosine sits
+// strictly above this is routed to "same"; anything at-or-below is
+// routed to "different". In this mode there is no mid-band
+// "undecidable" / pending-Tier-2 outcome — Tier 1 always produces a
+// concrete branch without an LLM in the loop. (Note: Tier 0 can still
+// produce an "undecidable" result on insufficient-text inputs — two
+// empty frontmatters — independent of quality mode; that predates
+// deterministic mode and is by design.)
+export const TIER1_DETERMINISTIC_THRESHOLD =
+  (TIER1_DECISIVE_SAME + TIER1_DECISIVE_DIFFERENT) / 2;
 
 export function resolveQualityMode(flags = {}) {
   const fromFlag = flags.quality_mode;
@@ -308,7 +336,20 @@ export async function decide(
     finaliseDecision(result, { a, b, hashA, hashB, wikiRoot, opId, operator, writeLog, writeCache });
     return result;
   }
-  // Mid-band Tier 1 → Tier 2.
+  // Mid-band Tier 1. Branch on quality mode: deterministic resolves
+  // algorithmically, tiered-fast escalates to Tier 2.
+  if (qualityMode === "deterministic") {
+    const decision = sim > TIER1_DETERMINISTIC_THRESHOLD ? "same" : "different";
+    const result = {
+      tier: 1,
+      similarity: sim,
+      decision,
+      confidence_band: "deterministic-mid-band",
+      reason: `deterministic mode: sim ${sim.toFixed(3)} ${decision === "same" ? ">" : "≤"} ${TIER1_DETERMINISTIC_THRESHOLD}`,
+    };
+    finaliseDecision(result, { a, b, hashA, hashB, wikiRoot, opId, operator, writeLog, writeCache });
+    return result;
+  }
   return await escalateToTier2(
     a, b, hashA, hashB, wikiRoot, opId, operator,
     sim, "tier1 mid-band", writeLog, writeCache,
