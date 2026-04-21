@@ -317,6 +317,13 @@ export function resolveIntent(ctx) {
   // orchestrator, where the hook would fire and apply unexpected
   // structural mutations outside the documented surface.
   const BALANCE_FLAG_SUBCOMMANDS = new Set(["build", "rebuild"]);
+  // Subcommands that operate on an existing wiki (take a wiki path).
+  // For these, the natural remediation is `rebuild` (which walks an
+  // existing wiki). For source-operating subcommands with no wiki
+  // path, `build` is the right suggestion. `build` itself isn't in
+  // either set since it can't reach this branch.
+  const WIKI_OPERATING = new Set(["fix", "validate", "extend", "rebuild", "rollback", "join"]);
+  const suggestedSub = WIKI_OPERATING.has(subcommand) ? "rebuild" : "build";
   if (f.fanout_target !== undefined) {
     if (!BALANCE_FLAG_SUBCOMMANDS.has(subcommand)) {
       return ambiguous(
@@ -328,8 +335,8 @@ export function resolveIntent(ctx) {
             flag: "(remove --fanout-target)",
           },
           {
-            description: "run on a build / rebuild instead",
-            flag: `${subcommand === "extend" ? "rebuild" : "build"} ... --fanout-target <N>`,
+            description: `run on a ${suggestedSub} instead`,
+            flag: `${suggestedSub} ... --fanout-target <N>`,
           },
         ],
         "--fanout-target",
@@ -365,8 +372,8 @@ export function resolveIntent(ctx) {
             flag: "(remove --max-depth)",
           },
           {
-            description: "run on a build / rebuild instead",
-            flag: `${subcommand === "extend" ? "rebuild" : "build"} ... --max-depth <D>`,
+            description: `run on a ${suggestedSub} instead`,
+            flag: `${suggestedSub} ... --max-depth <D>`,
           },
         ],
         "--max-depth",

@@ -416,17 +416,24 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     // overdeep candidates) leaves the working tree byte-identical.
     // Balance-enforcement is build/rebuild-only per contract.mjs and
     // `--help`. Intent-resolution already rejects the flags on other
-    // subcommands (INT-14a / INT-15a), but gate here as well in
-    // defense-in-depth — any future code path that constructs a plan
-    // with balance flags outside of build/rebuild would otherwise
+    // subcommands (INT-14a / INT-15a) and rejects non-integer values
+    // (INT-14 / INT-15), but gate here as well in defense-in-depth —
+    // any future code path that constructs a plan with balance flags
+    // outside of build/rebuild (or with garbage values) would otherwise
     // trigger structural mutations outside the documented surface.
+    // `Number.isFinite` rejects NaN from a non-numeric string: a NaN
+    // maxDepth would make `detectDepthOverage` treat every depth as
+    // over (NaN comparisons are false), potentially flattening the
+    // wiki root and moving directories outside the wiki.
     const BALANCE_OPS = new Set(["build", "rebuild"]);
-    const fanoutTarget = plan.flags?.fanout_target != null && BALANCE_OPS.has(plan.operation)
-      ? Number.parseInt(plan.flags.fanout_target, 10)
-      : null;
-    const maxDepth = plan.flags?.max_depth != null && BALANCE_OPS.has(plan.operation)
-      ? Number.parseInt(plan.flags.max_depth, 10)
-      : null;
+    const parseBalanceInt = (raw) => {
+      if (raw == null) return null;
+      const n = Number.parseInt(raw, 10);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
+    const opSupportsBalance = BALANCE_OPS.has(plan.operation);
+    const fanoutTarget = opSupportsBalance ? parseBalanceInt(plan.flags?.fanout_target) : null;
+    const maxDepth = opSupportsBalance ? parseBalanceInt(plan.flags?.max_depth) : null;
     let balance = null;
     if (fanoutTarget != null || maxDepth != null) {
       balance = await runBalance(wikiRoot, {
