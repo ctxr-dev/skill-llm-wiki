@@ -111,6 +111,15 @@ export function resolveNestSlug(slug, proposal, wikiRoot, opts = {}) {
   if (!isForbidden(primary)) return primary;
   for (let i = 2; i < 100; i++) {
     const candidate = `${slug}-group-${i}`;
+    // Re-check `validateSlug(candidate)` inside the loop because the
+    // numeric suffix widens `candidate` past `${slug}-group` — for a
+    // base slug near the 64-char SLUG_RE cap, `${slug}-group` can
+    // validate while `${slug}-group-2` overflows. Bailing out early
+    // avoids returning an invalid slug that applyNest would otherwise
+    // reject with the uninformative "invalid slug" error even though
+    // the original input was valid. Same fail-loud rationale as the
+    // primary-overflow short-circuit above.
+    if (!validateSlug(candidate)) return slug;
     if (!isForbidden(candidate)) return candidate;
   }
   return slug;
@@ -291,16 +300,21 @@ function collectForbiddenIdsPredicate(
   return (id) => local.has(id);
 }
 
-// Build a wiki-wide forbidden-id index: the set of every leaf
-// frontmatter id, every leaf frontmatter alias (from `aliases[]`),
-// and every non-hidden directory basename under `wikiRoot`. Exposed
-// as a reusable snapshot the caller can build once and pass to
-// `resolveNestSlug` via `opts.wikiIndex` instead of paying for a
-// full-tree walk on every invocation.
+// Build a wiki-wide forbidden-id index: the set of every `.md`
+// entry's frontmatter id + aliases (both leaves AND `index.md` at
+// every depth), plus every non-hidden directory basename under
+// `wikiRoot`. Exposed as a reusable snapshot the caller can build
+// once and pass to `resolveNestSlug` via `opts.wikiIndex` instead of
+// paying for a full-tree walk on every invocation.
 //
-// Aliases are included so the resolver pre-empts both DUP-ID (slug
-// === some leaf's `id`) AND ALIAS-COLLIDES-ID (slug === some leaf's
-// alias) validation failures in one pass. Directory basenames cover
+// Index.md entries are included (not skipped) because the validator
+// treats leaves and indices as the same entry class on the
+// DUP-ID / ALIAS-COLLIDES-ID axes — a slug matching a nested
+// subcategory's id or alias would trip validation just as a slug
+// matching a leaf id would. Aliases are included for the same
+// reason: the resolver pre-empts both DUP-ID (slug === some entry's
+// `id`) AND ALIAS-COLLIDES-ID (slug === some entry's alias)
+// validation failures in one pass. Directory basenames cover
 // the sibling-subdirectory class — a NEST creating `<parent>/<slug>/`
 // where `<slug>` matches an existing directory anywhere in the tree
 // would collide on `type: index` id at validate time.
@@ -397,9 +411,12 @@ function walkWikiIds(wikiRoot, parentDir, memberPaths, forbidden) {
       continue;
     }
     for (const entry of entries) {
-      // Skip hidden directories (including skill-llm-wiki internals
-      // like `.llmwiki/` and scratch `.work/`) so we do not treat
-      // metadata as wiki content.
+      // Skip dot-prefixed entries (directories AND files — this is
+      // a blanket rule, not a directories-only skip). Covers skill
+      // internals (`.llmwiki/`, `.work/`), user metadata (`.git/`,
+      // `.github/`), and stray dotfiles (`.DS_Store`, hypothetical
+      // `.foo.md`). Matches the rest of the pipeline's walk
+      // discipline — see the walkWikiIds header comment above.
       if (entry.name.startsWith(".")) continue;
       const entryPath = join(dir, entry.name);
       if (entry.isDirectory()) {

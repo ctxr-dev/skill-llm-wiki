@@ -44,19 +44,31 @@ function writeLeaf(wikiRoot, relPath, id, extra = {}) {
 // Write an `index.md` with index-shaped frontmatter (type: "index",
 // depth_role: "category"), matching what the validator enforces for
 // every index entry in a real wiki (id == basename(dirname), type ==
-// "index"). Use this instead of writeLeaf whenever a test plants a
-// directory index, so fixtures mirror the production shape and
-// future stricter validators don't start failing these tests for
-// type/depth_role mismatches.
+// "index", non-empty parents[] for every non-root index). Use this
+// instead of writeLeaf whenever a test plants a directory index, so
+// fixtures mirror the production shape and future stricter
+// validators don't start failing these tests for type / depth_role /
+// parents mismatches.
+//
+// `parents` default shape:
+//   - Root index (relPath === "index.md" at wikiRoot): `[]` — roots
+//     have no parent. The validator's non-empty-parents rule
+//     carves out the root.
+//   - Non-root index (any `<subdir>/index.md`): `["../index.md"]` —
+//     non-empty, points at the directory above, which is what every
+//     real non-root index carries. Callers can override via
+//     `extra.parents` if a test needs a specific path.
 function writeIndex(wikiRoot, relPath, id, extra = {}) {
   const full = join(wikiRoot, relPath);
   mkdirSync(join(full, ".."), { recursive: true });
+  const isRootIndex = relPath === "index.md";
+  const defaultParents = isRootIndex ? [] : ["../index.md"];
   const data = {
     id,
     type: "index",
     depth_role: extra.depth_role ?? "category",
     focus: `${id} category`,
-    parents: extra.parents ?? [],
+    parents: extra.parents ?? defaultParents,
     tags: extra.tags ?? ["default"],
   };
   writeFileSync(full, renderFrontmatter(data, "\n# " + id + "\n"), "utf8");
@@ -478,6 +490,38 @@ test("resolveNestSlug: length-overflow on suffix short-circuits instead of spinn
     // (65 chars), so return original. Numeric suffix candidates are
     // all longer and would also fail — spinning the loop is pointless.
     assert.equal(resolved, longSlug);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: numeric-suffix loop re-validates each candidate against SLUG_RE", () => {
+  // Boundary case: base slug at 57 chars. `${slug}-group` is 63
+  // chars (valid), but `${slug}-group-2` is 65 (invalid) and every
+  // `${slug}-group-N` from N=2..99 is equally invalid. Plant a
+  // collision on both the base slug AND "-group" so the resolver is
+  // forced past them into the numeric-suffix loop; the loop must
+  // re-check validateSlug on each candidate and bail back to the
+  // original slug when the first candidate overflows — NOT return an
+  // invalid slug that applyNest would reject with "invalid slug".
+  const wiki = tmpWiki("resolve-numeric-overflow");
+  try {
+    const base = "a".repeat(57);
+    const primary = `${base}-group`; // 63 chars, valid
+    assert.ok(validateSlug(primary), "baseline: -group variant validates");
+    const numeric2 = `${base}-group-2`; // 65 chars, invalid
+    assert.ok(!validateSlug(numeric2), "baseline: -group-2 variant overflows");
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    // Force collisions on both `base` and `${base}-group` so the
+    // resolver has to step into the numeric-suffix loop.
+    const l2 = writeLeaf(wiki, base + ".md", base);
+    writeLeaf(wiki, primary + ".md", primary);
+    const resolved = resolveNestSlug(base, { leaves: [l1, l2] });
+    assert.equal(
+      resolved,
+      base,
+      "numeric-suffix loop must bail out when the candidate overflows SLUG_RE",
+    );
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }
