@@ -33,6 +33,10 @@
 //   INT-12   ambiguity reached interactive resolution in a non-TTY
 //            context (emitted by cli.mjs when NonInteractiveError fires)
 //   INT-13   unknown --quality-mode value
+//   INT-14   invalid --fanout-target value (must be a positive integer
+//            in [FANOUT_TARGET_MIN, FANOUT_TARGET_MAX])
+//   INT-15   invalid --max-depth value (must be a positive integer in
+//            [MAX_DEPTH_MIN, MAX_DEPTH_MAX])
 //
 // Plan shape (status === "ok"):
 //   {
@@ -72,6 +76,38 @@ export const VALID_QUALITY_MODES = Object.freeze([
   "tier0-only",
   "deterministic",
 ]);
+
+// Range bounds for the balance-enforcement flags (`--fanout-target`,
+// `--max-depth`). Exported so tests and the balance module can
+// reference them directly without re-stating the literal values.
+//
+// The ranges cover the band where a post-convergence rebalance pass
+// has a meaningful effect. Fanout 1 is degenerate (every split forces
+// single-child chains); 100+ is effectively unbounded for any real
+// corpus (the cluster detector caps individual clusters at 8).
+// Max depth 0 means "no nesting" (the flat-layout case, which the
+// regular NEST operator already handles); 11+ is deeper than any
+// hand-authored corpus anyone has reported. Out-of-range values are
+// treated as user errors at intent time so the flag is never a
+// silent no-op at runtime.
+export const FANOUT_TARGET_MIN = 2;
+export const FANOUT_TARGET_MAX = 100;
+export const MAX_DEPTH_MIN = 1;
+export const MAX_DEPTH_MAX = 10;
+
+// Parse + validate an integer-in-range flag value. Returns a short
+// human-readable reason string when the value is invalid (for use in
+// the ambiguity error), or null when valid. Factored out so INT-14
+// and INT-15 share one implementation.
+function invalidIntInRange(raw, min, max) {
+  if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
+    return `expected a positive integer, got "${raw}"`;
+  }
+  const n = Number.parseInt(raw, 10);
+  if (n < min) return `${n} is below the minimum ${min}`;
+  if (n > max) return `${n} is above the maximum ${max}`;
+  return null;
+}
 
 export function ok(plan) {
   return { status: "ok", plan };
@@ -265,6 +301,42 @@ export function resolveIntent(ctx) {
       })),
       "--quality-mode",
     );
+  }
+  if (f.fanout_target !== undefined) {
+    const bad = invalidIntInRange(
+      f.fanout_target,
+      FANOUT_TARGET_MIN,
+      FANOUT_TARGET_MAX,
+    );
+    if (bad) {
+      return ambiguous(
+        "INT-14",
+        `invalid --fanout-target "${f.fanout_target}" (${bad})`,
+        [
+          {
+            description: `use a positive integer in [${FANOUT_TARGET_MIN}, ${FANOUT_TARGET_MAX}]`,
+            flag: "--fanout-target <integer>",
+          },
+        ],
+        "--fanout-target",
+      );
+    }
+  }
+  if (f.max_depth !== undefined) {
+    const bad = invalidIntInRange(f.max_depth, MAX_DEPTH_MIN, MAX_DEPTH_MAX);
+    if (bad) {
+      return ambiguous(
+        "INT-15",
+        `invalid --max-depth "${f.max_depth}" (${bad})`,
+        [
+          {
+            description: `use a positive integer in [${MAX_DEPTH_MIN}, ${MAX_DEPTH_MAX}]`,
+            flag: "--max-depth <integer>",
+          },
+        ],
+        "--max-depth",
+      );
+    }
   }
   if (f.layout_mode === "in-place" && f.target) {
     return ambiguous(

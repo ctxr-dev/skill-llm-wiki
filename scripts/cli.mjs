@@ -378,6 +378,8 @@ const FLAG_WITH_VALUE = new Set([
   "--to",
   "--canonical",
   "--quality-mode",
+  "--fanout-target",
+  "--max-depth",
 ]);
 const FLAG_BOOLEAN = new Set([
   "--no-prompt",

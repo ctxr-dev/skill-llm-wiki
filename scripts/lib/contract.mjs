@@ -135,6 +135,8 @@ const SUBCOMMANDS = {
       "--layout-mode",
       "--target",
       "--quality-mode",
+      "--fanout-target",
+      "--max-depth",
       "--no-prompt",
       "--accept-dirty",
       "--accept-foreign-target",
@@ -143,12 +145,25 @@ const SUBCOMMANDS = {
   },
   extend: {
     positionals: ["wiki"],
-    flags: ["--quality-mode", "--no-prompt", "--json"],
+    flags: [
+      "--quality-mode",
+      "--fanout-target",
+      "--max-depth",
+      "--no-prompt",
+      "--json",
+    ],
   },
   validate: { positionals: ["wiki"], flags: ["--json"] },
   rebuild: {
     positionals: ["wiki"],
-    flags: ["--quality-mode", "--review", "--no-prompt", "--json"],
+    flags: [
+      "--quality-mode",
+      "--fanout-target",
+      "--max-depth",
+      "--review",
+      "--no-prompt",
+      "--json",
+    ],
   },
   fix: { positionals: ["wiki"], flags: ["--json"] },
   join: {

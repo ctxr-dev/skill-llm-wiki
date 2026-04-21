@@ -50,6 +50,7 @@ import {
   startCorpus,
 } from "./provenance.mjs";
 import { rmSync } from "node:fs";
+import { runBalance } from "./balance.mjs";
 import { runConvergence } from "./operators.mjs";
 import { runReviewCycle } from "../commands/review.mjs";
 import {
@@ -389,6 +390,52 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
         `${convergence.iterations} iteration(s); ` +
         `${convergence.suggestions.length} suggestion(s) recorded`,
     );
+
+    // Phase 4.3 — balance enforcement. Runs only when at least one
+    // of `--fanout-target` / `--max-depth` is set on the plan (both
+    // validated at intent time). No-op otherwise. Iterates until
+    // fixed point applying two transform classes:
+    //   - Sub-cluster an overfull directory (children > target × 1.5)
+    //     via the math cluster detector + deterministic naming,
+    //     reusing the same helpers Phase X.3 built for the
+    //     deterministic quality mode so two runs on the same tree
+    //     produce identical sub-clusters.
+    //   - Flatten an overdeep single-child passthrough by promoting
+    //     its only subdir up one level and rewriting descendants'
+    //     `parents[]` to match. Only pure passthroughs qualify —
+    //     multi-child subcategories would lose structure.
+    // The phase has its own commit cadence (one commit per apply);
+    // the same git-add + git-commit callback convergence uses wires
+    // into the private-git machinery. A no-op run (no overfull /
+    // overdeep candidates) leaves the working tree byte-identical.
+    const fanoutTarget = plan.flags?.fanout_target != null
+      ? Number.parseInt(plan.flags.fanout_target, 10)
+      : null;
+    const maxDepth = plan.flags?.max_depth != null
+      ? Number.parseInt(plan.flags.max_depth, 10)
+      : null;
+    if (fanoutTarget != null || maxDepth != null) {
+      const balance = await runBalance(wikiRoot, {
+        opId,
+        qualityMode: plan.flags?.quality_mode || "tiered-fast",
+        fanoutTarget,
+        maxDepth,
+        commitBetweenIterations: async ({ iteration, operator, summary }) => {
+          gitRunChecked(wikiRoot, ["add", "-A"]);
+          if (!gitWorkingTreeClean(wikiRoot)) {
+            gitCommit(
+              wikiRoot,
+              `phase balance-enforcement: iteration ${iteration} ${operator} — ${summary}`,
+            );
+          }
+        },
+      });
+      record(
+        "balance-enforcement",
+        `${balance.applied.length} operation(s) applied across ` +
+          `${balance.iterations} iteration(s); converged=${balance.converged}`,
+      );
+    }
 
     // Phase 4.5 — optional interactive review. Fires only when the
     // user passed --review AND convergence actually produced at
