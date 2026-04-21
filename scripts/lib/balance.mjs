@@ -308,7 +308,7 @@ export function applyBalanceFlatten(wikiRoot, passthroughDir) {
 //
 //   {
 //     iterations,
-//     applied: [{ operator, sources, describe }, ...],
+//     applied: [{ iteration, operator, sources, describe }, ...],
 //     nestedParents: Set<absolutePath>,  // augmented
 //     converged: boolean,
 //   }

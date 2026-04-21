@@ -333,7 +333,7 @@ Tiered-AI flags:
                                    (no Tier 2 calls) for byte-reproducible
                                    builds. See guide/tiered-ai.md.
 
-Balance-enforcement flags (build/extend/rebuild):
+Balance-enforcement flags (build/rebuild):
   --fanout-target <N>              Post-convergence phase ATTEMPTS to
                                    sub-cluster any directory whose movable
                                    leaf count exceeds N × 1.5 (subdirs aren't

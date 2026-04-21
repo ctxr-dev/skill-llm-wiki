@@ -454,9 +454,11 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
         throw new Error(
           `balance enforcement did not converge after ${balance.iterations} ` +
             `iteration(s) (cap=${MAX_BALANCE_ITERATIONS}); applied ` +
-            `${balance.applied.length} op(s). Inspect .work/${opId}/ for ` +
-            `per-iteration state and reduce --fanout-target / --max-depth ` +
-            `strictness, or file a ping-pong repro.`,
+            `${balance.applied.length} op(s). Inspect the private git ` +
+            `history (\`git -C ${wikiRoot} log\` in the .llmwiki private ` +
+            `repo) for the per-iteration commits balance produced, and ` +
+            `reduce --fanout-target / --max-depth strictness, or file a ` +
+            `ping-pong repro.`,
         );
       }
     }
