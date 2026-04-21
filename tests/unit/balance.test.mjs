@@ -305,16 +305,19 @@ test("runBalance: fanout-only pass sub-clusters an overfull directory", async ()
 test("runBalance: depth-only pass flattens a passthrough chain", async () => {
   const wiki = tmpWiki("depth-only");
   try {
+    // Build a depth-3 tree where `a/b/` is a passthrough: it holds
+    // exactly one subdir (`c/`) and zero leaves. At maxDepth=1 it
+    // exceeds the allowed depth (b is at depth 2) and qualifies for
+    // flattening. Using maxDepth=1 — the in-range minimum per the
+    // intent validator — keeps this test exercising the SAME runtime
+    // value that the CLI would produce on `--max-depth 1`.
     writeIndex(wiki, "index.md", basename(wiki));
     writeIndex(wiki, "a/index.md", "a");
     writeIndex(wiki, "a/b/index.md", "b");
-    writeLeaf(wiki, "a/b/leaf.md", "leaf");
-    // a/b/ is a depth-2 passthrough (1 subdir, 0 leaves … wait, no).
-    // Actually "a/b/" holds leaf.md so it has 1 leaf + 0 subdirs.
-    // "a/" is depth 1, holds 1 subdir + 0 leaves — that's a
-    // passthrough. At maxDepth=0 it exceeds and qualifies.
+    writeIndex(wiki, "a/b/c/index.md", "c");
+    writeLeaf(wiki, "a/b/c/leaf.md", "leaf");
     const r = await runBalance(wiki, {
-      maxDepth: 0,
+      maxDepth: 1,
     });
     assert.ok(r.iterations >= 1);
     const flattened = r.applied.some((a) => a.operator === "BALANCE_FLATTEN");

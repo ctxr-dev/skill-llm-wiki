@@ -326,9 +326,22 @@ Layout-mode flags (build/extend/rebuild/fix/join):
   --target <path>                  Explicit destination (required for hosted)
 
 Tiered-AI flags:
-  --quality-mode tiered-fast|claude-first|tier0-only
+  --quality-mode tiered-fast|claude-first|tier0-only|deterministic
                                    Default: tiered-fast (TF-IDF → embeddings
-                                   → Claude ladder). See guide/tiered-ai.md.
+                                   → Claude ladder). The 'deterministic' mode
+                                   resolves every decision algorithmically
+                                   (no Tier 2 calls) for byte-reproducible
+                                   builds. See guide/tiered-ai.md.
+
+Balance-enforcement flags (build/extend/rebuild):
+  --fanout-target <N>              Post-convergence phase sub-clusters any
+                                   directory whose combined leaf+subdir count
+                                   exceeds N × 1.5. N must be an integer in
+                                   [2, 100]. No-op when omitted.
+  --max-depth <D>                  Post-convergence phase flattens any
+                                   single-child passthrough deeper than D. D
+                                   must be an integer in [1, 10]. No-op when
+                                   omitted.
 
 UX flags:
   --no-prompt                      Never prompt; fail loud on ambiguity

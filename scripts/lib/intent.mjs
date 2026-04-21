@@ -85,11 +85,15 @@ export const VALID_QUALITY_MODES = Object.freeze([
 // has a meaningful effect. Fanout 1 is degenerate (every split forces
 // single-child chains); 100+ is effectively unbounded for any real
 // corpus (the cluster detector caps individual clusters at 8).
-// Max depth 0 means "no nesting" (the flat-layout case, which the
-// regular NEST operator already handles); 11+ is deeper than any
-// hand-authored corpus anyone has reported. Out-of-range values are
-// treated as user errors at intent time so the flag is never a
-// silent no-op at runtime.
+// Max depth starts at 1 — the "no nesting"/flat-layout case is out
+// of this flag's scope; balance's purpose is to flatten OVERDEEP
+// branches, not to undo nesting the pipeline already decided to
+// create, and the regular NEST operator handles the no-nesting
+// starting condition anyway. 11+ max-depth is deeper than any
+// hand-authored corpus anyone has reported, so the flag becomes a
+// silent no-op above that. Out-of-range values are treated as user
+// errors at intent time so the flag is never a silent no-op at
+// runtime.
 export const FANOUT_TARGET_MIN = 2;
 export const FANOUT_TARGET_MAX = 100;
 export const MAX_DEPTH_MIN = 1;

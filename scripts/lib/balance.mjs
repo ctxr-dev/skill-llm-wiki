@@ -24,19 +24,18 @@
 // runs on the same tree produce the same output.
 //
 // The caller — orchestrator.mjs — invokes runBalance between the main
-// convergence phase and the index-regeneration phase, passes through
-// the `nestedParents` set so balance's own NEST applications don't
-// get re-clustered by a subsequent convergence sweep, and receives
-// the updated set back.
+// convergence phase (Phase 4) and the index-regeneration phase
+// (Phase 5). An optional `nestedParents` set can be passed in to
+// opt specific directories out of the sub-cluster pass (balance
+// adds its own newly-created subdirs to the same set across
+// iterations so a freshly-created subdir never gets re-clustered
+// on the next pass). The current orchestrator call site doesn't
+// thread convergence's own nestedParents through — it passes an
+// empty set — because balance targets overfull / overdeep dirs
+// specifically, and convergence leaves exactly those as its
+// residual "we didn't nest this deep enough" surface.
 
-import {
-  existsSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, renameSync, rmSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import {
   buildSiblingIdfContext,
@@ -44,7 +43,6 @@ import {
   detectClusters,
   generateDeterministicSlug,
 } from "./cluster-detect.mjs";
-import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
 import { listChildren, rebuildAllIndices } from "./indices.mjs";
 import {
   applyNest,
@@ -176,14 +174,35 @@ export function detectDepthOverage(wikiRoot, maxDepth) {
 // Promote a single-child passthrough's only subdir up one level,
 // replacing the passthrough itself. The passthrough's index.md is
 // removed; the promoted subdir's contents live directly under the
-// passthrough's parent dir. Every descendant's `parents[]` is
-// rewritten so POSIX-relative paths still resolve correctly.
+// passthrough's parent dir.
 //
-// Returns { promoted, removed, count } where:
+// The `parents[]` frontmatter field on every descendant is a POSIX-
+// RELATIVE path to the file's DIRECT parent index.md — in practice
+// either `"index.md"` (for leaves, pointing to their same-dir index)
+// or `"../index.md"` (for subcategory index.md files, pointing to
+// the index in the dir above). Because every file in the promoted
+// subtree moves up by exactly one level TOGETHER — both the file
+// and its direct-parent index.md — the relative path between them
+// is invariant. A leaf at `pass/child/leaf.md` with
+// `parents: ["index.md"]` becomes `child/leaf.md` after flatten, and
+// `"index.md"` still resolves to its direct parent (which also
+// moved). A subcategory index at `pass/child/index.md` with
+// `parents: ["../index.md"]` becomes `child/index.md` post-flatten;
+// its `"../index.md"` semantically shifts from "pass/index.md"
+// (which is being deleted) to "parent/index.md" (the new direct
+// parent), which is exactly the right re-parenting.
+//
+// In other words: no parents[] rewrite is needed. An earlier draft
+// of this function attempted to strip one leading `"../"` from every
+// parents[] entry, but that was wrong — it would rewrite valid
+// `"../index.md"` references on subcategory indices into
+// `"index.md"`, self-pointing. Leaving parents[] alone is both
+// simpler and correct.
+//
+// Returns { promoted, removed } where:
 //   promoted — the new absolute path of the promoted subdir.
 //   removed — the absolute path that no longer exists (the old
-//             passthrough, which has been renamed to its parent).
-//   count — number of descendant files whose parents[] were rewritten.
+//             passthrough).
 export function applyBalanceFlatten(wikiRoot, passthroughDir) {
   const { subdirs, leaves } = listChildren(passthroughDir);
   if (leaves.length !== 0 || subdirs.length !== 1) {
@@ -199,77 +218,13 @@ export function applyBalanceFlatten(wikiRoot, passthroughDir) {
       `balance-flatten: promote target ${relative(wikiRoot, promotedPath)} already exists`,
     );
   }
-  // The promoted subdir renames from `parent/passthrough/childName` to
-  // `parent/childName`. To keep the operation idempotent on the child
-  // itself (its basename stays the same), we rename the PASSTHROUGH
-  // dir to a temporary name first, move the child out, then remove
-  // the now-empty passthrough.
-  //
-  // Simpler: `renameSync(child, promotedPath)` atomically moves the
-  // child into its grandparent's directory. Then we drop the empty
-  // passthrough dir + its index.md.
+  // Atomically move the child into its grandparent's directory, then
+  // drop the now-empty passthrough + its index.md.
   renameSync(child, promotedPath);
-  // Remove the passthrough's index.md and empty dir.
   const passIdx = join(passthroughDir, "index.md");
   if (existsSync(passIdx)) rmSync(passIdx, { force: true });
   rmSync(passthroughDir, { recursive: true, force: true });
-
-  // Walk the promoted subtree rewriting parents[] on every .md.
-  // Each descendant's parents[] pointed at a prefix that included
-  // the passthrough; now that the passthrough is gone, the parent
-  // chain is one segment shorter.
-  const count = rewriteParentsAfterLift(promotedPath);
-  return { promoted: promotedPath, removed: passthroughDir, count };
-}
-
-// Walk every .md under `root` and rewrite its `parents[]` so the
-// paths point at the current parent directory after a flatten. Since
-// frontmatter paths are relative, and flatten removes exactly one
-// ancestor directory, we can mechanically drop one "../" from any
-// parents[] entry that traverses through the removed segment.
-//
-// Returns the number of files rewritten. Idempotent: files with no
-// parents[] or already-canonical parents[] are untouched.
-function rewriteParentsAfterLift(root) {
-  let count = 0;
-  const stack = [root];
-  while (stack.length > 0) {
-    const dir = stack.pop();
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      if (entry.name.startsWith(".")) continue;
-      const entryPath = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(entryPath);
-        continue;
-      }
-      if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
-      try {
-        const raw = readFileSync(entryPath, "utf8");
-        const { data, body } = parseFrontmatter(raw, entryPath);
-        if (!Array.isArray(data?.parents) || data.parents.length === 0) continue;
-        const rewritten = data.parents.map((p) => {
-          if (typeof p !== "string") return p;
-          // Strip exactly one leading "../" if present — that's the
-          // segment the flatten removed.
-          return p.startsWith("../") ? p.slice(3) : p;
-        });
-        if (rewritten.some((p, i) => p !== data.parents[i])) {
-          data.parents = rewritten;
-          writeFileSync(entryPath, renderFrontmatter(data, body), "utf8");
-          count++;
-        }
-      } catch {
-        /* skip unreadable / malformed */
-      }
-    }
-  }
-  return count;
+  return { promoted: promotedPath, removed: passthroughDir };
 }
 
 // Run the balance phase to fixed point. Returns
@@ -329,8 +284,7 @@ export async function runBalance(wikiRoot, ctx = {}) {
           sources: [chosen],
           describe:
             `flattened passthrough ${relative(wikiRoot, chosen)} ` +
-            `(promoted ${relative(wikiRoot, result.promoted)}, ` +
-            `${result.count} descendants rewritten)`,
+            `(promoted ${relative(wikiRoot, result.promoted)})`,
         });
         await commitBetweenIterations({
           iteration,
@@ -378,20 +332,15 @@ export async function runBalance(wikiRoot, ctx = {}) {
           const resolvedSlug = resolveNestSlug(slug, chosen, wikiRoot, {
             wikiIndex,
           });
-          let result;
-          try {
-            result = applyNest(wikiRoot, chosen, resolvedSlug);
-          } catch (err) {
-            // Log and skip; next iteration will re-evaluate. We do
-            // NOT roll back here — applyNest throws before mutating.
-            applied.push({
-              iteration,
-              operator: "BALANCE_SUBCLUSTER",
-              sources: chosen.leaves.map((l) => l.path),
-              describe: `sub-cluster apply failed in ${relative(wikiRoot, parentDir)}: ${err.message}`,
-            });
-            break;
-          }
+          // Let applyNest's errors propagate up to the orchestrator's
+          // pre-op snapshot rollback. applyNest performs several
+          // non-atomic operations (mkdir, move-per-leaf, stub write)
+          // after the cheap pre-checks, so a mid-apply failure leaves
+          // a partially-mutated wiki. Swallowing the error here and
+          // continuing the loop would commit that partial state; the
+          // orchestrator's catch block restores the pre-op snapshot
+          // cleanly.
+          const result = applyNest(wikiRoot, chosen, resolvedSlug);
           rebuildAllIndices(wikiRoot);
           nestedParents.add(result.target_dir);
           applied.push({
