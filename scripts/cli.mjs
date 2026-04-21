@@ -335,8 +335,11 @@ Tiered-AI flags:
 
 Balance-enforcement flags (build/extend/rebuild):
   --fanout-target <N>              Post-convergence phase sub-clusters any
-                                   directory whose combined leaf+subdir count
-                                   exceeds N × 1.5. N must be an integer in
+                                   directory whose movable leaf count exceeds
+                                   N × 1.5 (subdirs aren't counted — the
+                                   rebalance can only carve clusters from
+                                   leaves, so subdir-heavy dirs are
+                                   un-actionable). N must be an integer in
                                    [2, 100]. No-op when omitted.
   --max-depth <D>                  Post-convergence phase flattens any
                                    single-child passthrough deeper than D. D

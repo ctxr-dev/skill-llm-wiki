@@ -35,7 +35,7 @@
 // specifically, and convergence leaves exactly those as its
 // residual "we didn't nest this deep enough" surface.
 
-import { existsSync, renameSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, renameSync, rmSync, rmdirSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import {
   buildSiblingIdfContext,
@@ -98,17 +98,25 @@ export function getMaxDepth(wikiRoot) {
   return max;
 }
 
-// Compute fan-out statistics across every directory. Returns
+// Compute fan-out statistics across every directory in a single
+// traversal. Returns
 //
-//   { maxFanout, avgFanout, perDir: Map<dir, number> }
+//   {
+//     maxFanout,
+//     avgFanout,
+//     perDir: Map<dir, number>,    // combined leaves+subdirs
+//     leafCounts: Map<dir, number>, // leaves only
+//   }
 //
-// where `perDir[dir]` counts the combined leaf + subdir children
-// under each directory. The combined count matches what a
-// Claude-navigating query faces when routing — an index lists both
-// leaves and subcategories — so fan-out is the sum of both shapes,
-// not just one.
+// `perDir` counts the combined leaf + subdir children — the Claude-
+// routing-cost view (an index lists both shapes). `leafCounts` holds
+// leaves only — the movable-fanout view consumed by
+// `detectFanoutOverload`. Both maps are produced in the same
+// `listChildren` sweep so callers that want both never pay a second
+// walk on large corpora.
 export function computeFanoutStats(wikiRoot) {
   const perDir = new Map();
+  const leafCounts = new Map();
   let total = 0;
   let count = 0;
   let max = 0;
@@ -118,13 +126,14 @@ export function computeFanoutStats(wikiRoot) {
     const { leaves, subdirs } = listChildren(dir);
     const fan = leaves.length + subdirs.length;
     perDir.set(dir, fan);
+    leafCounts.set(dir, leaves.length);
     total += fan;
     count++;
     if (fan > max) max = fan;
     for (const sub of subdirs) stack.push(sub);
   }
   const avg = count > 0 ? total / count : 0;
-  return { maxFanout: max, avgFanout: avg, perDir };
+  return { maxFanout: max, avgFanout: avg, perDir, leafCounts };
 }
 
 // Detect directories whose MOVABLE fan-out EXCEEDS fanoutTarget ×
@@ -143,13 +152,15 @@ export function computeFanoutStats(wikiRoot) {
 // that's the "let the op settle" discipline convergence already uses.
 export function detectFanoutOverload(wikiRoot, fanoutTarget, nestedParents = new Set()) {
   const threshold = fanoutTarget * FANOUT_OVERLOAD_MULTIPLIER;
-  const { perDir } = computeFanoutStats(wikiRoot);
-  const dirs = Array.from(perDir.keys())
+  // Single traversal: computeFanoutStats walks every dir once via
+  // listChildren and returns both leaf counts and combined counts. A
+  // previous draft filtered on perDir and then called listChildren
+  // again per candidate, doubling the I/O — the new `leafCounts` map
+  // keeps everything to one sweep regardless of tree size.
+  const { leafCounts } = computeFanoutStats(wikiRoot);
+  const dirs = Array.from(leafCounts.keys())
     .filter((d) => !nestedParents.has(d))
-    .filter((d) => {
-      const { leaves } = listChildren(d);
-      return leaves.length > threshold;
-    });
+    .filter((d) => leafCounts.get(d) > threshold);
   dirs.sort((a, b) => relative(wikiRoot, a).localeCompare(relative(wikiRoot, b)));
   return dirs;
 }
@@ -233,7 +244,26 @@ export function applyBalanceFlatten(wikiRoot, passthroughDir) {
   renameSync(child, promotedPath);
   const passIdx = join(passthroughDir, "index.md");
   if (existsSync(passIdx)) rmSync(passIdx, { force: true });
-  rmSync(passthroughDir, { recursive: true, force: true });
+  // Defensive emptiness check before the recursive rmSync. listChildren
+  // enumerates only `.md` leaves and subdirs-containing-index.md, so
+  // non-`.md` content (assets/, stray README.txt, subdirs without an
+  // index.md) is invisible to the detector even though it would be
+  // silently deleted by `rmSync(dir, { recursive: true })`. Mirror
+  // `operators.mjs::applyLift`'s pattern: readdir, refuse on non-empty,
+  // then rmSync. Readdir errors are soft (directory may have been
+  // moved/deleted by a concurrent process) — re-raise so the
+  // orchestrator's pre-op snapshot restores.
+  const remaining = readdirSync(passthroughDir);
+  if (remaining.length > 0) {
+    throw new Error(
+      `balance-flatten: ${relative(wikiRoot, passthroughDir)} unexpectedly non-empty ` +
+        `after child promotion (remaining: ${JSON.stringify(remaining)}); ` +
+        `refusing recursive rmSync to avoid silent data loss`,
+    );
+  }
+  // rmdirSync refuses non-empty dirs natively (ENOTEMPTY), giving a
+  // second layer of protection on top of the readdir check above.
+  rmdirSync(passthroughDir);
   return { promoted: promotedPath, removed: passthroughDir };
 }
 
@@ -275,6 +305,21 @@ export async function runBalance(wikiRoot, ctx = {}) {
   const applied = [];
   let iteration = 0;
   let reachedFixedPoint = false;
+  // Build the wiki-wide forbidden-id index once up front and mutate
+  // it after each successful BALANCE_SUBCLUSTER (add the new subdir's
+  // slug). Previous drafts called `buildWikiForbiddenIndex` inside
+  // the per-iteration overfull loop, which walked every file in the
+  // wiki on each candidate attempt — fine at small-corpus scale but
+  // quadratic on the main target-workload for balance enforcement
+  // (the hand-authored 596-leaf consumer corpus). Mirrors the reuse
+  // pattern in `operators.mjs::tryClusterNestIteration`.
+  //
+  // BALANCE_FLATTEN doesn't mutate the index: a flattened passthrough's
+  // basename stays in the set (stale, conservative — may trigger a
+  // `-group-N` fallback on a future attempt using that exact basename
+  // as a slug, which is safe because renaming-into-a-now-free-slot is
+  // cheaper to re-do than walking the full wiki again per iteration).
+  const wikiIndex = buildWikiForbiddenIndex(wikiRoot);
   while (iteration < MAX_BALANCE_ITERATIONS) {
     iteration++;
     let didWork = false;
@@ -347,7 +392,6 @@ export async function runBalance(wikiRoot, ctx = {}) {
         chosen.source = "math";
         chosen.slug = slug;
         chosen.purpose = purpose;
-        const wikiIndex = buildWikiForbiddenIndex(wikiRoot);
         const resolvedSlug = resolveNestSlug(slug, chosen, wikiRoot, {
           wikiIndex,
         });
@@ -362,6 +406,11 @@ export async function runBalance(wikiRoot, ctx = {}) {
         const result = applyNest(wikiRoot, chosen, resolvedSlug);
         rebuildAllIndices(wikiRoot);
         nestedParents.add(result.target_dir);
+        // Mutate the pre-built wiki-forbidden index so the next
+        // resolveNestSlug call in this run sees the new subdir as
+        // occupied — skips the full-tree rebuild the nest-applier
+        // mutation contract expects.
+        wikiIndex.add(resolvedSlug);
         applied.push({
           iteration,
           operator: "BALANCE_SUBCLUSTER",

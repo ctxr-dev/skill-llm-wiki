@@ -94,7 +94,7 @@ test("getMaxDepth: returns the deepest directory's depth", () => {
   }
 });
 
-test("computeFanoutStats: counts leaves + subdirs per directory", () => {
+test("computeFanoutStats: counts leaves + subdirs per directory (and returns leafCounts)", () => {
   const wiki = tmpWiki("fanout");
   try {
     writeIndex(wiki, "index.md", basename(wiki));
@@ -102,10 +102,12 @@ test("computeFanoutStats: counts leaves + subdirs per directory", () => {
     writeIndex(wiki, "sub/index.md", "sub");
     writeLeaf(wiki, "sub/child.md", "child");
     const stats = computeFanoutStats(wiki);
-    // Root: 7 leaves + 1 subdir = 8
+    // Root: 7 leaves + 1 subdir = 8 combined, 7 leaves
     assert.equal(stats.perDir.get(wiki), 8);
-    // sub: 1 leaf + 0 subdirs = 1
+    assert.equal(stats.leafCounts.get(wiki), 7);
+    // sub: 1 leaf + 0 subdirs = 1 combined, 1 leaf
     assert.equal(stats.perDir.get(join(wiki, "sub")), 1);
+    assert.equal(stats.leafCounts.get(join(wiki, "sub")), 1);
     assert.equal(stats.maxFanout, 8);
   } finally {
     rmSync(wiki, { recursive: true, force: true });
@@ -270,6 +272,37 @@ test("applyBalanceFlatten: refuses to flatten non-passthrough", () => {
     assert.throws(
       () => applyBalanceFlatten(wiki, join(wiki, "multi")),
       /not a single-child passthrough/,
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("applyBalanceFlatten: refuses to rmSync a passthrough with stray non-listChildren content", () => {
+  const wiki = tmpWiki("flatten-stray");
+  try {
+    // Build a pure single-child passthrough as detectDepthOverage sees
+    // it: listChildren returns {leaves: 0, subdirs: 1}. But plant a
+    // stray non-.md file alongside — e.g., an asset left over from a
+    // manual edit or a README.txt. listChildren ignores it, but a
+    // naive `rmSync(passthroughDir, {recursive: true})` would silently
+    // wipe it out. The defensive emptiness check must catch this.
+    writeIndex(wiki, "index.md", basename(wiki));
+    writeIndex(wiki, "pass/index.md", "pass");
+    writeIndex(wiki, "pass/child/index.md", "child");
+    writeLeaf(wiki, "pass/child/leaf.md", "leaf");
+    writeFileSync(join(wiki, "pass", "unexpected-asset.bin"), "binary-content");
+    assert.throws(
+      () => applyBalanceFlatten(wiki, join(wiki, "pass")),
+      /unexpectedly non-empty/,
+      "must refuse rather than silently delete unexpected content",
+    );
+    // The stray file must still be there after the refusal (rollback
+    // happens via the orchestrator's snapshot; we just need to confirm
+    // the function itself didn't touch it).
+    assert.ok(
+      existsSync(join(wiki, "pass", "unexpected-asset.bin")),
+      "stray file must survive the refusal",
     );
   } finally {
     rmSync(wiki, { recursive: true, force: true });

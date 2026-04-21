@@ -395,11 +395,14 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     // of `--fanout-target` / `--max-depth` is set on the plan (both
     // validated at intent time). No-op otherwise. Iterates until
     // fixed point applying two transform classes:
-    //   - Sub-cluster an overfull directory (children > target × 1.5)
-    //     via the math cluster detector + deterministic naming,
-    //     reusing the same helpers Phase X.3 built for the
-    //     deterministic quality mode so two runs on the same tree
-    //     produce identical sub-clusters.
+    //   - Sub-cluster an overfull directory (movable leaf count >
+    //     target × 1.5 — subdirs are structurally cemented and can't
+    //     be carved by the math cluster detector, so a dir overfull
+    //     *only* due to subdirs is un-actionable and is skipped) via
+    //     the math cluster detector + deterministic naming, reusing
+    //     the same helpers Phase X.3 built for the deterministic
+    //     quality mode so two runs on the same tree produce identical
+    //     sub-clusters.
     //   - Flatten an overdeep single-child passthrough by promoting
     //     its only subdir up one level. Descendants' `parents[]`
     //     paths are left unchanged — they are relative to the direct
@@ -438,6 +441,23 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
         `${balance.applied.length} operation(s) applied across ` +
           `${balance.iterations} iteration(s); converged=${balance.converged}`,
       );
+      if (!balance.converged) {
+        // Enforcement contract: a user who asked for a balanced tree
+        // expects the post-convergence shape to honour `--fanout-target`
+        // / `--max-depth`. Hitting the 20-iteration cap means the
+        // rebalance didn't reach a fixed point — any downstream
+        // assumption "the tree is now balanced" would silently be
+        // wrong. Fail loud here so the orchestrator's pre-op snapshot
+        // restores and the user sees the problem, instead of shipping
+        // a half-balanced wiki with no error.
+        throw new Error(
+          `balance enforcement did not converge after ${balance.iterations} ` +
+            `iteration(s) (cap=${balance.iterations}); applied ` +
+            `${balance.applied.length} op(s). Inspect .llmwiki/.work/ for ` +
+            `per-iteration state and reduce --fanout-target / --max-depth ` +
+            `strictness, or file a ping-pong repro.`,
+        );
+      }
     }
 
     // Phase 4.5 — optional interactive review. Fires only when the
