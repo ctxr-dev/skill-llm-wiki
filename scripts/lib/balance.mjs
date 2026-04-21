@@ -110,9 +110,13 @@ export function computeDepthMap(wikiRoot) {
   return out;
 }
 
-// Get the maximum routable depth in the wiki. Useful for the
-// orchestrator's audit-trail decision on whether the balance phase
-// needs to run at all.
+// Get the maximum routable depth in the wiki. Small summary helper
+// for diagnostics and unit tests — callers that only need the
+// deepest reachable routable directory depth don't have to inflate
+// a full `computeDepthMap` into userland. Not wired into the
+// orchestrator today; kept on the exported surface so a future
+// audit-trail or `--dry-run` pre-flight can surface "would balance
+// do anything at all?" cheaply.
 export function getMaxDepth(wikiRoot) {
   let max = 0;
   for (const d of computeDepthMap(wikiRoot).values()) {
