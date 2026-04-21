@@ -166,7 +166,7 @@ test("detectDepthOverage: returns only single-child passthroughs beyond maxDepth
     writeLeaf(wiki, "x/y/z/first.md", "first");
     writeLeaf(wiki, "x/y/z/second.md", "second");
 
-    // At maxDepth=2, /a/b/ (depth 2, single subdir, no leaves) is a
+    // At maxDepth=1, /a/b/ (depth 2, single subdir, no leaves) is a
     // passthrough and exceeds target. /a/b/c/ (depth 3) is NOT a
     // passthrough because it holds a leaf. /x/y/ (depth 2, 1 subdir, 0
     // leaves) is also a passthrough.
@@ -189,7 +189,7 @@ test("detectDepthOverage: returns only single-child passthroughs beyond maxDepth
   }
 });
 
-test("applyBalanceFlatten: promotes single child + rewrites descendant parents[]", () => {
+test("applyBalanceFlatten: promotes single child and preserves unchanged parents[] references", () => {
   const wiki = tmpWiki("flatten");
   try {
     // parent/pass/target/leaf.md — flatten `pass` so target moves up

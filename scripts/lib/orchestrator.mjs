@@ -401,9 +401,12 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     //     deterministic quality mode so two runs on the same tree
     //     produce identical sub-clusters.
     //   - Flatten an overdeep single-child passthrough by promoting
-    //     its only subdir up one level and rewriting descendants'
-    //     `parents[]` to match. Only pure passthroughs qualify —
-    //     multi-child subcategories would lose structure.
+    //     its only subdir up one level. Descendants' `parents[]`
+    //     paths are left unchanged — they are relative to the direct
+    //     parent's `index.md`, so promoting an entire subtree up one
+    //     level preserves every relative path by construction. Only
+    //     pure passthroughs qualify; multi-child subcategories would
+    //     lose structure.
     // The phase has its own commit cadence (one commit per apply);
     // the same git-add + git-commit callback convergence uses wires
     // into the private-git machinery. A no-op run (no overfull /

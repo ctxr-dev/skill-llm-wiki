@@ -264,6 +264,7 @@ export async function runBalance(wikiRoot, ctx = {}) {
 
   const applied = [];
   let iteration = 0;
+  let reachedFixedPoint = false;
   while (iteration < MAX_BALANCE_ITERATIONS) {
     iteration++;
     let didWork = false;
@@ -370,9 +371,14 @@ export async function runBalance(wikiRoot, ctx = {}) {
       }
     }
 
-    if (!didWork) break; // converged
+    if (!didWork) {
+      // Fixed point: one full pass with neither phase finding work.
+      // This is the *only* clean-exit signal — an iteration cap hit is
+      // a non-convergence failure regardless of how many ops fired.
+      reachedFixedPoint = true;
+      break;
+    }
   }
 
-  const converged = iteration < MAX_BALANCE_ITERATIONS;
-  return { iterations: iteration, applied, nestedParents, converged };
+  return { iterations: iteration, applied, nestedParents, converged: reachedFixedPoint };
 }
