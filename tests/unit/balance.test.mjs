@@ -294,15 +294,27 @@ test("applyBalanceFlatten: refuses to rmSync a passthrough with stray non-listCh
     writeFileSync(join(wiki, "pass", "unexpected-asset.bin"), "binary-content");
     assert.throws(
       () => applyBalanceFlatten(wiki, join(wiki, "pass")),
-      /unexpectedly non-empty/,
+      /unexpected non-listChildren content/,
       "must refuse rather than silently delete unexpected content",
     );
-    // The stray file must still be there after the refusal (rollback
-    // happens via the orchestrator's snapshot; we just need to confirm
-    // the function itself didn't touch it).
+    // The refusal must happen BEFORE any filesystem mutation — the
+    // stray file is still there, the child is still at its original
+    // path (not promoted), and the passthrough index.md is intact.
     assert.ok(
       existsSync(join(wiki, "pass", "unexpected-asset.bin")),
       "stray file must survive the refusal",
+    );
+    assert.ok(
+      existsSync(join(wiki, "pass", "child", "index.md")),
+      "child must NOT have been promoted — preflight refuses before any mutation",
+    );
+    assert.ok(
+      existsSync(join(wiki, "pass", "index.md")),
+      "passthrough index.md must still exist — preflight refuses before rmSync",
+    );
+    assert.ok(
+      !existsSync(join(wiki, "child")),
+      "child must NOT have been moved to grandparent path",
     );
   } finally {
     rmSync(wiki, { recursive: true, force: true });

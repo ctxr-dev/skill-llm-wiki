@@ -55,7 +55,7 @@ import {
 // strictly reduces either |overfull dirs| or |overdeep branches|; the
 // cap is defensive in case pathological inputs (e.g. a sub-clustering
 // that produces a new overfull dir inside itself) trigger ping-pong.
-const MAX_BALANCE_ITERATIONS = 20;
+export const MAX_BALANCE_ITERATIONS = 20;
 
 // Fanout trigger: we apply sub-clustering only when a directory's
 // child count EXCEEDS this multiple of the user's target. Bare-equal
@@ -239,30 +239,40 @@ export function applyBalanceFlatten(wikiRoot, passthroughDir) {
       `balance-flatten: promote target ${relative(wikiRoot, promotedPath)} already exists`,
     );
   }
+  // Preflight: verify the passthrough dir contains ONLY the expected
+  // entries (the child subdir's basename + optionally `index.md`)
+  // BEFORE any filesystem mutation. listChildren enumerates only
+  // `.md` leaves and subdirs-containing-index.md, so non-`.md`
+  // content (assets/, stray README.txt, subdirs without an index.md)
+  // is invisible to the detector even though a later
+  // `rmSync(dir, {recursive: true})` would silently delete it. An
+  // earlier draft checked this AFTER the rename + index.md drop,
+  // which left the wiki partially-mutated (child already promoted,
+  // passthrough still present) when refusing — the caller's pre-op
+  // snapshot could undo it, but leaving the mutation/refusal ordering
+  // correct here makes the function itself atomic-or-untouched.
+  // Readdir errors are soft (directory may have been moved by a
+  // concurrent process) — re-raise so the orchestrator's snapshot
+  // restores.
+  const entries = readdirSync(passthroughDir);
+  const allowed = new Set([basename(child), "index.md"]);
+  const stray = entries.filter((e) => !allowed.has(e));
+  if (stray.length > 0) {
+    throw new Error(
+      `balance-flatten: ${relative(wikiRoot, passthroughDir)} holds unexpected ` +
+        `non-listChildren content (stray: ${JSON.stringify(stray)}); ` +
+        `refusing to flatten to avoid silent data loss`,
+    );
+  }
   // Atomically move the child into its grandparent's directory, then
   // drop the now-empty passthrough + its index.md.
   renameSync(child, promotedPath);
   const passIdx = join(passthroughDir, "index.md");
   if (existsSync(passIdx)) rmSync(passIdx, { force: true });
-  // Defensive emptiness check before the recursive rmSync. listChildren
-  // enumerates only `.md` leaves and subdirs-containing-index.md, so
-  // non-`.md` content (assets/, stray README.txt, subdirs without an
-  // index.md) is invisible to the detector even though it would be
-  // silently deleted by `rmSync(dir, { recursive: true })`. Mirror
-  // `operators.mjs::applyLift`'s pattern: readdir, refuse on non-empty,
-  // then rmSync. Readdir errors are soft (directory may have been
-  // moved/deleted by a concurrent process) — re-raise so the
-  // orchestrator's pre-op snapshot restores.
-  const remaining = readdirSync(passthroughDir);
-  if (remaining.length > 0) {
-    throw new Error(
-      `balance-flatten: ${relative(wikiRoot, passthroughDir)} unexpectedly non-empty ` +
-        `after child promotion (remaining: ${JSON.stringify(remaining)}); ` +
-        `refusing recursive rmSync to avoid silent data loss`,
-    );
-  }
-  // rmdirSync refuses non-empty dirs natively (ENOTEMPTY), giving a
-  // second layer of protection on top of the readdir check above.
+  // rmdirSync refuses non-empty dirs natively (ENOTEMPTY), so any
+  // unexpected mid-flight insertion between the preflight and here
+  // (e.g., a concurrent writer dropping a file into the passthrough)
+  // still fails loud rather than silently recursive-deleting.
   rmdirSync(passthroughDir);
   return { promoted: promotedPath, removed: passthroughDir };
 }

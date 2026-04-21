@@ -50,7 +50,7 @@ import {
   startCorpus,
 } from "./provenance.mjs";
 import { rmSync } from "node:fs";
-import { runBalance } from "./balance.mjs";
+import { MAX_BALANCE_ITERATIONS, runBalance } from "./balance.mjs";
 import { runConvergence } from "./operators.mjs";
 import { runReviewCycle } from "../commands/review.mjs";
 import {
@@ -452,8 +452,8 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
         // a half-balanced wiki with no error.
         throw new Error(
           `balance enforcement did not converge after ${balance.iterations} ` +
-            `iteration(s) (cap=${balance.iterations}); applied ` +
-            `${balance.applied.length} op(s). Inspect .llmwiki/.work/ for ` +
+            `iteration(s) (cap=${MAX_BALANCE_ITERATIONS}); applied ` +
+            `${balance.applied.length} op(s). Inspect .work/${opId}/ for ` +
             `per-iteration state and reduce --fanout-target / --max-depth ` +
             `strictness, or file a ping-pong repro.`,
         );
