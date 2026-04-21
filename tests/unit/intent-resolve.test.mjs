@@ -167,10 +167,12 @@ test("INT-14a: --fanout-target is rejected on subcommands other than build/rebui
   try {
     const src = join(parent, "docs");
     mkdirSync(src);
-    // Every non-{build,rebuild} op that accepts a positional wiki arg.
-    // The intent resolver fires INT-14a before any other check on the
-    // subcommand, so pairing with a trivial flags set is enough.
-    for (const sub of ["fix", "extend", "validate"]) {
+    // Every non-{build,rebuild} op that accepts a positional wiki arg
+    // (per contract.mjs::SUBCOMMANDS): fix, extend, validate, join,
+    // rollback. The intent resolver fires INT-14a before any other
+    // check on the subcommand, so pairing with a trivial flags set
+    // is enough.
+    for (const sub of ["fix", "extend", "validate", "join", "rollback"]) {
       const r = resolveIntent({
         subcommand: sub,
         args: [src],
@@ -217,7 +219,7 @@ test("INT-15a: --max-depth is rejected on subcommands other than build/rebuild",
   try {
     const src = join(parent, "docs");
     mkdirSync(src);
-    for (const sub of ["fix", "extend", "validate"]) {
+    for (const sub of ["fix", "extend", "validate", "join", "rollback"]) {
       const r = resolveIntent({
         subcommand: sub,
         args: [src],

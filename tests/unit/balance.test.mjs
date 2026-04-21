@@ -81,21 +81,33 @@ test("computeDepthMap: root is 0, children are 1, grandchildren are 2", () => {
   }
 });
 
-test("computeDepthMap: skips directories without index.md (non-wiki-node dirs)", () => {
-  const wiki = tmpWiki("depth-map-non-node");
+test("computeDepthMap: includes index-less directories (pre-Phase-5 category dirs)", () => {
+  const wiki = tmpWiki("depth-map-index-less");
   try {
     writeIndex(wiki, "index.md", basename(wiki));
+    // Two fixtures:
+    //  - `real/` with index.md (normal, post-bootstrap shape).
+    //  - `draft-category/` with leaves but NO index.md (simulating
+    //    the Phase-3 draft state: the category dir was mkdir'd by
+    //    draftCategory, leaves were written, but bootstrapIndexStubs
+    //    hasn't run yet). Balance runs at Phase 4.3 in this state.
+    //    The dir MUST appear in the depth map so the fanout + depth
+    //    passes can see it; a previous draft of computeDepthMap
+    //    required index.md and silently hid it.
     writeIndex(wiki, "real/index.md", "real");
     writeIndex(wiki, "real/child/index.md", "child");
-    // Drop a directory with no index.md and no leaves — NOT a wiki
-    // node. computeDepthMap must ignore it; otherwise the rebalance
-    // pass would claim the tree is deeper than it actually is.
-    mkdirSync(join(wiki, "assets"), { recursive: true });
-    writeFileSync(join(wiki, "assets", "logo.png"), "fake-png-bytes");
+    mkdirSync(join(wiki, "draft-category"), { recursive: true });
+    writeLeaf(wiki, "draft-category/leaf-a.md", "leaf-a");
+    writeLeaf(wiki, "draft-category/leaf-b.md", "leaf-b");
     const depths = computeDepthMap(wiki);
-    assert.ok(!depths.has(join(wiki, "assets")));
+    assert.equal(depths.get(wiki), 0);
     assert.equal(depths.get(join(wiki, "real")), 1);
     assert.equal(depths.get(join(wiki, "real", "child")), 2);
+    assert.equal(
+      depths.get(join(wiki, "draft-category")),
+      1,
+      "index-less draft-category must be present in depth map",
+    );
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }

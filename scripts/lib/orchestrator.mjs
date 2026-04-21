@@ -51,6 +51,12 @@ import {
   startCorpus,
 } from "./provenance.mjs";
 import { MAX_BALANCE_ITERATIONS, runBalance } from "./balance.mjs";
+import {
+  FANOUT_TARGET_MAX,
+  FANOUT_TARGET_MIN,
+  MAX_DEPTH_MAX,
+  MAX_DEPTH_MIN,
+} from "./intent.mjs";
 import { runConvergence } from "./operators.mjs";
 import { runReviewCycle } from "../commands/review.mjs";
 import {
@@ -426,14 +432,30 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     // over (NaN comparisons are false), potentially flattening the
     // wiki root and moving directories outside the wiki.
     const BALANCE_OPS = new Set(["build", "rebuild"]);
-    const parseBalanceInt = (raw) => {
+    // Strict parse: must be a canonical base-10 integer string (no
+    // leading `+`/`-`, no trailing garbage, no decimal parts, no
+    // scientific notation), and must fall inside the intent-validated
+    // range for its flag. `Number.parseInt` would accept `"3.5"` as
+    // `3` and `"5xyz"` as `5`, which an adversarial or faulty caller
+    // could use to bypass the range bounds. `/^\d+$/` + explicit
+    // bounds keep orchestrator behaviour aligned with what intent
+    // resolution already enforces (INT-14 / INT-15).
+    const parseBalanceInt = (raw, min, max) => {
       if (raw == null) return null;
-      const n = Number.parseInt(raw, 10);
-      return Number.isFinite(n) && n > 0 ? n : null;
+      const s = String(raw);
+      if (!/^\d+$/.test(s)) return null;
+      const n = Number.parseInt(s, 10);
+      if (!Number.isFinite(n)) return null;
+      if (n < min || n > max) return null;
+      return n;
     };
     const opSupportsBalance = BALANCE_OPS.has(plan.operation);
-    const fanoutTarget = opSupportsBalance ? parseBalanceInt(plan.flags?.fanout_target) : null;
-    const maxDepth = opSupportsBalance ? parseBalanceInt(plan.flags?.max_depth) : null;
+    const fanoutTarget = opSupportsBalance
+      ? parseBalanceInt(plan.flags?.fanout_target, FANOUT_TARGET_MIN, FANOUT_TARGET_MAX)
+      : null;
+    const maxDepth = opSupportsBalance
+      ? parseBalanceInt(plan.flags?.max_depth, MAX_DEPTH_MIN, MAX_DEPTH_MAX)
+      : null;
     let balance = null;
     if (fanoutTarget != null || maxDepth != null) {
       balance = await runBalance(wikiRoot, {

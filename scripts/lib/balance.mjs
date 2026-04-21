@@ -82,12 +82,14 @@ function posixSortKey(wikiRoot, p) {
 // the same blanket rule used elsewhere in the pipeline. Returns a
 // Map<absolutePath, number>.
 //
-// Implementation: directory-only scan via `readdirSync` + an
-// `index.md` presence check. `listChildren` would also work but
-// parses frontmatter for every `.md` leaf in each directory — depth
-// computation doesn't need that data, so the lightweight walk here
-// keeps `detectDepthOverage` (which calls `computeDepthMap` then
-// `listChildren` only on candidate dirs) cheaper on large corpora.
+// Implementation: directory-only scan via `readdirSync`. Walks every
+// non-dot child directory, regardless of whether it has `index.md`
+// yet — balance runs before Phase 5's `bootstrapIndexStubs`, so
+// category dirs created in Phase 3 draft can exist on disk with
+// leaves but no index.md. Requiring `index.md` here (as an earlier
+// draft did) would silently hide them from the rebalance pass.
+// Dot-prefixed directories are still skipped under the blanket
+// dot-skip rule shared across the pipeline.
 export function computeDepthMap(wikiRoot) {
   const out = new Map();
   out.set(wikiRoot, 0);
@@ -104,12 +106,7 @@ export function computeDepthMap(wikiRoot) {
     for (const e of entries) {
       if (e.name.startsWith(".")) continue;
       if (!e.isDirectory()) continue;
-      const full = join(dir, e.name);
-      // Mirror `listChildren`'s routable-subdir discipline: a directory
-      // without `index.md` isn't a wiki node, so it can't be part of
-      // the depth map.
-      if (!existsSync(join(full, "index.md"))) continue;
-      subdirs.push(full);
+      subdirs.push(join(dir, e.name));
     }
     // Sort lex so traversal order is deterministic.
     subdirs.sort((a, b) => basename(a).localeCompare(basename(b)));
@@ -151,8 +148,17 @@ export function getMaxDepth(wikiRoot) {
 // routing-cost view (an index lists both shapes). `leafCounts` holds
 // leaves only — the movable-fanout view consumed by
 // `detectFanoutOverload`. Both maps are produced in the same
-// `listChildren` sweep so callers that want both never pay a second
-// walk on large corpora.
+// `readdirSync` sweep.
+//
+// This walk does NOT use `listChildren` (which requires an `index.md`
+// to treat a directory as a routable subdir). Balance runs after
+// Phase 4 convergence, which only bootstraps index.md stubs on the
+// cluster-NEST path — builds where no NEST picks fire can still
+// carry category dirs created in Phase 3 draft that have leaves but
+// no index.md yet (bootstrapIndexStubs fills those in during Phase 5).
+// So balance must see them on its own. Leaves are counted as plain
+// `.md` files directly in the dir (excluding `index.md`); subdirs
+// are all non-dot child dirs regardless of index.md presence.
 export function computeFanoutStats(wikiRoot) {
   const perDir = new Map();
   const leafCounts = new Map();
@@ -162,10 +168,28 @@ export function computeFanoutStats(wikiRoot) {
   const stack = [wikiRoot];
   while (stack.length > 0) {
     const dir = stack.pop();
-    const { leaves, subdirs } = listChildren(dir);
-    const fan = leaves.length + subdirs.length;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    let leafCount = 0;
+    const subdirs = [];
+    for (const e of entries) {
+      if (e.name.startsWith(".")) continue;
+      if (e.isDirectory()) {
+        subdirs.push(join(dir, e.name));
+        continue;
+      }
+      if (!e.isFile()) continue;
+      if (!e.name.endsWith(".md")) continue;
+      if (e.name === "index.md") continue;
+      leafCount++;
+    }
+    const fan = leafCount + subdirs.length;
     perDir.set(dir, fan);
-    leafCounts.set(dir, leaves.length);
+    leafCounts.set(dir, leafCount);
     total += fan;
     count++;
     if (fan > max) max = fan;
@@ -212,16 +236,37 @@ export function detectFanoutOverload(wikiRoot, fanoutTarget, nestedParents = new
 // Returns the absolute paths of the passthrough directories to
 // collapse, in lex order. The caller applies LIFT-chain-style
 // flattening via `applyBalanceFlatten`.
+//
+// Traversal is filesystem-based (readdir, no index.md required) for
+// the same reason as computeFanoutStats / computeDepthMap — balance
+// runs before Phase 5's bootstrap stubs, so some routable dirs may
+// not yet have index.md.
 export function detectDepthOverage(wikiRoot, maxDepth) {
   const depths = computeDepthMap(wikiRoot);
   const candidates = [];
   for (const [dir, depth] of depths) {
     if (depth <= maxDepth) continue;
-    const { leaves, subdirs } = listChildren(dir);
-    // Single-child passthrough: no leaves, exactly one subdir. The
-    // index.md carries only navigation pointing at that child, which
-    // adds no routing value versus pointing directly at the grandchild.
-    if (leaves.length === 0 && subdirs.length === 1) {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    let leafCount = 0;
+    let subdirCount = 0;
+    for (const e of entries) {
+      if (e.name.startsWith(".")) continue;
+      if (e.isDirectory()) {
+        subdirCount++;
+        continue;
+      }
+      if (!e.isFile()) continue;
+      if (!e.name.endsWith(".md")) continue;
+      if (e.name === "index.md") continue;
+      leafCount++;
+    }
+    // Single-child passthrough: no leaves, exactly one subdir.
+    if (leafCount === 0 && subdirCount === 1) {
       candidates.push(dir);
     }
   }
