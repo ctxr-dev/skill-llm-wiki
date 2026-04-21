@@ -223,6 +223,13 @@ function collectForbiddenIdsPredicate(
       continue;
     }
     if (!entry.name.endsWith(".md")) continue;
+    // Only regular files qualify. Without this guard a symlink or
+    // special dirent named `*.md` would get opened + parsed; the
+    // rest of the pipeline's walks (`chunk.mjs::collectEntryPaths`,
+    // `indices.mjs::listChildren`) already require `isFile()`, so
+    // this keeps the walk discipline symmetric and forecloses the
+    // "planted symlink poisons the forbidden set" class.
+    if (!entry.isFile()) continue;
     try {
       // Use the streaming frontmatter reader (bounded to
       // MAX_FRONTMATTER_BYTES) instead of slurping the whole file
@@ -354,6 +361,10 @@ export function buildWikiForbiddenIndex(wikiRoot) {
         continue;
       }
       if (!entry.name.endsWith(".md")) continue;
+      // Regular-file-only: keeps the walk discipline aligned with
+      // chunk.mjs::collectEntryPaths / indices.mjs::listChildren and
+      // prevents symlinks / special dirents from being opened.
+      if (!entry.isFile()) continue;
       try {
         const captured = readFrontmatterStreaming(entryPath);
         if (captured === null) continue;
@@ -428,6 +439,12 @@ function walkWikiIds(wikiRoot, parentDir, memberPaths, forbidden) {
         continue;
       }
       if (!entry.name.endsWith(".md")) continue;
+      // Regular-file-only guard (matches the rest of the pipeline's
+      // walk discipline — chunk.mjs::collectEntryPaths and
+      // indices.mjs::listChildren both require isFile). Without this
+      // a symlink or special dirent named `*.md` could feed into
+      // readFrontmatterStreaming and poison the forbidden set.
+      if (!entry.isFile()) continue;
       // Skip ordinary leaves that are in the cluster's own parent
       // dir — the parent-dir walk above has already handled them
       // (including the member-exclusion logic). Skipping avoids
