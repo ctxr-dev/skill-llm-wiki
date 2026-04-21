@@ -272,8 +272,20 @@ export function applyBalanceFlatten(wikiRoot, passthroughDir) {
   // `.md` leaves and subdirs-containing-index.md, so non-`.md`
   // content (assets/, stray README.txt, subdirs without an index.md)
   // is invisible to the detector even though a later
-  // `rmSync(dir, {recursive: true})` would silently delete it. An
-  // earlier draft checked this AFTER the rename + index.md drop,
+  // `rmSync(dir, {recursive: true})` would silently delete it.
+  //
+  // Dot-prefixed entries (`.DS_Store`, editor backups, `.shape/`
+  // internals) are deliberately skipped — the rest of the pipeline
+  // (`listChildren`, `buildWikiForbiddenIndex`, `collectEntryPaths`)
+  // all skip them under the same blanket rule. They're non-routable
+  // noise, so refusing to flatten because a `.DS_Store` lives in
+  // the passthrough would surprise users. Dotfiles are left in
+  // place post-rename; `rmdirSync` at the end will refuse non-empty
+  // removal if any dotfile is still present, at which point the
+  // orchestrator's snapshot cleanly restores — we prefer that
+  // fail-loud over a silent recursive delete.
+  //
+  // An earlier draft checked this AFTER the rename + index.md drop,
   // which left the wiki partially-mutated (child already promoted,
   // passthrough still present) when refusing — the caller's pre-op
   // snapshot could undo it, but leaving the mutation/refusal ordering
@@ -283,13 +295,23 @@ export function applyBalanceFlatten(wikiRoot, passthroughDir) {
   // restores.
   const entries = readdirSync(passthroughDir);
   const allowed = new Set([basename(child), "index.md"]);
-  const stray = entries.filter((e) => !allowed.has(e));
+  const stray = entries.filter((e) => !allowed.has(e) && !e.startsWith("."));
   if (stray.length > 0) {
     throw new Error(
       `balance-flatten: ${relative(wikiRoot, passthroughDir)} holds unexpected ` +
         `non-listChildren content (stray: ${JSON.stringify(stray)}); ` +
         `refusing to flatten to avoid silent data loss`,
     );
+  }
+  // Clean up dot-prefixed noise BEFORE the rename so that rmdirSync
+  // at the end can succeed without recursive. Dotfiles are noise by
+  // the pipeline's convention (see the blanket dot-skip rule in
+  // collectEntryPaths / listChildren / buildWikiForbiddenIndex), so
+  // deleting them here is policy-consistent — we don't want a
+  // `.DS_Store` keeping a routable-empty directory alive.
+  const dotEntries = entries.filter((e) => e.startsWith("."));
+  for (const name of dotEntries) {
+    rmSync(join(passthroughDir, name), { recursive: true, force: true });
   }
   // Atomically move the child into its grandparent's directory, then
   // drop the now-empty passthrough + its index.md.

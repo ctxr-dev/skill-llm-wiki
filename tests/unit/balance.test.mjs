@@ -341,6 +341,39 @@ test("applyBalanceFlatten: refuses to rmSync a passthrough with stray non-listCh
   }
 });
 
+test("applyBalanceFlatten: tolerates dot-prefixed entries (noise), cleans them before flatten", () => {
+  const wiki = tmpWiki("flatten-dotfile");
+  try {
+    // Pure passthrough with a `.DS_Store` alongside. The rest of the
+    // pipeline (`listChildren`, `buildWikiForbiddenIndex`,
+    // `collectEntryPaths`) all skip dot-prefixed entries under the
+    // same blanket rule, so a `.DS_Store` is non-routable noise; the
+    // flatten must NOT refuse on it. Instead the preflight cleans
+    // dotfiles before the rename so rmdirSync succeeds.
+    writeIndex(wiki, "index.md", basename(wiki));
+    writeIndex(wiki, "pass/index.md", "pass");
+    writeIndex(wiki, "pass/child/index.md", "child");
+    writeLeaf(wiki, "pass/child/leaf.md", "leaf");
+    writeFileSync(join(wiki, "pass", ".DS_Store"), "mac-noise");
+    const r = applyBalanceFlatten(wiki, join(wiki, "pass"));
+    assert.equal(r.promoted, join(wiki, "child"));
+    assert.equal(r.removed, join(wiki, "pass"));
+    // The passthrough is gone (rmdir succeeded) and the dotfile was
+    // cleaned up with it.
+    assert.ok(!existsSync(join(wiki, "pass")), "passthrough must be removed");
+    assert.ok(
+      existsSync(join(wiki, "child", "index.md")),
+      "child subdir must be promoted",
+    );
+    assert.ok(
+      existsSync(join(wiki, "child", "leaf.md")),
+      "leaf must follow the promoted subdir",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("runBalance: no-op when neither flag is set", async () => {
   const wiki = tmpWiki("noop");
   try {
