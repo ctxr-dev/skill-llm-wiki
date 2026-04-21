@@ -730,27 +730,19 @@ test("resolveNestSlug: cross-depth collision chains to -group-N numeric fallback
   // "-group" (collides) and land on "-group-2".
   const wiki = tmpWiki("resolve-cross-depth-chain");
   try {
-    // Branch 1: id "event-patterns"
-    mkdirSync(join(wiki, "branch-a", "event-patterns"), { recursive: true });
-    writeFileSync(
-      join(wiki, "branch-a", "event-patterns", "index.md"),
-      renderFrontmatter(
-        { id: "event-patterns", type: "index", depth_role: "subcategory" },
-        "\n",
-      ),
-      "utf8",
-    );
-    // Branch 2: id "event-patterns-group"
-    mkdirSync(join(wiki, "branch-b", "event-patterns-group"), {
-      recursive: true,
+    // Branch 1: id "event-patterns". writeIndex writes validator-
+    // shaped frontmatter and auto-mkdirs the parent, reusing the
+    // same helper every other index fixture in this suite goes
+    // through.
+    writeIndex(wiki, "branch-a/event-patterns/index.md", "event-patterns", {
+      depth_role: "subcategory",
     });
-    writeFileSync(
-      join(wiki, "branch-b", "event-patterns-group", "index.md"),
-      renderFrontmatter(
-        { id: "event-patterns-group", type: "index", depth_role: "subcategory" },
-        "\n",
-      ),
-      "utf8",
+    // Branch 2: id "event-patterns-group"
+    writeIndex(
+      wiki,
+      "branch-b/event-patterns-group/index.md",
+      "event-patterns-group",
+      { depth_role: "subcategory" },
     );
     // Cluster parent
     mkdirSync(join(wiki, "cluster-parent"), { recursive: true });
