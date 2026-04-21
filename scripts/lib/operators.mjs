@@ -41,7 +41,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
-import { collectFrontmatterOnly } from "./chunk.mjs";
+import { collectFrontmatterOnly, readFrontmatterStreaming } from "./chunk.mjs";
 import { listChildren, rebuildAllIndices } from "./indices.mjs";
 import { buildComparisonModel } from "./similarity.mjs";
 import {
@@ -267,6 +267,51 @@ async function applyMerge(wikiRoot, a, b, decision) {
   for (const al of absorbed.data.aliases ?? []) aliases.add(al);
   aliases.delete(data.id);
   data.aliases = Array.from(aliases);
+
+  // Pre-apply alias-collision guard. If any alias the MERGE is about to
+  // introduce would collide with a live id elsewhere in the wiki, refuse
+  // the merge BEFORE writing the keeper or deleting the absorbed. The
+  // v1.0 validator catches this downstream as ALIAS-COLLIDES-ID, but by
+  // then the phase has committed and the whole convergence iteration
+  // has to roll back. Checking here pre-empts the rollback.
+  //
+  // Scope: only aliases the MERGE is *newly introducing* can create a
+  // new collision — that's absorbed's id and absorbed's pre-existing
+  // aliases, rolled into the keeper. The keeper's pre-existing aliases
+  // were already validated on their way into the tree, so re-checking
+  // them here would only produce misattributed errors. We filter the
+  // candidate set accordingly and report the absorbed leaf as the
+  // source of the conflict.
+  //
+  // We exclude absorbed.path from the live-id scan because the merge
+  // deletes the absorbed file, freeing its id namespace, so absorbed's
+  // own id shouldn't register as an "elsewhere" collision against
+  // itself. keeper.path does NOT need to be excluded: MERGE rewrites
+  // keeper in place but keeps its id unchanged, and the filter on
+  // `newlyIntroducedAliases` already drops keeper's id before the
+  // alias check (see `.delete(data.id)` below), so keeper's id
+  // appearing in `liveIds` is harmless and keeping the scan focused on
+  // "every other entry in the wiki" is clearer than two asymmetric
+  // exclusions. Anything else carrying a colliding id is a real
+  // conflict that would surface downstream as ALIAS-COLLIDES-ID if we
+  // proceeded.
+  const newlyIntroducedAliases = new Set([
+    absorbed.data.id,
+    ...(absorbed.data.aliases ?? []),
+  ]);
+  newlyIntroducedAliases.delete(data.id);
+  const liveIds = collectLiveIds(wikiRoot, new Set([absorbed.path]));
+  for (const alias of newlyIntroducedAliases) {
+    if (liveIds.has(alias)) {
+      throw new Error(
+        `MERGE: alias "${alias}" (from absorbed ${absorbed.data.id}) ` +
+          `collides with an existing live id; refusing to merge ` +
+          `${absorbed.data.id} into ${keeper.data.id}. ` +
+          `Resolve the conflict (rename the other leaf, or drop ` +
+          `the alias) and retry.`,
+      );
+    }
+  }
 
   writeFileSync(keeper.path, renderFrontmatter(data, body), "utf8");
   rmSync(absorbed.path, { force: true });
@@ -1375,6 +1420,75 @@ export function mathCandidateIsFresh(cand) {
 }
 
 // ── Directory walk helper ────────────────────────────────────────────
+
+// Collect live entry frontmatter ids from the wiki on a best-effort
+// basis, excluding any paths the caller names. "Entry" means every
+// `.md` file we parse — leaves AND the `index.md` at every directory
+// depth, since the validator treats both as id-bearing entries and a
+// MERGE alias colliding with either shape is equally a conflict.
+//
+// Best-effort: unreadable files and malformed frontmatter are
+// silently skipped (see the `catch` block in the inner loop). The
+// direction of that error matters: skipping means the returned Set
+// is a SUBSET of "every id currently live in the wiki", not a
+// superset. A MERGE that passes this guard is therefore protected
+// against collisions with every cleanly-parseable entry in the tree,
+// but NOT against a collision hidden inside a malformed file —
+// that's a potential false negative. Malformed entries would also
+// fail the validator's post-op pass (which is what actually enforces
+// the invariant at commit time), so the guard's job is to pre-empt
+// the common case of a healthy wiki hitting a runtime MERGE
+// collision, not to substitute for validation. Callers that need a
+// strict complete live-id set should validate the wiki first.
+//
+// Used by applyMerge for its pre-apply alias-collision guard (before
+// MERGE commits new aliases, ensure none of them already exist as
+// live ids elsewhere in the corpus).
+//
+// Skips every dot-directory as a blanket rule — matches the discipline
+// in `scripts/lib/chunk.mjs::collectEntryPaths` and other wiki-tree
+// walks in the pipeline. This covers skill internals (`.llmwiki/`,
+// `.work/`, `.shape/`) as well as arbitrary user dot-directories the
+// corpus might carry (`.git/`, `.github/`, `.cache/`, etc). Without
+// this, ids found in unrelated dotfolders would produce false-positive
+// collision refusals the validator never reports.
+//
+// Per-file frontmatter is extracted via `readFrontmatterStreaming` so
+// this walk reads bounded (≤ `MAX_FRONTMATTER_BYTES`) from each leaf
+// rather than slurping the full body — matching the pattern used by
+// other full-tree id walks in the pipeline.
+export function collectLiveIds(wikiRoot, excludePaths = new Set()) {
+  const liveIds = new Set();
+  const stack = [wikiRoot];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      const entryPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(entryPath);
+        continue;
+      }
+      if (!entry.name.endsWith(".md")) continue;
+      if (excludePaths.has(entryPath)) continue;
+      try {
+        const captured = readFrontmatterStreaming(entryPath);
+        if (captured === null) continue;
+        const { data } = parseFrontmatter(captured.frontmatterText, entryPath);
+        if (data?.id) liveIds.add(data.id);
+      } catch {
+        /* skip unreadable / malformed frontmatter */
+      }
+    }
+  }
+  return liveIds;
+}
 
 function walkDirs(wikiRoot) {
   const out = [wikiRoot];

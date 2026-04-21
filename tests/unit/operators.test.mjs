@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseFrontmatter } from "../../scripts/lib/frontmatter.mjs";
 import {
+  collectLiveIds,
   detectDescend,
   detectLift,
   detectMerge,
@@ -391,6 +392,256 @@ test("MERGE apply: unions tags and domains from both entries", async () => {
     const domainSet = new Set(data.domains);
     assert.ok(domainSet.has("backend"));
     assert.ok(domainSet.has("infra"));
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+// ─── MERGE alias pre-apply collision guard (Bug 3 fix) ──────────────
+//
+// Background: v1.0 applyMerge adds absorbed.id + absorbed.aliases[]
+// to keeper.aliases[] without checking whether any of those ids
+// already exist as LIVE ids elsewhere in the corpus. When collisions
+// happen (multi-operator-per-iteration paths can reach intermediate
+// states where this is possible), the validator catches them
+// downstream as ALIAS-COLLIDES-ID — but only after commit, forcing
+// a full convergence-iteration rollback. The guard added in this PR
+// throws pre-apply so nothing is written on collision.
+
+test("MERGE apply: refuses to write aliases that collide with a live id elsewhere", async () => {
+  const wiki = tmpWiki("merge-alias-guard");
+  try {
+    writeIndex(wiki, "root");
+    // Two near-identical siblings at root — Tier 0 resolves decisive-same.
+    writeLeaf(join(wiki, "alpha.md"), {
+      id: "alpha",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "prisma database schema migrations seed workflows canonical",
+      covers: ["migrate dev", "migrate deploy", "seed commands", "schema file"],
+      parents: ["index.md"],
+    });
+    writeLeaf(join(wiki, "beta.md"), {
+      id: "beta",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "prisma database schema migrations seed workflows",
+      covers: ["migrate dev", "migrate deploy", "seed commands"],
+      parents: ["index.md"],
+    });
+    // Another leaf elsewhere in the tree carrying id="beta" — the id
+    // MERGE would add to alpha.aliases[]. This is a pre-invalid
+    // synthesised state (normal builds would have failed validation
+    // earlier), but we're testing the guard's behaviour. In real
+    // flows the same collision class is reached via multi-operator-
+    // per-iteration paths that bypass inter-op validation.
+    //
+    // File the bystander at `another-branch/beta.md` (filename matches
+    // id) so we don't accidentally violate the id/filename-basename
+    // validator invariant on top of the alias-collision scenario.
+    // Keeping the scenario focused on alias-vs-live-id collisions
+    // avoids brittle coupling to unrelated validation rules that a
+    // future stricter validator might start enforcing on test
+    // fixtures.
+    const subDir = join(wiki, "another-branch");
+    mkdirSync(subDir, { recursive: true });
+    writeIndex(subDir, "another-branch");
+    writeLeaf(join(subDir, "beta.md"), {
+      id: "beta",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "unrelated content living in a different branch",
+      covers: ["some unrelated cover"],
+      parents: ["../index.md"],
+    });
+
+    // Snapshot the pre-apply byte state of every file that the guard
+    // promises to leave untouched. Then assert the post-rejection
+    // state is byte-identical. Just asserting existsSync is too weak
+    // — a half-applied merge could write new aliases into alpha.md
+    // without deleting beta.md and this test would pass. The byte-
+    // equality check pins the "nothing written" contract to the only
+    // thing that actually matters: file contents.
+    const pre = {
+      alpha: readFileSync(join(wiki, "alpha.md"), "utf8"),
+      beta: readFileSync(join(wiki, "beta.md"), "utf8"),
+      bystander: readFileSync(join(subDir, "beta.md"), "utf8"),
+    };
+
+    const proposals = await detectMerge(wiki, {
+      opId: "op-guard",
+      qualityMode: "tiered-fast",
+    });
+    assert.ok(proposals.length >= 1, "expected at least one MERGE proposal");
+
+    // The guard must throw BEFORE any filesystem mutation.
+    await assert.rejects(
+      () => proposals[0].apply({ wikiRoot: wiki, opId: "op-guard" }),
+      /MERGE: alias "beta" .*collides with an existing live id/,
+    );
+
+    // Verify NOTHING was written: every tracked file must be byte-
+    // identical to its pre-apply snapshot. An existsSync-only check
+    // would let a half-apply that rewrote alpha's frontmatter slip
+    // through — the byte check forecloses that.
+    assert.equal(
+      readFileSync(join(wiki, "alpha.md"), "utf8"),
+      pre.alpha,
+      "alpha.md must be byte-identical after the rejected merge",
+    );
+    assert.equal(
+      readFileSync(join(wiki, "beta.md"), "utf8"),
+      pre.beta,
+      "beta.md must be byte-identical after the rejected merge",
+    );
+    assert.equal(
+      readFileSync(join(subDir, "beta.md"), "utf8"),
+      pre.bystander,
+      "colliding bystander must be byte-identical after the rejected merge",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("MERGE apply: alias guard permits merges with no collision elsewhere", async () => {
+  // Regression: the guard must NOT over-fire. Normal merges without
+  // any alias collision must still land cleanly.
+  const wiki = tmpWiki("merge-alias-no-collision");
+  try {
+    writeIndex(wiki, "root");
+    writeLeaf(join(wiki, "alpha.md"), {
+      id: "alpha",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "prisma database schema migrations seed workflows canonical",
+      covers: ["migrate dev", "migrate deploy", "seed commands", "schema file"],
+      parents: ["index.md"],
+    });
+    writeLeaf(join(wiki, "beta.md"), {
+      id: "beta",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "prisma database schema migrations seed workflows",
+      covers: ["migrate dev", "migrate deploy", "seed commands"],
+      parents: ["index.md"],
+    });
+    // An unrelated leaf elsewhere with an id that does NOT collide
+    // with any of the alias ids the MERGE will produce.
+    const subDir = join(wiki, "another-branch");
+    mkdirSync(subDir, { recursive: true });
+    writeIndex(subDir, "another-branch");
+    writeLeaf(join(subDir, "gamma.md"), {
+      id: "gamma",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "unrelated content",
+      covers: ["unrelated"],
+      parents: ["../index.md"],
+    });
+
+    const proposals = await detectMerge(wiki, {
+      opId: "op-no-collision",
+      qualityMode: "tiered-fast",
+    });
+    assert.ok(proposals.length >= 1);
+    // Apply succeeds; no rejection.
+    await proposals[0].apply({ wikiRoot: wiki, opId: "op-no-collision" });
+    // Keeper survives with the absorbed's id as an alias.
+    assert.ok(existsSync(join(wiki, "alpha.md")));
+    assert.ok(!existsSync(join(wiki, "beta.md")));
+    const { data } = parseFrontmatter(
+      readFileSync(join(wiki, "alpha.md"), "utf8"),
+    );
+    assert.ok(data.aliases.includes("beta"));
+    // Unrelated leaf untouched.
+    assert.ok(existsSync(join(subDir, "gamma.md")));
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("collectLiveIds: skips .llmwiki and .work internals", () => {
+  const wiki = tmpWiki("live-ids-skip");
+  try {
+    writeLeaf(join(wiki, "real-leaf.md"), {
+      id: "real-leaf",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "real leaf",
+      covers: ["x"],
+      parents: ["index.md"],
+    });
+    // Fake internals that would poison the set if walked
+    mkdirSync(join(wiki, ".llmwiki", "git", "refs"), { recursive: true });
+    writeFileSync(join(wiki, ".llmwiki", "op-log.yaml"), "- op: foo\n");
+    // .md file inside .llmwiki — must NOT be collected
+    writeFileSync(
+      join(wiki, ".llmwiki", "poison.md"),
+      "---\nid: poison-from-llmwiki\n---\n",
+    );
+    mkdirSync(join(wiki, ".work", "tier2"), { recursive: true });
+    writeFileSync(
+      join(wiki, ".work", "tier2", "pending-0.md"),
+      "---\nid: poison-from-work\n---\n",
+    );
+
+    const liveIds = collectLiveIds(wiki);
+    assert.ok(liveIds.has("real-leaf"));
+    assert.ok(
+      !liveIds.has("poison-from-llmwiki"),
+      "must not walk into .llmwiki/",
+    );
+    assert.ok(
+      !liveIds.has("poison-from-work"),
+      "must not walk into .work/",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("collectLiveIds: excludePaths are not added to the set", () => {
+  const wiki = tmpWiki("live-ids-exclude");
+  try {
+    writeLeaf(join(wiki, "keeper.md"), {
+      id: "keeper-id",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "keeper",
+      covers: ["x"],
+      parents: ["index.md"],
+    });
+    writeLeaf(join(wiki, "absorbed.md"), {
+      id: "absorbed-id",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "absorbed",
+      covers: ["x"],
+      parents: ["index.md"],
+    });
+    writeLeaf(join(wiki, "bystander.md"), {
+      id: "bystander-id",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "bystander",
+      covers: ["y"],
+      parents: ["index.md"],
+    });
+
+    const liveIds = collectLiveIds(
+      wiki,
+      new Set([join(wiki, "keeper.md"), join(wiki, "absorbed.md")]),
+    );
+    assert.ok(liveIds.has("bystander-id"));
+    assert.ok(
+      !liveIds.has("keeper-id"),
+      "keeper must be excluded so its own id doesn't self-collide",
+    );
+    assert.ok(
+      !liveIds.has("absorbed-id"),
+      "absorbed must be excluded since it's about to be removed",
+    );
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }
