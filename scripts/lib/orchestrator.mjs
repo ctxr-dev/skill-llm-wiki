@@ -25,6 +25,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
@@ -49,7 +50,6 @@ import {
   recordSource,
   startCorpus,
 } from "./provenance.mjs";
-import { rmSync } from "node:fs";
 import { MAX_BALANCE_ITERATIONS, runBalance } from "./balance.mjs";
 import { runConvergence } from "./operators.mjs";
 import { runReviewCycle } from "../commands/review.mjs";
