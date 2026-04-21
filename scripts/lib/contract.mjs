@@ -147,8 +147,6 @@ const SUBCOMMANDS = {
     positionals: ["wiki"],
     flags: [
       "--quality-mode",
-      "--fanout-target",
-      "--max-depth",
       "--no-prompt",
       "--json",
     ],

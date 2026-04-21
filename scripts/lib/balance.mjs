@@ -418,14 +418,20 @@ export async function runBalance(wikiRoot, ctx = {}) {
         // Tier 2 even when the active quality mode is tiered-fast,
         // because this phase's contract is "algorithmic rebalance",
         // not "ask a model to restructure".
+        // `returnEmptyMarker: false` makes detectClusters return []
+        // on failure (rather than a single `{ empty_partition: true }`
+        // marker proposal). That's the mode balance wants: the
+        // enforcement phase has no Tier 2 to escalate to, so an empty
+        // partition means "skip this dir and try the next overfull
+        // candidate" — a plain length check on the proposals array
+        // captures that directly, no `empty_partition` filter needed.
         const proposals = await detectClusters(wikiRoot, leaves, {
           returnEmptyMarker: false,
         });
-        const live = proposals.filter((p) => !p.empty_partition);
-        if (live.length === 0) continue; // try the next overfull dir
+        if (proposals.length === 0) continue; // try the next overfull dir
         // Take the strongest (highest average_affinity) proposal.
-        live.sort((a, b) => (b.average_affinity ?? 0) - (a.average_affinity ?? 0));
-        const chosen = live[0];
+        proposals.sort((a, b) => (b.average_affinity ?? 0) - (a.average_affinity ?? 0));
+        const chosen = proposals[0];
         const deterministicIdf = buildSiblingIdfContext(leaves);
         const slug = generateDeterministicSlug(chosen.leaves, leaves, {
           precomputedIdf: deterministicIdf,

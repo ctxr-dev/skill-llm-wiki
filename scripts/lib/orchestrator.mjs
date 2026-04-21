@@ -455,9 +455,11 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
           `balance enforcement did not converge after ${balance.iterations} ` +
             `iteration(s) (cap=${MAX_BALANCE_ITERATIONS}); applied ` +
             `${balance.applied.length} op(s). Inspect the private git ` +
-            `history (\`git -C ${wikiRoot} log\` in the .llmwiki private ` +
-            `repo) for the per-iteration commits balance produced, and ` +
-            `reduce --fanout-target / --max-depth strictness, or file a ` +
+            `history via the skill's hidden-git passthrough (e.g. ` +
+            `\`node scripts/cli.mjs log ${wikiRoot}\`) — the private repo ` +
+            `lives under \`<wiki>/.llmwiki/git\` and requires the skill's ` +
+            `isolation env, which the passthrough wraps. Reduce ` +
+            `--fanout-target / --max-depth strictness, or file a ` +
             `ping-pong repro.`,
         );
       }
