@@ -134,6 +134,29 @@ test("detectFanoutOverload: returns only dirs with children > target × 1.5", ()
   }
 });
 
+test("detectFanoutOverload: ignores dirs overfull only via subdir count (leaf metric)", () => {
+  const wiki = tmpWiki("overload-subdir-only");
+  try {
+    writeIndex(wiki, "index.md", basename(wiki));
+    // Root: 2 leaves + 10 subdirs = 12 routing-items. At target=6 the
+    // threshold is 9 so the pre-fix metric (leaves+subdirs) would flag
+    // it. Under the leaf-movable metric, root has only 2 leaves, well
+    // below threshold — rebalance has nothing to extract here, so the
+    // candidate is correctly ignored.
+    writeLeaf(wiki, "one.md", "one");
+    writeLeaf(wiki, "two.md", "two");
+    for (let i = 0; i < 10; i++) writeIndex(wiki, `sub-${i}/index.md`, `sub-${i}`);
+    const overfull = detectFanoutOverload(wiki, 6);
+    assert.equal(
+      overfull.length,
+      0,
+      "root has 10 subdirs but only 2 leaves — un-actionable, not overfull",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("detectFanoutOverload: honours nestedParents exclusion", () => {
   const wiki = tmpWiki("overload-nested");
   try {
@@ -322,6 +345,75 @@ test("runBalance: depth-only pass flattens a passthrough chain", async () => {
     assert.ok(r.iterations >= 1);
     const flattened = r.applied.some((a) => a.operator === "BALANCE_FLATTEN");
     assert.ok(flattened, "at least one BALANCE_FLATTEN must fire");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("runBalance: fanout pass skips un-actionable overfull[0], acts on a later candidate", async () => {
+  const wiki = tmpWiki("fanout-skip-first");
+  try {
+    // Two sibling subcategories, both above the leaf-count threshold
+    // at target=3 (threshold=4.5, so any dir with ≥ 5 leaves qualifies).
+    //
+    //   /diverse/   — 5 unrelated leaves with no coherent cluster.
+    //                Lex-smallest (overfull[0]).
+    //                detectClusters will find no partition above the
+    //                shape-score floor and return [] — un-actionable.
+    //   /themed/    — 7 leaves with two clean themes.
+    //                detectClusters returns a live proposal.
+    //
+    // With the pre-fix behaviour, runBalance picked overfull[0] only,
+    // saw no live cluster, and declared convergence despite /themed/
+    // being right there. The fix iterates through overfull candidates
+    // until one yields a live proposal. Assert at least one
+    // BALANCE_SUBCLUSTER fires under /themed/.
+    writeIndex(wiki, "index.md", basename(wiki));
+    writeIndex(wiki, "diverse/index.md", "diverse");
+    const diverseLeaves = [
+      ["diverse/astronomy.md", "astronomy", "orbital mechanics telescope"],
+      ["diverse/baking.md", "baking", "sourdough hydration levain"],
+      ["diverse/cryptography.md", "cryptography", "elliptic curve signature"],
+      ["diverse/dancing.md", "dancing", "ballet pointe barre"],
+      ["diverse/etymology.md", "etymology", "indo-european root derivation"],
+    ];
+    for (const [path, id, focus] of diverseLeaves) {
+      writeLeaf(wiki, path, id, {
+        tags: [id],
+        focus,
+        kw: [id, focus.split(" ")[0]],
+      });
+    }
+    writeIndex(wiki, "themed/index.md", "themed");
+    const themedLeaves = [
+      ["themed/redis-cache.md", "redis-cache", "cache", "redis eviction lru"],
+      ["themed/memcached-cache.md", "memcached-cache", "cache", "memcached slab lru"],
+      ["themed/varnish-cache.md", "varnish-cache", "cache", "varnish edge vcl"],
+      ["themed/http-retry.md", "http-retry", "retry", "http retry budget"],
+      ["themed/rpc-retry.md", "rpc-retry", "retry", "rpc retry deadline"],
+      ["themed/circuit-breaker.md", "circuit-breaker", "retry", "circuit breaker half-open"],
+      ["themed/orphan.md", "orphan", "other", "unrelated standalone"],
+    ];
+    for (const [path, id, tag, focus] of themedLeaves) {
+      writeLeaf(wiki, path, id, {
+        tags: [tag],
+        focus,
+        kw: [tag, id.split("-")[0]],
+      });
+    }
+    const r = await runBalance(wiki, { fanoutTarget: 3 });
+    const subclustered = r.applied.filter((a) => a.operator === "BALANCE_SUBCLUSTER");
+    assert.ok(
+      subclustered.length >= 1,
+      `expected at least one BALANCE_SUBCLUSTER despite diverse/ being un-actionable; got ${JSON.stringify(r.applied)}`,
+    );
+    // Every sub-cluster must have come out of /themed/, not /diverse/.
+    for (const app of subclustered) {
+      assert.ok(
+        app.describe.includes("themed/"),
+        `sub-cluster should target themed/, got: ${app.describe}`,
+      );
+    }
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }

@@ -127,19 +127,29 @@ export function computeFanoutStats(wikiRoot) {
   return { maxFanout: max, avgFanout: avg, perDir };
 }
 
-// Detect directories whose fan-out EXCEEDS fanoutTarget × MULTIPLIER.
-// Returned in lex order so the balance loop's apply sequence is
-// byte-reproducible. `nestedParents` is an opt-out: directories
-// created by the current balance pass (or by an earlier convergence
-// pass in the same op) are left alone so we don't sub-cluster a
-// freshly-created subcategory on the next iteration — that's the
-// "let the op settle" discipline convergence already uses.
+// Detect directories whose MOVABLE fan-out EXCEEDS fanoutTarget ×
+// MULTIPLIER. Movable fan-out is leaf count alone, not leaves+subdirs:
+// the sub-cluster pass can only carve clusters out of leaves (subdirs
+// are structurally cemented by their own indexing) so a dir that is
+// routing-overfull purely because it holds many subcategories is
+// un-actionable here and would otherwise stall the loop at the
+// lex-smallest un-actionable entry. The `computeFanoutStats` helper
+// remains available for diagnostic / audit views that want the full
+// routing-cost metric. Returned in lex order so the balance loop's
+// apply sequence is byte-reproducible. `nestedParents` is an opt-out:
+// directories created by the current balance pass (or by an earlier
+// convergence pass in the same op) are left alone so we don't
+// sub-cluster a freshly-created subcategory on the next iteration —
+// that's the "let the op settle" discipline convergence already uses.
 export function detectFanoutOverload(wikiRoot, fanoutTarget, nestedParents = new Set()) {
   const threshold = fanoutTarget * FANOUT_OVERLOAD_MULTIPLIER;
   const { perDir } = computeFanoutStats(wikiRoot);
   const dirs = Array.from(perDir.keys())
     .filter((d) => !nestedParents.has(d))
-    .filter((d) => perDir.get(d) > threshold);
+    .filter((d) => {
+      const { leaves } = listChildren(d);
+      return leaves.length > threshold;
+    });
   dirs.sort((a, b) => relative(wikiRoot, a).localeCompare(relative(wikiRoot, b)));
   return dirs;
 }
@@ -298,14 +308,22 @@ export async function runBalance(wikiRoot, ctx = {}) {
       }
     }
 
-    // Fanout pass. Pick the first (lex-smallest) overfull dir and
-    // sub-cluster one math-detected cluster out of it. One apply per
-    // iteration keeps the decision graph simple; the loop re-runs
-    // detection each pass against the new tree.
+    // Fanout pass. Walk the lex-sorted overfull list until we find a
+    // parent whose leaves yield at least one live math cluster. Any
+    // earlier candidate that yields no live proposal (detectClusters
+    // returns `[]` for `leaves.length < MIN_CLUSTER_SIZE`, or only
+    // empty-partition markers when no threshold produces an acceptable
+    // partition) is recorded and skipped for the rest of this
+    // iteration — previous drafts applied only `overfull[0]` and
+    // declared convergence when that one dir was un-actionable, even
+    // though later dirs in the list could still be carved. Suppress
+    // unused-var warnings on qualityMode/opId (kept for a future
+    // per-mode claude-first re-enabled Tier 2 naming pass).
+    void qualityMode;
+    void opId;
     if (fanoutTarget != null) {
       const overfull = detectFanoutOverload(wikiRoot, fanoutTarget, nestedParents);
-      if (overfull.length > 0) {
-        const parentDir = overfull[0];
+      for (const parentDir of overfull) {
         const { leaves } = listChildren(parentDir);
         // Reuse the cluster detector + deterministic naming helpers
         // from Phase X.3. Math-mode only — balance never escalates to
@@ -316,59 +334,54 @@ export async function runBalance(wikiRoot, ctx = {}) {
           returnEmptyMarker: false,
         });
         const live = proposals.filter((p) => !p.empty_partition);
-        if (live.length > 0) {
-          // Take the strongest (highest average_affinity) proposal.
-          live.sort((a, b) => (b.average_affinity ?? 0) - (a.average_affinity ?? 0));
-          const chosen = live[0];
-          const deterministicIdf = buildSiblingIdfContext(leaves);
-          const slug = generateDeterministicSlug(chosen.leaves, leaves, {
-            precomputedIdf: deterministicIdf,
-          });
-          const purpose = deterministicPurpose(chosen.leaves);
-          chosen.parent_dir = parentDir;
-          chosen.source = "math";
-          chosen.slug = slug;
-          chosen.purpose = purpose;
-          const wikiIndex = buildWikiForbiddenIndex(wikiRoot);
-          const resolvedSlug = resolveNestSlug(slug, chosen, wikiRoot, {
-            wikiIndex,
-          });
-          // Let applyNest's errors propagate up to the orchestrator's
-          // pre-op snapshot rollback. applyNest performs several
-          // non-atomic operations (mkdir, move-per-leaf, stub write)
-          // after the cheap pre-checks, so a mid-apply failure leaves
-          // a partially-mutated wiki. Swallowing the error here and
-          // continuing the loop would commit that partial state; the
-          // orchestrator's catch block restores the pre-op snapshot
-          // cleanly.
-          const result = applyNest(wikiRoot, chosen, resolvedSlug);
-          rebuildAllIndices(wikiRoot);
-          nestedParents.add(result.target_dir);
-          applied.push({
-            iteration,
-            operator: "BALANCE_SUBCLUSTER",
-            sources: chosen.leaves.map((l) => l.path),
-            describe:
-              `sub-clustered ${chosen.leaves.length} leaves from ` +
-              `${relative(wikiRoot, parentDir)} → ${relative(wikiRoot, result.target_dir)} ` +
-              `(avg_affinity=${(chosen.average_affinity ?? 0).toFixed(3)}, ` +
-              `source=deterministic-math)`,
-          });
-          await commitBetweenIterations({
-            iteration,
-            operator: "BALANCE_SUBCLUSTER",
-            summary:
-              `balance: sub-clustered ${chosen.leaves.length} leaves into ${relative(wikiRoot, result.target_dir)}`,
-          });
-          didWork = true;
-          // Suppress unused var warning on qualityMode — kept in the
-          // signature for future per-mode variations, such as a
-          // claude-first balance pass that re-enables Tier 2 naming.
-          void qualityMode;
-          void opId;
-          continue;
-        }
+        if (live.length === 0) continue; // try the next overfull dir
+        // Take the strongest (highest average_affinity) proposal.
+        live.sort((a, b) => (b.average_affinity ?? 0) - (a.average_affinity ?? 0));
+        const chosen = live[0];
+        const deterministicIdf = buildSiblingIdfContext(leaves);
+        const slug = generateDeterministicSlug(chosen.leaves, leaves, {
+          precomputedIdf: deterministicIdf,
+        });
+        const purpose = deterministicPurpose(chosen.leaves);
+        chosen.parent_dir = parentDir;
+        chosen.source = "math";
+        chosen.slug = slug;
+        chosen.purpose = purpose;
+        const wikiIndex = buildWikiForbiddenIndex(wikiRoot);
+        const resolvedSlug = resolveNestSlug(slug, chosen, wikiRoot, {
+          wikiIndex,
+        });
+        // Let applyNest's errors propagate up to the orchestrator's
+        // pre-op snapshot rollback. applyNest performs several
+        // non-atomic operations (mkdir, move-per-leaf, stub write)
+        // after the cheap pre-checks, so a mid-apply failure leaves
+        // a partially-mutated wiki. Swallowing the error here and
+        // continuing the loop would commit that partial state; the
+        // orchestrator's catch block restores the pre-op snapshot
+        // cleanly.
+        const result = applyNest(wikiRoot, chosen, resolvedSlug);
+        rebuildAllIndices(wikiRoot);
+        nestedParents.add(result.target_dir);
+        applied.push({
+          iteration,
+          operator: "BALANCE_SUBCLUSTER",
+          sources: chosen.leaves.map((l) => l.path),
+          describe:
+            `sub-clustered ${chosen.leaves.length} leaves from ` +
+            `${relative(wikiRoot, parentDir)} → ${relative(wikiRoot, result.target_dir)} ` +
+            `(avg_affinity=${(chosen.average_affinity ?? 0).toFixed(3)}, ` +
+            `source=deterministic-math)`,
+        });
+        await commitBetweenIterations({
+          iteration,
+          operator: "BALANCE_SUBCLUSTER",
+          summary:
+            `balance: sub-clustered ${chosen.leaves.length} leaves into ${relative(wikiRoot, result.target_dir)}`,
+        });
+        didWork = true;
+        break; // one apply per iteration — reassess on the next pass
       }
+      if (didWork) continue;
     }
 
     if (!didWork) {
