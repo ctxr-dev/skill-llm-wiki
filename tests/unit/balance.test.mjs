@@ -191,6 +191,29 @@ test("detectFanoutOverload: ignores dirs overfull only via subdir count (leaf me
   }
 });
 
+test("computeFanoutStats: leafCounts only includes routable leaves (valid frontmatter + id)", () => {
+  const wiki = tmpWiki("fanout-inert");
+  try {
+    writeIndex(wiki, "index.md", basename(wiki));
+    // 3 routable leaves + 2 inert `.md` files (no frontmatter).
+    // The inert files are on disk but don't carry an `id`, so
+    // listChildren rejects them and the sub-cluster pass can't move
+    // them. leafCounts must reflect the movable metric, not the raw
+    // `.md` count.
+    for (let i = 0; i < 3; i++) writeLeaf(wiki, `good-${i}.md`, `good-${i}`);
+    writeFileSync(join(wiki, "no-frontmatter.md"), "# just a markdown file\n");
+    writeFileSync(join(wiki, "also-no-frontmatter.md"), "hello world\n");
+    const stats = computeFanoutStats(wiki);
+    assert.equal(
+      stats.leafCounts.get(wiki),
+      3,
+      "leafCounts must count routable leaves only (not raw .md files)",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("detectFanoutOverload: nested paths sort by POSIX-normalised key (cross-platform stable)", () => {
   const wiki = tmpWiki("overload-sort-order");
   try {

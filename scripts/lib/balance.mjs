@@ -150,15 +150,23 @@ export function getMaxDepth(wikiRoot) {
 // `detectFanoutOverload`. Both maps are produced in the same
 // `readdirSync` sweep.
 //
-// This walk does NOT use `listChildren` (which requires an `index.md`
-// to treat a directory as a routable subdir). Balance runs after
-// Phase 4 convergence, which only bootstraps index.md stubs on the
-// cluster-NEST path — builds where no NEST picks fire can still
-// carry category dirs created in Phase 3 draft that have leaves but
-// no index.md yet (bootstrapIndexStubs fills those in during Phase 5).
-// So balance must see them on its own. Leaves are counted as plain
-// `.md` files directly in the dir (excluding `index.md`); subdirs
-// are all non-dot child dirs regardless of index.md presence.
+// Subdir traversal is filesystem-based (`readdirSync`, no index.md
+// required). Balance runs after Phase 4 convergence but BEFORE
+// Phase 5's `bootstrapIndexStubs` — category dirs created in Phase 3
+// draft can have leaves without an index.md yet, and convergence's
+// internal stub bootstrapper only fires on the cluster-NEST path
+// (builds with no NEST picks skip it). So balance must walk every
+// non-dot child dir regardless of index.md presence.
+//
+// Leaf counting, though, uses `listChildren`'s routable-leaf
+// discipline (frontmatter parsed, `data.id` required). The
+// sub-cluster pass can only move routable leaves — a `.md` file
+// without valid frontmatter or without an `id` is inert — so
+// counting all `.md` files would inflate the movable-fanout metric
+// and flag dirs as overfull when they're actually un-actionable.
+// `listChildren` is safe to call on an index-less parent dir (the
+// index.md check is only for enumerating subdirs); it returns
+// routable leaves even when the parent itself is pre-bootstrap.
 export function computeFanoutStats(wikiRoot) {
   const perDir = new Map();
   const leafCounts = new Map();
@@ -174,19 +182,14 @@ export function computeFanoutStats(wikiRoot) {
     } catch {
       continue;
     }
-    let leafCount = 0;
     const subdirs = [];
     for (const e of entries) {
       if (e.name.startsWith(".")) continue;
-      if (e.isDirectory()) {
-        subdirs.push(join(dir, e.name));
-        continue;
-      }
-      if (!e.isFile()) continue;
-      if (!e.name.endsWith(".md")) continue;
-      if (e.name === "index.md") continue;
-      leafCount++;
+      if (!e.isDirectory()) continue;
+      subdirs.push(join(dir, e.name));
     }
+    const { leaves } = listChildren(dir);
+    const leafCount = leaves.length;
     const fan = leafCount + subdirs.length;
     perDir.set(dir, fan);
     leafCounts.set(dir, leafCount);
@@ -237,10 +240,14 @@ export function detectFanoutOverload(wikiRoot, fanoutTarget, nestedParents = new
 // collapse, in lex order. The caller applies LIFT-chain-style
 // flattening via `applyBalanceFlatten`.
 //
-// Traversal is filesystem-based (readdir, no index.md required) for
-// the same reason as computeFanoutStats / computeDepthMap — balance
-// runs before Phase 5's bootstrap stubs, so some routable dirs may
-// not yet have index.md.
+// Subdir traversal uses readdir directly (no index.md required) so
+// pre-bootstrap category dirs are visible — balance runs before
+// Phase 5's bootstrap stubs. Leaf counting uses `listChildren`'s
+// routable discipline: a passthrough is defined as zero ROUTABLE
+// leaves + one subdir, so a stray `.md` file without valid frontmatter
+// shouldn't disqualify the parent from being a passthrough (it's
+// inert content, not a routable sibling). Aligns the movable-leaf
+// semantics used in computeFanoutStats.
 export function detectDepthOverage(wikiRoot, maxDepth) {
   const depths = computeDepthMap(wikiRoot);
   const candidates = [];
@@ -252,21 +259,16 @@ export function detectDepthOverage(wikiRoot, maxDepth) {
     } catch {
       continue;
     }
-    let leafCount = 0;
     let subdirCount = 0;
     for (const e of entries) {
       if (e.name.startsWith(".")) continue;
-      if (e.isDirectory()) {
-        subdirCount++;
-        continue;
-      }
-      if (!e.isFile()) continue;
-      if (!e.name.endsWith(".md")) continue;
-      if (e.name === "index.md") continue;
-      leafCount++;
+      if (!e.isDirectory()) continue;
+      subdirCount++;
     }
-    // Single-child passthrough: no leaves, exactly one subdir.
-    if (leafCount === 0 && subdirCount === 1) {
+    const { leaves } = listChildren(dir);
+    // Single-child passthrough: no routable leaves, exactly one
+    // subdir (regardless of whether that subdir has index.md yet).
+    if (leaves.length === 0 && subdirCount === 1) {
       candidates.push(dir);
     }
   }
