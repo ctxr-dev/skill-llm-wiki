@@ -420,8 +420,9 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     const maxDepth = plan.flags?.max_depth != null
       ? Number.parseInt(plan.flags.max_depth, 10)
       : null;
+    let balance = null;
     if (fanoutTarget != null || maxDepth != null) {
-      const balance = await runBalance(wikiRoot, {
+      balance = await runBalance(wikiRoot, {
         opId,
         qualityMode: plan.flags?.quality_mode || "tiered-fast",
         fanoutTarget,
@@ -461,13 +462,21 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     }
 
     // Phase 4.5 — optional interactive review. Fires only when the
-    // user passed --review AND convergence actually produced at
-    // least one commit. The review flow prints a diff + commit
-    // list and lets the user approve, abort, or drop specific
-    // iterations before validation runs. Abort throws so the
-    // orchestrator's catch block handles the rollback uniformly
-    // with any other failure path.
-    if (plan.flags?.review && convergence.applied.length > 0) {
+    // user passed --review AND at least one tree-mutating phase
+    // actually produced commits. That's EITHER convergence OR the
+    // balance-enforcement phase above — both commit separately via
+    // their `commitBetweenIterations` callbacks. Pre-round-6 the gate
+    // only checked convergence, which meant a no-op-convergence +
+    // active-balance op (e.g. a hand-authored corpus where the
+    // initial tree is already operator-clean but violates the
+    // fanout/depth targets) would silently skip review. The review
+    // flow prints a diff + commit list and lets the user approve,
+    // abort, or drop specific iterations before validation runs.
+    // Abort throws so the orchestrator's catch block handles the
+    // rollback uniformly with any other failure path.
+    const balanceApplied = balance?.applied?.length ?? 0;
+    const anyMutation = convergence.applied.length > 0 || balanceApplied > 0;
+    if (plan.flags?.review && anyMutation) {
       const reviewResult = await runReviewCycle(wikiRoot, opId, {
         forceInteractive: plan.flags?.force_interactive === true,
       });

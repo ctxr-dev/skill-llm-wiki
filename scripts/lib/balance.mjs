@@ -69,13 +69,36 @@ export const FANOUT_OVERLOAD_MULTIPLIER = 1.5;
 // subdirectory is depth 1. Dot-prefixed directories are skipped on
 // the same blanket rule used elsewhere in the pipeline. Returns a
 // Map<absolutePath, number>.
+//
+// Implementation: directory-only scan via `readdirSync` + an
+// `index.md` presence check. `listChildren` would also work but
+// parses frontmatter for every `.md` leaf in each directory — depth
+// computation doesn't need that data, so the lightweight walk here
+// keeps `detectDepthOverage` (which calls `computeDepthMap` then
+// `listChildren` only on candidate dirs) cheaper on large corpora.
 export function computeDepthMap(wikiRoot) {
   const out = new Map();
   out.set(wikiRoot, 0);
   const stack = [[wikiRoot, 0]];
   while (stack.length > 0) {
     const [dir, depth] = stack.pop();
-    const { subdirs } = listChildren(dir);
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    const subdirs = [];
+    for (const e of entries) {
+      if (e.name.startsWith(".")) continue;
+      if (!e.isDirectory()) continue;
+      const full = join(dir, e.name);
+      // Mirror `listChildren`'s routable-subdir discipline: a directory
+      // without `index.md` isn't a wiki node, so it can't be part of
+      // the depth map.
+      if (!existsSync(join(full, "index.md"))) continue;
+      subdirs.push(full);
+    }
     // Sort lex so traversal order is deterministic.
     subdirs.sort((a, b) => basename(a).localeCompare(basename(b)));
     for (const sub of subdirs) {
@@ -291,10 +314,16 @@ export function applyBalanceFlatten(wikiRoot, passthroughDir) {
 //     validated at intent time). Either or both may be null — if
 //     neither is set, runBalance is a no-op and returns
 //     `{ iterations: 0, applied: [], nestedParents, converged: true }`.
-//   - `nestedParents` is the Set passed through from the preceding
-//     convergence phase. Dirs in it are not re-examined here. On
-//     every successful sub-cluster apply we add the new subdir to
-//     this set.
+//   - `nestedParents` is an optional opt-out set. Any directory in it
+//     is skipped by the fanout pass — useful for a caller that wants
+//     to protect newly-created subdirs from being immediately
+//     re-carved. The current orchestrator does NOT plumb convergence's
+//     internal `nestedParents` set through (runConvergence doesn't
+//     export it), so in practice balance starts with a fresh empty
+//     Set and augments it in-place as it creates new subdirs across
+//     its own iterations. Returned in the result so tests / future
+//     callers can observe what balance added. Pipe-through-from-
+//     convergence is a possible future enhancement, hence the shape.
 //   - `commitBetweenIterations({iteration, operator, summary})` is
 //     the same callback runConvergence uses; orchestrator wires it
 //     to the private-git commit machinery.

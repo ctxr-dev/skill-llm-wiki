@@ -81,6 +81,26 @@ test("computeDepthMap: root is 0, children are 1, grandchildren are 2", () => {
   }
 });
 
+test("computeDepthMap: skips directories without index.md (non-wiki-node dirs)", () => {
+  const wiki = tmpWiki("depth-map-non-node");
+  try {
+    writeIndex(wiki, "index.md", basename(wiki));
+    writeIndex(wiki, "real/index.md", "real");
+    writeIndex(wiki, "real/child/index.md", "child");
+    // Drop a directory with no index.md and no leaves — NOT a wiki
+    // node. computeDepthMap must ignore it; otherwise the rebalance
+    // pass would claim the tree is deeper than it actually is.
+    mkdirSync(join(wiki, "assets"), { recursive: true });
+    writeFileSync(join(wiki, "assets", "logo.png"), "fake-png-bytes");
+    const depths = computeDepthMap(wiki);
+    assert.ok(!depths.has(join(wiki, "assets")));
+    assert.equal(depths.get(join(wiki, "real")), 1);
+    assert.equal(depths.get(join(wiki, "real", "child")), 2);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("getMaxDepth: returns the deepest directory's depth", () => {
   const wiki = tmpWiki("max-depth");
   try {
