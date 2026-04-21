@@ -3,10 +3,18 @@
 // Given a set of leaves at a single depth (one directory's worth
 // of children), compute an affinity matrix using several signals,
 // find candidate clusters as connected components under a
-// threshold, and propose NEST applications. Every proposal is
-// named by asking Tier 2 (cluster_name kind) — we never invent
-// names from keyword shortcuts, because the whole point of Tier 2
-// is to let the sub-agent exercise judgment at naming time.
+// threshold, and propose NEST applications.
+//
+// Cluster naming depends on the active quality mode:
+//   - tiered-fast / claude-first / tier0-only: proposals are named
+//     by asking Tier 2 (the `cluster_name` request kind), because
+//     the point of Tier 2 is to let the sub-agent exercise judgment
+//     at naming time.
+//   - deterministic: naming is derived locally from member
+//     frontmatters via `generateDeterministicSlug` +
+//     `deterministicPurpose`, bypassing the `cluster_name` request
+//     entirely so the mode's "no LLM in the loop" contract holds
+//     end-to-end. See these helpers' doc comments for the algorithm.
 //
 // Signals used for the affinity matrix:
 //
@@ -68,6 +76,7 @@ import {
 } from "./embeddings.mjs";
 import {
   buildComparisonModel,
+  computeIdf,
   cosine,
   entryText,
   tfidfVector,
@@ -514,3 +523,220 @@ export async function detectClusters(wikiRoot, leaves, opts = {}) {
   proposals.sort((a, b) => b.average_affinity - a.average_affinity);
   return proposals;
 }
+
+// Deterministic slug generator for the `deterministic` quality mode.
+// Given a cluster's member leaves and optional corpus context (for
+// IDF), returns a reproducible kebab-case slug derived from the
+// members' frontmatter terms alone — no LLM, no network, no
+// randomness. Repeated invocations on the same inputs always return
+// the same slug; shuffling the member order never changes the output.
+//
+// Algorithm:
+//
+//   1. Build a TF-IDF vector over each member's `entryText` (focus +
+//      covers + tags + domains) using the supplied corpus context
+//      for IDF weighting. Without context, members form their own
+//      micro-corpus — less semantically interesting but still
+//      deterministic.
+//   2. Sum the per-member vectors (weights stay dominated by terms
+//      that are rare in the corpus but common inside the cluster —
+//      exactly the "distinguishing" terms we want in the slug).
+//   3. Rank terms by (weight desc, term asc). The lex tie-break is
+//      the ONLY source of determinism when two terms share a weight.
+//   4. Walk the ranked list, taking the first 1–2 terms that are
+//      valid slug components (lowercase, ≥ 2 chars, start with a
+//      letter, pass the `SLUG_RE` check when joined).
+//   5. If still no valid slug (terse frontmatters, every top term
+//      numeric/short), fall back to a 7-hex-char content hash of
+//      the sorted member ids — deterministic in its inputs, but NOT
+//      globally unique. Seven hex characters is ~28 bits of entropy
+//      from a truncated FNV-1a-32 output, so hash collisions are
+//      mathematically possible (~0.1% collision rate at 1000 distinct
+//      clusters per the birthday bound). That's fine at this layer:
+//      the caller passes every slug — hash-derived or term-derived —
+//      through `resolveNestSlug` next, which auto-suffixes any
+//      collision with an existing id / alias / directory basename
+//      into the `-group`/`-group-N` deterministic sequence. The hash
+//      fallback just needs to be reproducible from the same inputs,
+//      not collision-free across the whole corpus.
+//
+// The caller (operators.mjs::tryClusterNestIteration) passes the
+// result through `resolveNestSlug` so collisions with existing ids
+// auto-suffix deterministically.
+//
+// `opts.precomputedIdf` lets the caller share an IDF map across
+// sibling clusters in the same directory — cuts the per-candidate
+// cost from `O(|corpus|)` tokenization + IDF to `O(|cluster|)`
+// tokenization alone. Semantically identical to a fresh derivation
+// from the passed `corpusContext`; pass whichever you already have.
+export function generateDeterministicSlug(
+  componentLeaves,
+  corpusContext,
+  opts = {},
+) {
+  // Sort members by a stable key BEFORE building text/token lists.
+  // Floating-point summation is order-sensitive, so an unsorted input
+  // could theoretically flip near-tie ordering under shuffled input.
+  // Sorting on leaf id (path fallback for tests that omit id) removes
+  // that entire class of ambiguity at trivial cost.
+  // Normalise each member: accept either a leaf wrapper `{ path, data }`
+  // or a plain frontmatter object (the shape corpusContext also
+  // tolerates below). Without this, a caller passing plain frontmatter
+  // would hit `entryText(undefined)` for every member, producing empty
+  // token lists and collapsing every such cluster onto the identical
+  // `cluster-<hash>` fallback — so multiple unrelated clusters could
+  // end up with the same slug. Symmetrising with the corpusContext
+  // path closes that footgun.
+  const normalisedMembers = componentLeaves.map((leaf) => ({
+    data: leaf?.data ?? leaf,
+    path: leaf?.path,
+  }));
+  const stableMembers = [...normalisedMembers].sort((a, b) => {
+    const ka = a?.data?.id ?? a?.path ?? "";
+    const kb = b?.data?.id ?? b?.path ?? "";
+    return ka < kb ? -1 : ka > kb ? 1 : 0;
+  });
+  const tokenLists = stableMembers.map((leaf) => tokenize(entryText(leaf.data)));
+  // IDF context: precomputed > corpusContext > cluster itself.
+  const idfMap =
+    opts.precomputedIdf ??
+    (corpusContext && corpusContext.length > 0
+      ? computeIdf(
+          corpusContext.map((e) => tokenize(entryText(e.data ?? e))),
+        )
+      : computeIdf(tokenLists));
+  // Per-member tf-idf, then sum into a single cluster-wide vector.
+  // Stable member order + lex tie-break on the final ranking below
+  // means the output is byte-identical regardless of caller-side
+  // ordering.
+  const sum = new Map();
+  for (const tokens of tokenLists) {
+    const vec = tfidfVector(tokens, idfMap);
+    for (const [term, weight] of vec) {
+      sum.set(term, (sum.get(term) ?? 0) + weight);
+    }
+  }
+  // Rank: weight desc, term asc (lex tie-break → determinism).
+  const ranked = Array.from(sum.entries()).sort((a, b) => {
+    if (b[1] !== a[1]) return b[1] - a[1];
+    return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+  });
+
+  const SLUG_RE = /^[a-z][a-z0-9-]{0,63}$/;
+  const VALID_TOKEN = /^[a-z][a-z0-9]*$/;
+  // Collect up to MAX_TOKENS_TO_CONSIDER ranked tokens, bounded to
+  // keep the O(n²) pair search below fast on corpora with many
+  // distinct terms. The pair search checks `C(n, 2) = n·(n−1)/2`
+  // combinations, so with n=16 that's at most 120 candidate slugs
+  // to test — trivial, and far more than practical frontmatters
+  // actually supply in their combined focus + covers + tags
+  // token bag.
+  const MAX_TOKENS_TO_CONSIDER = 16;
+  const takeable = [];
+  for (const [term] of ranked) {
+    if (!VALID_TOKEN.test(term)) continue;
+    takeable.push(term);
+    if (takeable.length >= MAX_TOKENS_TO_CONSIDER) break;
+  }
+  // Priority 1: highest-ranked TWO tokens that, when joined with "-",
+  // produce a valid SLUG_RE slug. The outer loop walks rank-first;
+  // the inner loop fills the second slot. Because both axes march
+  // top-to-bottom in ranked order, the first valid combo we find is
+  // the one carrying the highest total rank weight — semantically
+  // the "best" two-term slug.
+  //
+  // Bugfix vs. the v1 impl, which stopped after the top 2 ranked
+  // tokens and fell back to the hash whenever that specific combo
+  // overflowed SLUG_RE's 64-char cap. Walking further ranked terms
+  // surfaces a valid slug in every case where member frontmatters
+  // supply at least one kebab-compatible short pair, instead of
+  // producing an opaque `cluster-<hash>` when a valid slug was
+  // reachable just one rank away.
+  for (let i = 0; i < takeable.length; i++) {
+    for (let j = i + 1; j < takeable.length; j++) {
+      const candidate = `${takeable[i]}-${takeable[j]}`;
+      if (SLUG_RE.test(candidate)) return candidate;
+    }
+  }
+  // Priority 2: highest-ranked SINGLE token that passes SLUG_RE.
+  // Walks in ranked order for the same reason.
+  for (const term of takeable) {
+    if (SLUG_RE.test(term)) return term;
+  }
+  // Deterministic hash fallback — member ids sorted lex, hashed.
+  // Use the normalisedMembers we built earlier so plain-frontmatter
+  // callers get a stable hash too (their id lives at `.data.id` after
+  // normalisation, not `.id` directly).
+  const sortedIds = normalisedMembers
+    .map((leaf) => leaf?.data?.id ?? leaf?.path ?? "")
+    .filter(Boolean)
+    .sort();
+  const hash = hashString(sortedIds.join("|")).slice(0, 7);
+  return `cluster-${hash}`;
+}
+
+// Build an IDF map over a sibling leaf set once, for reuse across
+// multiple `generateDeterministicSlug` calls on clusters within the
+// same parent directory. Every candidate cluster under a given parent
+// shares the same corpus context, so computing IDF once per directory
+// — rather than once per candidate — is strictly better for any
+// directory with ≥ 2 candidate clusters. Drop the return value into
+// `generateDeterministicSlug(.., .., { precomputedIdf: idfMap })`.
+export function buildSiblingIdfContext(siblings) {
+  const tokenLists = siblings.map((leaf) =>
+    tokenize(entryText(leaf?.data ?? leaf)),
+  );
+  return computeIdf(tokenLists);
+}
+
+// Deterministic purpose for the NEST stub's `focus:` field. Picks the
+// single cover phrase that appears in the most member frontmatters
+// (with lex tie-breaking for reproducibility). When members share no
+// covers, falls back to the focus of the member whose id sorts first
+// — still deterministic, still driven by member content alone.
+//
+// Accepts either `{ path, data }` leaf wrappers or plain frontmatter
+// objects. Input is normalised via `leaf?.data ?? leaf` at the top so
+// this helper matches `generateDeterministicSlug` + `buildSiblingIdfContext`'s
+// API shape — callers can pass whichever form they already have
+// without getting silent empty results for the plain-object path.
+export function deterministicPurpose(componentLeaves) {
+  const normalised = componentLeaves.map((leaf) => leaf?.data ?? leaf);
+  const counts = new Map();
+  for (const data of normalised) {
+    const covers = Array.isArray(data?.covers) ? data.covers : [];
+    const seenInLeaf = new Set();
+    for (const cover of covers) {
+      const key = typeof cover === "string" ? cover.trim() : "";
+      if (!key || seenInLeaf.has(key)) continue;
+      seenInLeaf.add(key);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+  if (counts.size > 0) {
+    const ranked = Array.from(counts.entries()).sort((a, b) => {
+      if (b[1] !== a[1]) return b[1] - a[1];
+      return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+    });
+    return ranked[0][0];
+  }
+  const sorted = normalised
+    .map((data) => ({ id: data?.id ?? "", focus: data?.focus ?? "" }))
+    .filter((x) => x.id)
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return sorted[0]?.focus ?? "";
+}
+
+// Local helper — a simple, stable non-crypto hash. `createHash` would
+// be fine but adds a node:crypto import and is overkill for a 7-char
+// slug suffix. FNV-1a 32-bit is widely used, stable across Node
+// versions, and deterministic on the same string input.
+function hashString(str) {
+  let h = 0x811c9dc5 >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+}
+

@@ -70,6 +70,7 @@ export const VALID_QUALITY_MODES = Object.freeze([
   "tiered-fast",
   "claude-first",
   "tier0-only",
+  "deterministic",
 ]);
 
 export function ok(plan) {

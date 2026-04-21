@@ -14,9 +14,12 @@ import {
   MAX_CLUSTER_SIZE,
   MIN_CLUSTER_SIZE,
   buildProposeStructureRequest,
+  buildSiblingIdfContext,
   computeAffinityMatrix,
   detectClusters,
+  deterministicPurpose,
   findComponents,
+  generateDeterministicSlug,
   partitionShapeScore,
 } from "../../scripts/lib/cluster-detect.mjs";
 
@@ -323,4 +326,189 @@ test("buildProposeStructureRequest: returns a propose_structure request", () => 
   assert.equal(req.inputs.leaves.length, 3);
   assert.equal(req.inputs.leaves[0].id, "a");
   assert.deepEqual(req.inputs.leaves[0].activation_keywords, ["k1"]);
+});
+
+// ─── generateDeterministicSlug ───────────────────────────────────────
+
+// Three leaves share a distinguishing theme ("kafka consumers") against
+// a broader siblings corpus that also covers unrelated caching + HTTP.
+// The slug should pick up on the cluster's distinguishing terms (kafka
+// or consumer), not the wiki-wide dominant terms.
+const kafkaCluster = () => [
+  {
+    path: "/tmp/a.md",
+    data: {
+      id: "kafka-consumer-groups",
+      focus: "kafka consumer group rebalancing semantics",
+      covers: ["rebalance protocol", "partition assignment"],
+      tags: ["kafka", "messaging"],
+    },
+  },
+  {
+    path: "/tmp/b.md",
+    data: {
+      id: "kafka-consumer-offsets",
+      focus: "kafka consumer offset commits and reset",
+      covers: ["committed offsets", "auto offset reset"],
+      tags: ["kafka", "messaging"],
+    },
+  },
+  {
+    path: "/tmp/c.md",
+    data: {
+      id: "kafka-consumer-threading",
+      focus: "kafka consumer threading and poll loop",
+      covers: ["poll loop", "consumer thread model"],
+      tags: ["kafka", "messaging"],
+    },
+  },
+];
+
+const siblingsCorpus = () => [
+  ...kafkaCluster().map((l) => l.data),
+  { id: "redis-cache", focus: "redis caching strategies",
+    covers: ["lru eviction", "stampede"], tags: ["redis", "cache"] },
+  { id: "http-retry", focus: "http retry budgets and timeouts",
+    covers: ["retry budget", "exponential backoff"], tags: ["http", "network"] },
+];
+
+test("generateDeterministicSlug: picks distinguishing kebab-case tokens", () => {
+  const slug = generateDeterministicSlug(kafkaCluster(), siblingsCorpus());
+  assert.ok(/^[a-z][a-z0-9-]{0,63}$/.test(slug), `invalid slug: ${slug}`);
+  assert.ok(
+    slug.includes("kafka") || slug.includes("consumer") || slug.includes("messaging"),
+    `slug "${slug}" should surface the cluster's distinguishing theme`,
+  );
+});
+
+test("generateDeterministicSlug: is order-invariant (byte-stable across shuffles)", () => {
+  const leaves = kafkaCluster();
+  const ctx = siblingsCorpus();
+  const base = generateDeterministicSlug(leaves, ctx);
+  const reversed = generateDeterministicSlug([...leaves].reverse(), ctx);
+  const rotated = generateDeterministicSlug(
+    [leaves[2], leaves[0], leaves[1]],
+    ctx,
+  );
+  assert.equal(reversed, base, "reversing members must not change the slug");
+  assert.equal(rotated, base, "rotating members must not change the slug");
+});
+
+test("generateDeterministicSlug: opts.precomputedIdf matches derived-from-corpus", () => {
+  // Precomputing the IDF map once per directory (via
+  // buildSiblingIdfContext) is a hot-path optimisation in
+  // operators.mjs. Pin the equivalence: slug produced from a
+  // precomputed IDF map must match slug produced from raw corpus.
+  const leaves = kafkaCluster();
+  const ctx = siblingsCorpus();
+  const idf = buildSiblingIdfContext(ctx.map((entry) => ({ data: entry })));
+  const fromRaw = generateDeterministicSlug(leaves, ctx);
+  const fromPrecomputed = generateDeterministicSlug(leaves, null, {
+    precomputedIdf: idf,
+  });
+  assert.equal(fromPrecomputed, fromRaw);
+});
+
+test("generateDeterministicSlug: stable member-order holds under pseudo-shuffle", () => {
+  // Sorting members by id BEFORE summing tf-idf removes any
+  // floating-point order-sensitivity. 10 deterministic shuffles of
+  // the same cluster must all produce the same slug.
+  const leaves = kafkaCluster();
+  const ctx = siblingsCorpus();
+  const base = generateDeterministicSlug(leaves, ctx);
+  for (let trial = 0; trial < 10; trial++) {
+    const shuffled = [...leaves];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = (trial * 7 + i) % (i + 1);
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    assert.equal(
+      generateDeterministicSlug(shuffled, ctx),
+      base,
+      `shuffle trial ${trial} produced different slug`,
+    );
+  }
+});
+
+test("generateDeterministicSlug: same inputs → same slug across many runs", () => {
+  const leaves = kafkaCluster();
+  const ctx = siblingsCorpus();
+  const slugs = new Set();
+  for (let i = 0; i < 20; i++) {
+    slugs.add(generateDeterministicSlug(leaves, ctx));
+  }
+  assert.equal(
+    slugs.size,
+    1,
+    `slug must be stable; saw variants: ${Array.from(slugs).join(", ")}`,
+  );
+});
+
+test("generateDeterministicSlug: hash fallback when no valid token survives", () => {
+  // Leaves carrying only short tokens and numerics → no valid slug
+  // component survives the tokenizer's 2-char floor, so the fallback
+  // hash path fires. Still deterministic.
+  const leaves = [
+    { path: "/tmp/a.md", data: { id: "1", focus: "", covers: [], tags: [] } },
+    { path: "/tmp/b.md", data: { id: "2", focus: "", covers: [], tags: [] } },
+  ];
+  const slug = generateDeterministicSlug(leaves, []);
+  assert.ok(slug.startsWith("cluster-"), `expected hash fallback, got: ${slug}`);
+  assert.ok(
+    /^cluster-[a-f0-9]{7}$/.test(slug),
+    `hash fallback slug must be deterministic: ${slug}`,
+  );
+  // Reproducible:
+  assert.equal(generateDeterministicSlug(leaves, []), slug);
+});
+
+// ─── deterministicPurpose ────────────────────────────────────────────
+
+test("deterministicPurpose: picks the most-shared cover phrase", () => {
+  const leaves = [
+    { data: { id: "a", focus: "A focus", covers: ["shared-topic", "alpha"] } },
+    { data: { id: "b", focus: "B focus", covers: ["shared-topic", "beta"] } },
+    { data: { id: "c", focus: "C focus", covers: ["gamma"] } },
+  ];
+  assert.equal(deterministicPurpose(leaves), "shared-topic");
+});
+
+test("deterministicPurpose: lex tie-break on equal frequency", () => {
+  const leaves = [
+    { data: { id: "a", focus: "A focus", covers: ["zzz"] } },
+    { data: { id: "b", focus: "B focus", covers: ["aaa"] } },
+  ];
+  assert.equal(
+    deterministicPurpose(leaves),
+    "aaa",
+    "lex-smallest wins tie-break for reproducibility",
+  );
+});
+
+test("deterministicPurpose: falls back to first-sorted-id's focus when no covers", () => {
+  const leaves = [
+    { data: { id: "beta", focus: "beta focus text" } },
+    { data: { id: "alpha", focus: "alpha focus text" } },
+  ];
+  assert.equal(deterministicPurpose(leaves), "alpha focus text");
+});
+
+test("deterministicPurpose: accepts plain frontmatter objects (no wrapper)", () => {
+  // API-shape symmetry with generateDeterministicSlug and
+  // buildSiblingIdfContext: the helper must normalise either leaf
+  // wrappers OR plain frontmatter objects. Without this, a caller
+  // that (reasonably) passed plain frontmatter objects would see
+  // every cover read as empty and fall through to the focus
+  // fallback silently — output would be byte-identical per run but
+  // semantically wrong.
+  const plain = [
+    { id: "a", focus: "A focus", covers: ["shared-topic", "alpha"] },
+    { id: "b", focus: "B focus", covers: ["shared-topic", "beta"] },
+    { id: "c", focus: "C focus", covers: ["gamma"] },
+  ];
+  assert.equal(deterministicPurpose(plain), "shared-topic");
+  // Control: the same inputs wrapped in `{ data }` must produce the
+  // same result, proving the normalisation is semantically lossless.
+  const wrapped = plain.map((data) => ({ data }));
+  assert.equal(deterministicPurpose(wrapped), "shared-topic");
 });

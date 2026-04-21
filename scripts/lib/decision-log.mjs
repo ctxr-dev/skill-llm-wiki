@@ -164,14 +164,18 @@ export function appendDecision(wikiRoot, entry) {
 //
 //   op_id, operator="NEST"                — as-is
 //   sources                               — leaf ids in the cluster
-//   tier_used                             — 2 (every NEST decision
-//                                           touches Tier 2 either
-//                                           via propose_structure
-//                                           or nest_decision)
+//   tier_used                             — caller-supplied (default 2
+//                                           for legacy Tier-2-touching
+//                                           NEST paths; 0 under
+//                                           `--quality-mode deterministic`
+//                                           since no sub-agent is
+//                                           consulted)
 //   similarity                            — average_affinity
 //   confidence_band                       — one of:
 //                                           "tier2-proposed",
+//                                           "tier2-and-math",
 //                                           "math-gated",
+//                                           "deterministic-math",
 //                                           "empty-partition",
 //                                           "rejected-by-metric",
 //                                           "rejected-by-gate"
@@ -187,16 +191,28 @@ export function appendDecision(wikiRoot, entry) {
 // Coercion: average_affinity may be undefined for Tier-2-proposed
 // clusters; we coerce to 0 so the finite-number validator does
 // not reject the entry.
+//
+// tier_used default: pre-deterministic-mode every NEST decision
+// touched Tier 2 via propose_structure or nest_decision, so the
+// default of 2 was correct. Under `--quality-mode deterministic`
+// Tier 2 is never consulted for math candidates; callers on that
+// path pass `tier_used: 0` so the audit trail correctly reflects
+// the fact that no sub-agent was invoked. The default remains 2
+// for backward compatibility with every existing call site.
 export function appendNestDecision(wikiRoot, entry) {
   const similarity =
     Number.isFinite(entry.similarity)
       ? entry.similarity
       : (Number.isFinite(entry.average_affinity) ? entry.average_affinity : 0);
+  const tier_used =
+    typeof entry.tier_used === "number" && Number.isInteger(entry.tier_used)
+      ? entry.tier_used
+      : 2;
   appendDecision(wikiRoot, {
     op_id: entry.op_id,
     operator: "NEST",
     sources: Array.isArray(entry.sources) ? entry.sources : [],
-    tier_used: 2,
+    tier_used,
     similarity,
     confidence_band: entry.confidence_band ?? null,
     decision: entry.decision,

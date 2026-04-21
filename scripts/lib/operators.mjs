@@ -53,7 +53,10 @@ import {
 } from "./tiered.mjs";
 import {
   buildProposeStructureRequest,
+  buildSiblingIdfContext,
   detectClusters,
+  deterministicPurpose,
+  generateDeterministicSlug,
   MAX_CLUSTER_SIZE,
   MIN_CLUSTER_SIZE,
   MIN_MATH_CLUSTER_SIZE,
@@ -591,6 +594,7 @@ export async function runConvergence(wikiRoot, ctx = {}) {
       metricTrajectory,
       commitBetweenIterations,
       nestedParents,
+      qualityMode,
     });
     if (nestOutcome === "applied") continue;
     if (nestOutcome === "pending-tier2") {
@@ -670,7 +674,9 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
     metricTrajectory,
     commitBetweenIterations,
     nestedParents = new Set(),
+    qualityMode = "tiered-fast",
   } = ctx;
+  const deterministic = qualityMode === "deterministic";
 
   // Collect candidate proposals across every parent directory.
   // For each directory:
@@ -720,23 +726,28 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
 
     const relDir = relative(wikiRoot, dir) || ".";
 
-    // Step 1: propose_structure Tier 2 request. Park on pending
-    // without short-circuiting the math phase below.
+    // Step 1: propose_structure Tier 2 request. Skipped in
+    // deterministic mode — the whole point is no LLM in the loop.
+    // Math detection alone drives structural proposals; no Tier 2
+    // subcategory suggestions are ever ingested, so byte-reproducible
+    // outputs are guaranteed from the same inputs.
     let tier2Clusters = [];
-    const proposeReq = buildProposeStructureRequest(relDir, leaves);
-    const proposeResp = resolveTier2Response(wikiRoot, fixture, proposeReq);
-    if (proposeResp === "pending") {
-      enqueuePending(wikiRoot, proposeReq);
-      suggestions.push({
-        operator: "NEST",
-        sources: leaves.map((l) => l.path),
-        reason: `propose_structure parked for ${relDir} (awaiting Tier 2)`,
-      });
-      // Fall through — math still runs so any cluster this dir
-      // carries is evaluated (and its gate/naming requests are
-      // batched alongside every other directory's) before we exit 7.
-    } else {
-      tier2Clusters = extractTier2Clusters(proposeResp, leaves, dir);
+    if (!deterministic) {
+      const proposeReq = buildProposeStructureRequest(relDir, leaves);
+      const proposeResp = resolveTier2Response(wikiRoot, fixture, proposeReq);
+      if (proposeResp === "pending") {
+        enqueuePending(wikiRoot, proposeReq);
+        suggestions.push({
+          operator: "NEST",
+          sources: leaves.map((l) => l.path),
+          reason: `propose_structure parked for ${relDir} (awaiting Tier 2)`,
+        });
+        // Fall through — math still runs so any cluster this dir
+        // carries is evaluated (and its gate/naming requests are
+        // batched alongside every other directory's) before we exit 7.
+      } else {
+        tier2Clusters = extractTier2Clusters(proposeResp, leaves, dir);
+      }
     }
 
     // Step 2: math cluster detection (aggressive scan).
@@ -755,6 +766,40 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
     // Step 3: merge proposals, dedup by member set.
     const merged = mergeClusterProposals(tier2Clusters, mathClusters);
     for (const c of merged) c.parent_dir = dir;
+    // Step 3b (deterministic only): pre-name every math candidate
+    // using `generateDeterministicSlug` so the naming loop below
+    // treats them as already-named and skips the cluster_name
+    // Tier 2 request. The sibling leaves at `dir` act as the IDF
+    // context for the slug generator so terms that are common
+    // across the entire directory get down-weighted relative to
+    // terms that distinguish the cluster from its siblings — the
+    // slug becomes the cluster's most-distinguishing feature.
+    //
+    // Precompute the IDF map ONCE per directory and reuse it across
+    // every candidate. Without this, each `generateDeterministicSlug`
+    // call would re-tokenize + recompute IDF over the full sibling
+    // corpus — an O(|siblings| × |candidates|) repeat on dirs with
+    // multiple candidates. A shared map collapses that to
+    // O(|siblings| + |candidates| × |cluster|). Same byte-output;
+    // faster for dense dirs.
+    if (deterministic) {
+      // Only build the sibling-IDF context when there's at least one
+      // math candidate that will actually consume it. Skipping the
+      // tokenisation + IDF computation on directories that produced
+      // only tier2-sourced (or no) candidates avoids a hot-path cost
+      // on large sibling sets for no gain.
+      const hasMathCandidate = merged.some((c) => c.source === "math");
+      if (hasMathCandidate) {
+        const deterministicIdf = buildSiblingIdfContext(leaves);
+        for (const cand of merged) {
+          if (cand.source !== "math") continue;
+          cand.slug = generateDeterministicSlug(cand.leaves, leaves, {
+            precomputedIdf: deterministicIdf,
+          });
+          cand.purpose = deterministicPurpose(cand.leaves);
+        }
+      }
+    }
     allCandidates.push(...merged);
   }
 
@@ -765,6 +810,12 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
   // Step 4: math-only candidates go through a mandatory
   // nest_decision gate. Candidates that came from propose_structure
   // are already structurally approved by Tier 2 — skip the gate.
+  //
+  // In deterministic mode the gate is also skipped: math candidates
+  // produced by the aggressive-threshold scan are auto-approved
+  // because the partition-shape score + metric regression gate
+  // downstream are the algorithmic equivalents of the gate and are
+  // fully deterministic.
   const gatedCandidates = [];
   for (const cand of allCandidates) {
     if (cand.source === "tier2" || cand.source === "both") {
@@ -781,6 +832,11 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
     // Drop the candidate here and log the reason for the audit trail.
     if (!mathCandidateIsFresh(cand)) {
       dropStaleMathCandidate(wikiRoot, cand, opId, suggestions);
+      continue;
+    }
+    if (deterministic) {
+      cand.gate_reason = "deterministic mode: algorithmic auto-approve";
+      gatedCandidates.push(cand);
       continue;
     }
     // math-only: run the gate.
@@ -1002,12 +1058,28 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
       dropStaleMathCandidate(wikiRoot, proposal, opId, suggestions);
       continue;
     }
+    // Confidence band + tier_used reflect how the candidate got here.
+    // Under `--quality-mode deterministic` every math candidate was
+    // auto-approved algorithmically (no sub-agent ever consulted),
+    // so the audit trail must say so:
+    //   - `confidence_band: "deterministic-math"` distinguishes these
+    //     entries from math candidates that passed a Tier 2
+    //     `nest_decision` gate.
+    //   - `tier_used: 0` correctly records that no Tier was consulted
+    //     at decision time. Tooling/tests that interpret tier_used as
+    //     actual Tier usage no longer see a misleading `2`.
+    // Under every other quality mode the paths that reach here
+    // touched Tier 2 at least once (propose_structure, nest_decision,
+    // or both), so tier_used stays at the legacy default of 2.
     const confBand =
-      proposal.source === "both"
-        ? "tier2-and-math"
-        : proposal.source === "tier2"
-          ? "tier2-proposed"
-          : "math-gated";
+      deterministic && proposal.source === "math"
+        ? "deterministic-math"
+        : proposal.source === "both"
+          ? "tier2-and-math"
+          : proposal.source === "tier2"
+            ? "tier2-proposed"
+            : "math-gated";
+    const tierUsed = confBand === "deterministic-math" ? 0 : 2;
     const preMetric = computeRoutingCost(wikiRoot).cost;
     // Snapshot the files we're about to mutate so we can roll back
     // on a metric regression. We ONLY need the old leaf contents
@@ -1044,6 +1116,7 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
         sources: proposal.leaves.map((l) => l.data.id),
         similarity: proposal.average_affinity ?? 0,
         confidence_band: confBand,
+        tier_used: tierUsed,
         decision: "rejected-by-gate",
         reason: `applyNest threw: ${err.message}`,
       });
@@ -1093,6 +1166,7 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
         sources: proposal.leaves.map((l) => l.data.id),
         similarity: proposal.average_affinity ?? 0,
         confidence_band: confBand,
+        tier_used: tierUsed,
         decision: "rejected-by-metric",
         reason: `metric ${preMetric.toFixed(4)} → ${postMetric.toFixed(4)} exceeds ${policyLabel}`,
       });
@@ -1110,6 +1184,7 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
         sources: proposal.leaves.map((l) => l.data.id),
         similarity: proposal.average_affinity ?? 0,
         confidence_band: confBand,
+        tier_used: tierUsed,
         decision: "slug-renamed",
         reason: `slug "${originalSlug}" collided with existing id; renamed to "${resolvedSlug}"`,
       });
@@ -1143,6 +1218,7 @@ async function tryClusterNestIteration(wikiRoot, ctx) {
       sources: proposal.leaves.map((l) => l.data.id),
       similarity: proposal.average_affinity ?? 0,
       confidence_band: confBand,
+      tier_used: tierUsed,
       decision: "applied",
       reason:
         `slug=${proposal.slug}, ` +
