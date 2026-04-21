@@ -408,11 +408,24 @@ test("runBalance: fanout pass skips un-actionable overfull[0], acts on a later c
       `expected at least one BALANCE_SUBCLUSTER despite diverse/ being un-actionable; got ${JSON.stringify(r.applied)}`,
     );
     // Every sub-cluster must have come out of /themed/, not /diverse/.
+    // Use `sources[]` (absolute paths with OS-native separators) as the
+    // ground-truth — the `describe` string rendering uses OS-native
+    // separators on Windows (`themed\\...`) which a bare `"themed/"`
+    // substring match would miss. Checking each source starts with the
+    // themed parent path is platform-agnostic.
+    const themedDir = join(wiki, "themed");
+    const diverseDir = join(wiki, "diverse");
     for (const app of subclustered) {
-      assert.ok(
-        app.describe.includes("themed/"),
-        `sub-cluster should target themed/, got: ${app.describe}`,
-      );
+      for (const src of app.sources) {
+        assert.ok(
+          src.startsWith(themedDir),
+          `sub-cluster source must be under themed/, got: ${src}`,
+        );
+        assert.ok(
+          !src.startsWith(diverseDir),
+          `sub-cluster source must NOT be under diverse/, got: ${src}`,
+        );
+      }
     }
   } finally {
     rmSync(wiki, { recursive: true, force: true });
