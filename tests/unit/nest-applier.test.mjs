@@ -5,11 +5,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseFrontmatter, renderFrontmatter } from "../../scripts/lib/frontmatter.mjs";
 import {
   applyNest,
+  buildWikiForbiddenIndex,
   resolveNestSlug,
   validateSlug,
 } from "../../scripts/lib/nest-applier.mjs";
@@ -35,6 +36,40 @@ function writeLeaf(wikiRoot, relPath, id, extra = {}) {
     covers: [`${id} cover`],
     tags: extra.tags || ["default"],
     activation: { keyword_matches: extra.kw || [id] },
+  };
+  writeFileSync(full, renderFrontmatter(data, "\n# " + id + "\n"), "utf8");
+  return { path: full, data };
+}
+
+// Write an `index.md` with index-shaped frontmatter (type: "index",
+// depth_role: "category"), matching what the validator enforces for
+// every index entry in a real wiki (id == basename(dirname), type ==
+// "index", non-empty parents[] for every non-root index). Use this
+// instead of writeLeaf whenever a test plants a directory index, so
+// fixtures mirror the production shape and future stricter
+// validators don't start failing these tests for type / depth_role /
+// parents mismatches.
+//
+// `parents` default shape:
+//   - Root index (relPath === "index.md" at wikiRoot): `[]` — roots
+//     have no parent. The validator's non-empty-parents rule
+//     carves out the root.
+//   - Non-root index (any `<subdir>/index.md`): `["../index.md"]` —
+//     non-empty, points at the directory above, which is what every
+//     real non-root index carries. Callers can override via
+//     `extra.parents` if a test needs a specific path.
+function writeIndex(wikiRoot, relPath, id, extra = {}) {
+  const full = join(wikiRoot, relPath);
+  mkdirSync(join(full, ".."), { recursive: true });
+  const isRootIndex = relPath === "index.md";
+  const defaultParents = isRootIndex ? [] : ["../index.md"];
+  const data = {
+    id,
+    type: "index",
+    depth_role: extra.depth_role ?? "category",
+    focus: `${id} category`,
+    parents: extra.parents ?? defaultParents,
+    tags: extra.tags ?? ["default"],
   };
   writeFileSync(full, renderFrontmatter(data, "\n# " + id + "\n"), "utf8");
   return { path: full, data };
@@ -460,6 +495,38 @@ test("resolveNestSlug: length-overflow on suffix short-circuits instead of spinn
   }
 });
 
+test("resolveNestSlug: numeric-suffix loop re-validates each candidate against SLUG_RE", () => {
+  // Boundary case: base slug at 57 chars. `${slug}-group` is 63
+  // chars (valid), but `${slug}-group-2` is 65 (invalid) and every
+  // `${slug}-group-N` from N=2..99 is equally invalid. Plant a
+  // collision on both the base slug AND "-group" so the resolver is
+  // forced past them into the numeric-suffix loop; the loop must
+  // re-check validateSlug on each candidate and bail back to the
+  // original slug when the first candidate overflows — NOT return an
+  // invalid slug that applyNest would reject with "invalid slug".
+  const wiki = tmpWiki("resolve-numeric-overflow");
+  try {
+    const base = "a".repeat(57);
+    const primary = `${base}-group`; // 63 chars, valid
+    assert.ok(validateSlug(primary), "baseline: -group variant validates");
+    const numeric2 = `${base}-group-2`; // 65 chars, invalid
+    assert.ok(!validateSlug(numeric2), "baseline: -group-2 variant overflows");
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    // Force collisions on both `base` and `${base}-group` so the
+    // resolver has to step into the numeric-suffix loop.
+    const l2 = writeLeaf(wiki, base + ".md", base);
+    writeLeaf(wiki, primary + ".md", primary);
+    const resolved = resolveNestSlug(base, { leaves: [l1, l2] });
+    assert.equal(
+      resolved,
+      base,
+      "numeric-suffix loop must bail out when the candidate overflows SLUG_RE",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("applyNest: slug pre-resolved against member collision lands cleanly", () => {
   const wiki = tmpWiki("apply-resolved");
   try {
@@ -482,6 +549,565 @@ test("applyNest: slug pre-resolved against member collision lands cleanly", () =
       moved,
     );
     assert.equal(childData.id, "security");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+// ─── resolveNestSlug: full-tree cross-depth collision (Bug 2 fix) ──
+//
+// The v1.0.0 resolver checked only the cluster's immediate parent
+// directory for collisions. On real-world multi-branch wikis (first
+// observed during the skill-code-review 596-leaf build), a slug like
+// "event-patterns" proposed for a cluster in one branch could collide
+// with a leaf id or subdirectory at a completely different depth in
+// another branch — and the resolver would miss it, causing a
+// DUP-ID rollback downstream at validation.
+//
+// The fix: when wikiRoot is provided, walk the full tree and collect
+// every live id + directory basename into the forbidden set. These
+// tests exercise the new paths and confirm the parent-dir-only
+// behaviour is preserved when wikiRoot is absent (backward-compat).
+
+test("resolveNestSlug: cross-depth leaf-id collision in another branch → suffixed", () => {
+  // Structure:
+  //   <wiki>/
+  //     arch/
+  //       event-patterns/
+  //         index.md            (id: event-patterns)
+  //         cqrs.md             (id: cqrs)
+  //     design-patterns/        (cluster parent)
+  //       observer.md           (member)
+  //       publish-subscribe.md  (member)
+  //
+  // Proposal: NEST the two design-patterns/*.md leaves under a new
+  // subcategory with slug "event-patterns". Without full-tree walk,
+  // the resolver misses the arch/event-patterns/ collision; with
+  // wikiRoot, the walk catches it and auto-suffixes.
+  const wiki = tmpWiki("resolve-cross-depth-leaf");
+  try {
+    // Seed the `arch/event-patterns/` branch. writeIndex writes
+    // validator-shaped index frontmatter (`type: "index"`,
+    // `depth_role: "subcategory"`) and auto-mkdirs the parent.
+    writeIndex(wiki, "arch/event-patterns/index.md", "event-patterns", {
+      depth_role: "subcategory",
+    });
+    writeLeaf(wiki, "arch/event-patterns/cqrs.md", "cqrs");
+    // Seed the cluster parent
+    mkdirSync(join(wiki, "design-patterns"), { recursive: true });
+    const l1 = writeLeaf(wiki, "design-patterns/observer.md", "observer");
+    const l2 = writeLeaf(
+      wiki,
+      "design-patterns/publish-subscribe.md",
+      "publish-subscribe",
+    );
+
+    // Without wikiRoot — cross-depth collision missed (legacy behaviour)
+    assert.equal(
+      resolveNestSlug("event-patterns", { leaves: [l1, l2] }),
+      "event-patterns",
+      "parent-dir-only walk should NOT see the cross-depth collision",
+    );
+
+    // With wikiRoot — collision caught, suffixed
+    assert.equal(
+      resolveNestSlug("event-patterns", { leaves: [l1, l2] }, wiki),
+      "event-patterns-group",
+      "full-tree walk should catch the cross-depth collision",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: cross-depth subdir-basename collision → suffixed", () => {
+  // A subdirectory elsewhere in the tree carries a name that matches
+  // the proposed slug. Applying NEST with that slug would create two
+  // directories with the same basename id in the corpus — prevent it.
+  const wiki = tmpWiki("resolve-cross-depth-subdir");
+  try {
+    // Unrelated branch with a subdirectory named "patterns".
+    // writeIndex writes validator-shaped frontmatter and auto-mkdirs
+    // the parent, reusing the same helper every other index fixture
+    // in this suite goes through.
+    writeIndex(wiki, "other-branch/patterns/index.md", "patterns", {
+      depth_role: "subcategory",
+    });
+    // Cluster parent
+    mkdirSync(join(wiki, "cluster-parent"), { recursive: true });
+    const l1 = writeLeaf(wiki, "cluster-parent/alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "cluster-parent/beta.md", "beta");
+
+    assert.equal(
+      resolveNestSlug("patterns", { leaves: [l1, l2] }, wiki),
+      "patterns-group",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: full-tree walk still returns unchanged when no collision anywhere", () => {
+  // Regression guard: don't over-suffix on wikis with no real
+  // collision just because wikiRoot is provided.
+  const wiki = tmpWiki("resolve-cross-depth-clean");
+  try {
+    // Unrelated branch
+    mkdirSync(join(wiki, "other"), { recursive: true });
+    writeLeaf(wiki, "other/gamma.md", "gamma");
+    // Cluster parent
+    mkdirSync(join(wiki, "parent"), { recursive: true });
+    const l1 = writeLeaf(wiki, "parent/alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "parent/beta.md", "beta");
+
+    assert.equal(
+      resolveNestSlug("greek-letters", { leaves: [l1, l2] }, wiki),
+      "greek-letters",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: full-tree walk skips every dot-directory (blanket rule)", () => {
+  // Per Copilot review on PR #5: the walk uses a blanket
+  // `entry.name.startsWith(".")` rule consistent with
+  // `scripts/lib/chunk.mjs::collectEntryPaths`. This covers not only
+  // `.llmwiki/` and `.work/` (skill-owned) but any user dotfile the
+  // corpus might carry: `.git/`, `.github/`, `.shape/`, etc.
+  // Arbitrary files under these locations must never poison the
+  // forbidden set.
+  const wiki = tmpWiki("resolve-cross-depth-internals");
+  try {
+    // Seed fake internals with deliberately colliding names
+    mkdirSync(join(wiki, ".llmwiki", "git", "refs"), { recursive: true });
+    writeFileSync(
+      join(wiki, ".llmwiki", "git", "refs", "greek"),
+      "ref data\n",
+      "utf8",
+    );
+    // User `.git/` dir — common in corpora hosted inside a real repo.
+    // A markdown file under `.git/` with a colliding frontmatter id
+    // must NOT leak into the forbidden set.
+    mkdirSync(join(wiki, ".git", "logs"), { recursive: true });
+    writeFileSync(
+      join(wiki, ".git", "greek.md"),
+      renderFrontmatter({ id: "greek", type: "primary" }, "\n"),
+      "utf8",
+    );
+    // User `.github/` workflows dir — similar reasoning.
+    mkdirSync(join(wiki, ".github"), { recursive: true });
+    writeFileSync(
+      join(wiki, ".github", "greek.md"),
+      renderFrontmatter({ id: "greek", type: "primary" }, "\n"),
+      "utf8",
+    );
+    mkdirSync(join(wiki, ".work", "tier2"), { recursive: true });
+    writeFileSync(
+      join(wiki, ".work", "tier2", "greek.json"),
+      "{}\n",
+      "utf8",
+    );
+    // A real sibling leaf NOT named greek — confirms the walk still
+    // finds actual content.
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "beta.md", "beta");
+
+    // "greek" should pass through unchanged — .llmwiki and .work
+    // contents must not poison the forbidden set.
+    assert.equal(
+      resolveNestSlug("greek", { leaves: [l1, l2] }, wiki),
+      "greek",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: cross-depth collision chains to -group-N numeric fallback", () => {
+  // Both "event-patterns" and "event-patterns-group" exist at
+  // different depths in the tree. The resolver should fall through
+  // "-group" (collides) and land on "-group-2".
+  const wiki = tmpWiki("resolve-cross-depth-chain");
+  try {
+    // Branch 1: id "event-patterns". writeIndex writes validator-
+    // shaped frontmatter and auto-mkdirs the parent, reusing the
+    // same helper every other index fixture in this suite goes
+    // through.
+    writeIndex(wiki, "branch-a/event-patterns/index.md", "event-patterns", {
+      depth_role: "subcategory",
+    });
+    // Branch 2: id "event-patterns-group"
+    writeIndex(
+      wiki,
+      "branch-b/event-patterns-group/index.md",
+      "event-patterns-group",
+      { depth_role: "subcategory" },
+    );
+    // Cluster parent
+    mkdirSync(join(wiki, "cluster-parent"), { recursive: true });
+    const l1 = writeLeaf(wiki, "cluster-parent/alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "cluster-parent/beta.md", "beta");
+
+    assert.equal(
+      resolveNestSlug("event-patterns", { leaves: [l1, l2] }, wiki),
+      "event-patterns-group-2",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("buildWikiForbiddenIndex: captures every leaf id + dir basename", () => {
+  // Snapshot contract: index contains every non-dot directory basename
+  // and every leaf frontmatter id under wikiRoot. Consumers use this as
+  // a reusable snapshot in multi-NEST iterations to avoid paying for a
+  // full-tree walk on every resolveNestSlug call.
+  //
+  // Use a custom short-basename wikiRoot (like the `short-wiki` test
+  // further down) so the root `index.md` id can legitimately equal
+  // `basename(wikiRoot)` — which is what the validator enforces for
+  // every index entry (`type: index` id === basename(dirname(index.md))).
+  // A made-up id like "wiki-root" would violate that invariant and
+  // diverge from production shape.
+  const parent = tmpWiki("forbidden-index-parent");
+  const wiki = join(parent, "root-wiki");
+  mkdirSync(wiki, { recursive: true });
+  try {
+    const rootId = basename(wiki); // "root-wiki"
+    writeLeaf(wiki, "alpha.md", "alpha");
+    writeLeaf(wiki, "beta.md", "beta");
+    writeLeaf(wiki, "sub/gamma.md", "gamma");
+    writeLeaf(wiki, "sub/delta.md", "delta");
+    writeLeaf(wiki, "other/epsilon.md", "epsilon");
+    // Root index.md — id must match basename(wikiRoot) per validator.
+    writeIndex(wiki, "index.md", rootId);
+    // Dot-directory — must be skipped.
+    writeLeaf(wiki, ".cache/ignored.md", "ignored");
+
+    const index = buildWikiForbiddenIndex(wiki);
+    for (const id of [
+      "alpha",
+      "beta",
+      "gamma",
+      "delta",
+      "epsilon",
+      rootId,
+      "sub",
+      "other",
+    ]) {
+      assert.ok(index.has(id), `index should contain "${id}"`);
+    }
+    assert.equal(
+      index.has("ignored"),
+      false,
+      "dot-directory entries must be skipped",
+    );
+    assert.equal(
+      index.has(".cache"),
+      false,
+      "dot-directory basenames must be skipped",
+    );
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: opts.wikiIndex short-circuits the full-tree walk", () => {
+  // Performance contract: when a precomputed index is supplied, the
+  // resolver must NOT re-walk wiki-wide. We verify behaviourally by
+  // constructing a tree, building the index, then deleting the files
+  // that the walk would have consulted — a post-build deletion would
+  // flip the result if the resolver re-read them. With the precomputed
+  // path the result must stay consistent with the snapshot.
+  const wiki = tmpWiki("wiki-index-short-circuit");
+  try {
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "beta.md", "beta");
+    // Seed a collider leaf in a sibling branch at snapshot time.
+    writeLeaf(wiki, "arch/event-patterns.md", "event-patterns");
+    const wikiIndex = buildWikiForbiddenIndex(wiki);
+    // Delete the collider AFTER the snapshot. The snapshot still
+    // "remembers" it — so the resolver must auto-suffix.
+    rmSync(join(wiki, "arch"), { recursive: true, force: true });
+    assert.equal(
+      resolveNestSlug(
+        "event-patterns",
+        { leaves: [l1, l2] },
+        wiki,
+        { wikiIndex },
+      ),
+      "event-patterns-group",
+      "precomputed wikiIndex drives the decision even after tree mutates",
+    );
+    // And a non-collider stays unchanged via the precomputed set.
+    assert.equal(
+      resolveNestSlug("fresh-slug", { leaves: [l1, l2] }, wiki, { wikiIndex }),
+      "fresh-slug",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: caller-driven wikiIndex mutation reflects applied NESTs", () => {
+  // Integration contract: the multi-NEST caller mutates the index after
+  // each successful apply by `wikiIndex.add(resolvedSlug)`. The NEXT
+  // resolveNestSlug call must see the new directory as occupied and
+  // auto-suffix. This is the sequencing guarantee operators.mjs relies
+  // on when applying multiple non-conflicting NESTs in one iteration.
+  const wiki = tmpWiki("wiki-index-mutation");
+  try {
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "beta.md", "beta");
+    const l3 = writeLeaf(wiki, "gamma.md", "gamma");
+    const l4 = writeLeaf(wiki, "delta.md", "delta");
+    const wikiIndex = buildWikiForbiddenIndex(wiki);
+    // First proposal: slug "patterns" — no collision anywhere.
+    const first = resolveNestSlug(
+      "patterns",
+      { leaves: [l1, l2] },
+      wiki,
+      { wikiIndex },
+    );
+    assert.equal(first, "patterns");
+    // Simulate a successful apply.
+    wikiIndex.add(first);
+    // Second proposal wants the same slug — must auto-suffix because
+    // the first pick has taken it.
+    const second = resolveNestSlug(
+      "patterns",
+      { leaves: [l3, l4] },
+      wiki,
+      { wikiIndex },
+    );
+    assert.equal(
+      second,
+      "patterns-group",
+      "second pick in same iteration must see the first pick's slug as occupied",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: slug matching a parent-index alias auto-suffixes", () => {
+  // The parent-dir walk explicitly skips `index.md` (its id is covered
+  // by the `basename(parentDir)` add). But the parent's own
+  // `aliases[]` aren't reconstructible from the directory name, so
+  // they get harvested via a targeted streaming read separate from
+  // the loop. Without that read, a slug equal to a parent-index alias
+  // would slip past every other guard and trip ALIAS-COLLIDES-ID at
+  // validate time.
+  //
+  // This test uses the legacy (no-wikiRoot) path to exercise the
+  // parent-index-alias branch directly. The full-tree walkers
+  // (walkWikiIds / buildWikiForbiddenIndex) already harvest every
+  // entry's aliases including indices, so they're covered by the
+  // preceding test.
+  const parent = tmpWiki("parent-index-alias");
+  const wiki = join(parent, "root-wiki");
+  mkdirSync(wiki, { recursive: true });
+  try {
+    // Cluster parent carries an alias `canonical-patterns` on its
+    // own index.md. A cluster proposal with slug "canonical-patterns"
+    // would otherwise pass every other guard.
+    const clusterParent = join(wiki, "mod");
+    mkdirSync(clusterParent, { recursive: true });
+    writeFileSync(
+      join(clusterParent, "index.md"),
+      renderFrontmatter(
+        {
+          id: "mod",
+          type: "index",
+          depth_role: "subcategory",
+          focus: "mod category",
+          parents: ["../index.md"],
+          aliases: ["canonical-patterns"],
+          tags: ["default"],
+        },
+        "\n# mod\n",
+      ),
+      "utf8",
+    );
+    const l1 = writeLeaf(clusterParent, "alpha.md", "alpha");
+    const l2 = writeLeaf(clusterParent, "beta.md", "beta");
+
+    assert.equal(
+      resolveNestSlug("canonical-patterns", { leaves: [l1, l2] }),
+      "canonical-patterns-group",
+      "parent-index alias must enter the forbidden set via its targeted streaming read",
+    );
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: slug matching an existing alias auto-suffixes (ALIAS-COLLIDES-ID guard)", () => {
+  // The validator enforces ALIAS-COLLIDES-ID in addition to DUP-ID.
+  // Before this guard, the forbidden set collected only frontmatter
+  // `id`s, so a slug equal to an existing alias would pass
+  // resolveNestSlug but trip ALIAS-COLLIDES-ID at validate-time,
+  // forcing a rollback. Now aliases are reserved alongside ids in
+  // every walk (parent-dir, walkWikiIds fallback, buildWikiForbiddenIndex
+  // precompute). This test pins the three walk paths:
+  //   (a) wikiRoot omitted → legacy parent-dir walk
+  //   (b) wikiRoot provided → walkWikiIds fallback
+  //   (c) opts.wikiIndex provided → precomputed path
+  const wiki = tmpWiki("alias-collision");
+  try {
+    // Plant a sibling leaf with an alias the cluster slug will match.
+    // (filename matches the leaf's id to keep the fixture
+    // invariant-clean; the alias is the collision surface.)
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "beta.md", "beta");
+    writeLeaf(wiki, "gamma.md", "gamma", { tags: ["default"] });
+    // Manually rewrite gamma to carry an alias.
+    const gammaPath = join(wiki, "gamma.md");
+    const gammaFrontmatter = {
+      id: "gamma",
+      type: "primary",
+      depth_role: "leaf",
+      focus: "gamma focus",
+      parents: ["index.md"],
+      covers: ["gamma cover"],
+      tags: ["default"],
+      aliases: ["claimed-slug"],
+      activation: { keyword_matches: ["gamma"] },
+    };
+    writeFileSync(
+      gammaPath,
+      renderFrontmatter(gammaFrontmatter, "\n# gamma\n"),
+      "utf8",
+    );
+
+    // (a) Legacy parent-dir walk.
+    assert.equal(
+      resolveNestSlug("claimed-slug", { leaves: [l1, l2] }),
+      "claimed-slug-group",
+      "parent-dir walk must reserve aliases",
+    );
+
+    // (b) Full-tree walkWikiIds path.
+    assert.equal(
+      resolveNestSlug("claimed-slug", { leaves: [l1, l2] }, wiki),
+      "claimed-slug-group",
+      "walkWikiIds fallback must reserve aliases",
+    );
+
+    // (c) Precomputed wikiIndex path.
+    const idx = buildWikiForbiddenIndex(wiki);
+    assert.ok(
+      idx.has("claimed-slug"),
+      "buildWikiForbiddenIndex must include aliases",
+    );
+    assert.equal(
+      resolveNestSlug("claimed-slug", { leaves: [l1, l2] }, wiki, {
+        wikiIndex: idx,
+      }),
+      "claimed-slug-group",
+      "opts.wikiIndex path must reserve aliases",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: slug equal to parent-dir basename auto-suffixes (DUP-ID guard)", () => {
+  // The parent's `index.md` carries id === basename(parentDir) under
+  // the validator invariant. If NEST's slug equals that basename, the
+  // new subdir's stub index.md would also carry id === slug ===
+  // basename(parentDir) → two index.md files with the same id →
+  // DUP-ID at validate time. Earlier versions of this function's doc
+  // claimed `applyNest`'s `existsSync(targetDir)` check caught this;
+  // it doesn't, because `<parentDir>/<basename(parentDir)>/` normally
+  // does NOT exist (applyNest is about to create it). The fix: add
+  // basename(parentDir) to the forbidden set explicitly. This test
+  // pins that behaviour.
+  const parent = tmpWiki("resolve-parent-name");
+  const wiki = join(parent, "root-wiki");
+  mkdirSync(wiki, { recursive: true });
+  try {
+    const parentName = "mod-group"; // basename(cluster's parentDir)
+    const clusterParent = join(wiki, parentName);
+    mkdirSync(clusterParent, { recursive: true });
+    writeIndex(clusterParent, "index.md", parentName);
+    const l1 = writeLeaf(clusterParent, "alpha.md", "alpha");
+    const l2 = writeLeaf(clusterParent, "beta.md", "beta");
+
+    // Slug equal to parent basename must auto-suffix, NOT pass through.
+    assert.equal(
+      resolveNestSlug(parentName, { leaves: [l1, l2] }, wiki),
+      `${parentName}-group`,
+      "slug equal to basename(parentDir) must route through -group",
+    );
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: collides with wiki-root index.md id even without wikiIndex", () => {
+  // walkWikiIds' `dir === parentDir` skip used to drop every file at
+  // wikiRoot, including wikiRoot/index.md. Under the validator contract
+  // (validate.mjs enforces `type: index` id === `basename(dirname(
+  // index.md))`), the root index id is mandatorily equal to
+  // basename(wikiRoot). walkWikiIds starts iteration AT wikiRoot, so
+  // wikiRoot is never encountered as a subdirectory entry and
+  // basename(wikiRoot) is never added to forbidden via the
+  // `entry.isDirectory()` branch. The old skip therefore left
+  // basename(wikiRoot) unrepresented in the forbidden set, and a slug
+  // equal to that name would slip past the resolver and surface only
+  // at post-apply DUP-ID. Fixed by parsing parent's index.md as an
+  // exception.
+  //
+  // Use a custom short-basename wiki path so (a) basename(wikiRoot)
+  // passes `validateSlug` (kebab-case, ≤ 64 chars) and (b) the test
+  // asserts the invariant-compliant root-id shape instead of a
+  // hypothetical "public name" shape the validator would reject.
+  const parent = tmpWiki("resolve-root-index");
+  const wiki = join(parent, "short-wiki");
+  mkdirSync(wiki, { recursive: true });
+  try {
+    const rootId = basename(wiki); // "short-wiki"
+    // Root index is written with index-shaped frontmatter so the
+    // fixture mirrors a real wiki's root shape (type: "index",
+    // depth_role: "category") — the validator enforces both.
+    writeIndex(wiki, "index.md", rootId);
+    const l1 = writeLeaf(wiki, "alpha.md", "alpha");
+    const l2 = writeLeaf(wiki, "beta.md", "beta");
+    // Slug equals the root index id (== basename(wikiRoot)) → collision,
+    // must auto-suffix.
+    assert.equal(
+      resolveNestSlug(rootId, { leaves: [l1, l2] }, wiki),
+      `${rootId}-group`,
+      "wiki-root index.md id must enter the forbidden set",
+    );
+    // Control: a slug that matches no live id returns unchanged.
+    assert.equal(
+      resolveNestSlug("fresh-slug", { leaves: [l1, l2] }, wiki),
+      "fresh-slug",
+    );
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("resolveNestSlug: same-depth behaviour preserved when wikiRoot is provided", () => {
+  // Regression: the v1.0.0 same-depth collision logic must still fire
+  // with wikiRoot present. Tests the classical observed case — slug
+  // matches a member leaf's id — but with the new full-tree path
+  // exercised.
+  const wiki = tmpWiki("resolve-cross-depth-regression");
+  try {
+    const l1 = writeLeaf(wiki, "security.md", "security");
+    const l2 = writeLeaf(wiki, "audit.md", "audit");
+    const l3 = writeLeaf(wiki, "hardening.md", "hardening");
+
+    assert.equal(
+      resolveNestSlug("security", { leaves: [l1, l2, l3] }, wiki),
+      "security-group",
+      "member-id collision detection still works with full-tree walk",
+    );
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }

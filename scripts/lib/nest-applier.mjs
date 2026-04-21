@@ -33,6 +33,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { readFrontmatterStreaming } from "./chunk.mjs";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
 
 const SLUG_RE = /^[a-z][a-z0-9-]{0,63}$/;
@@ -42,19 +43,38 @@ export function validateSlug(slug) {
   return SLUG_RE.test(slug);
 }
 
-// Resolve a slug that won't collide with a member leaf's id or with a
-// non-member sibling in the same parent directory. The observed
-// collision case (v0.4.1 novel-corpus run): Tier 2's propose_structure
-// response picked slug="security" for a cluster whose members included
-// a leaf with id="security", so after apply both the new subcategory's
-// stub index.md AND the moved leaf carried id="security" — DUP-ID at
-// validate time, forcing a full pipeline rollback. Pre-resolving here
-// auto-suffixes the slug (deterministically: `-group`, then `-group-N`)
-// until it's non-colliding, letting the NEST land on the first try.
+// Resolve a slug that won't collide with any live id in the wiki. The
+// original observed collision case (v0.4.1 novel-corpus run): Tier 2's
+// propose_structure response picked slug="security" for a cluster whose
+// members included a leaf with id="security", so after apply both the
+// new subcategory's stub index.md AND the moved leaf carried
+// id="security" — DUP-ID at validate time, forcing a full pipeline
+// rollback. A later scenario added cross-depth collisions: a leaf at
+// arch/event-patterns/index.md in one branch made the slug
+// "event-patterns" unsafe for a cluster under design-patterns-group/
+// in a different branch — even though the two are at different depths
+// and not siblings.
+//
+// Pre-resolving here auto-suffixes the slug (deterministically:
+// `-group`, then `-group-N`) until it's non-colliding, letting the
+// NEST land on the first try. When wikiRoot is provided, the resolver
+// checks the full-tree id namespace; when omitted (e.g. legacy unit
+// tests that predate cross-depth awareness), it falls back to the
+// parent-dir-only check for backward compatibility.
+//
 // Non-collision slugs are returned unchanged; invalid slugs are left
 // alone so applyNest's own validation can reject them with its usual
 // error message.
-export function resolveNestSlug(slug, proposal) {
+//
+// `opts.wikiIndex` is an optional precomputed Set of every live id and
+// directory basename in the wiki (see `buildWikiForbiddenIndex`). When
+// supplied, the full-tree walk is skipped and the precomputed set is
+// merged into the per-proposal forbidden set instead. A multi-NEST
+// convergence iteration builds the index once before the apply loop
+// and mutates it incrementally (adds the resolved slug after each
+// successful apply), reducing the slug-resolver cost from
+// O(#applies × #files) to O(#files + #applies).
+export function resolveNestSlug(slug, proposal, wikiRoot, opts = {}) {
   if (!validateSlug(slug)) return slug;
   if (
     !proposal ||
@@ -63,8 +83,12 @@ export function resolveNestSlug(slug, proposal) {
   ) {
     return slug;
   }
-  const forbidden = collectForbiddenIds(proposal);
-  if (!forbidden.has(slug)) return slug;
+  const isForbidden = collectForbiddenIdsPredicate(
+    proposal,
+    wikiRoot,
+    opts.wikiIndex,
+  );
+  if (!isForbidden(slug)) return slug;
   // Try "-group" first (the natural human reading: "the group of X
   // leaves"); fall back to numeric suffixes starting at -group-2
   // because "-group" itself already occupies the slot that would
@@ -72,55 +96,394 @@ export function resolveNestSlug(slug, proposal) {
   // "${slug}-group" overflows the 64-char SLUG_RE cap, short-circuit:
   // all numeric candidates share the same prefix and will fail
   // validation identically, so there's no point spinning the loop.
-  // Returning the original (colliding) slug propagates the failure
-  // to applyNest, which throws a clear "target subcategory already
-  // exists" error — strictly better than a silent spin.
+  // Returning the original (colliding) slug in that overflow case
+  // propagates the collision downstream. Which failure surfaces
+  // depends on the collision class: an existing sibling directory
+  // makes `applyNest`'s `existsSync(targetDir)` check throw "target
+  // subcategory already exists"; a member-id / cross-depth /
+  // alias-id collision slips past applyNest (the directory does not
+  // pre-exist) and surfaces later as `DUP-ID` or
+  // `ALIAS-COLLIDES-ID` at validate time, triggering the usual
+  // rollback. Either way, failing loudly beats silently spinning
+  // through a hundred failed validateSlug() checks.
   const primary = `${slug}-group`;
   if (!validateSlug(primary)) return slug;
-  if (!forbidden.has(primary)) return primary;
+  if (!isForbidden(primary)) return primary;
   for (let i = 2; i < 100; i++) {
     const candidate = `${slug}-group-${i}`;
-    if (!forbidden.has(candidate)) return candidate;
+    // Re-check `validateSlug(candidate)` inside the loop because the
+    // numeric suffix widens `candidate` past `${slug}-group` — for a
+    // base slug near the 64-char SLUG_RE cap, `${slug}-group` can
+    // validate while `${slug}-group-2` overflows. Bailing out early
+    // avoids returning an invalid slug that applyNest would otherwise
+    // reject with the uninformative "invalid slug" error even though
+    // the original input was valid. Same fail-loud rationale as the
+    // primary-overflow short-circuit above.
+    if (!validateSlug(candidate)) return slug;
+    if (!isForbidden(candidate)) return candidate;
   }
   return slug;
 }
 
-function collectForbiddenIds(proposal) {
-  const forbidden = new Set();
+// Build a predicate `(id) => boolean` that returns `true` when `id`
+// collides with any already-claimed id in the wiki — member ids,
+// parent-dir sibling ids, parent-dir subdir basenames, and either the
+// caller's precomputed wiki-wide index (preferred) or a fresh
+// walkWikiIds fallback (legacy path).
+//
+// Why a predicate instead of a materialized Set: when the caller
+// passes a precomputed `wikiIndex`, that index can easily be 10⁴+
+// entries on a large corpus. Copying the whole index into a new
+// per-call Set costs O(|wikiIndex|) memory + time on every
+// resolveNestSlug invocation, which defeats the entire point of the
+// iteration-level precompute. A predicate keeps the wiki-wide index
+// by reference and queries it directly, making each `isForbidden(x)`
+// check O(1) and each resolveNestSlug call O(|members| + |parent-
+// siblings|) regardless of wiki size.
+function collectForbiddenIdsPredicate(
+  proposal,
+  wikiRoot,
+  precomputedWikiIndex = null,
+) {
+  // Local set: member ids + parent-dir sibling ids/subdirs. Always
+  // small (bounded by one directory's children), so materializing it
+  // is fine.
+  const local = new Set();
   for (const leaf of proposal.leaves) {
-    if (leaf?.data?.id) forbidden.add(leaf.data.id);
+    if (leaf?.data?.id) local.add(leaf.data.id);
   }
   const parentDir = dirname(proposal.leaves[0].path);
   const memberPaths = new Set(proposal.leaves.map((l) => l.path));
+
+  // Explicitly forbid the parent directory's OWN basename. Under the
+  // validator's invariant (`type: index` id === `basename(dirname(
+  // index.md))` at every depth), the parent's `index.md` carries
+  // id === basename(parentDir). The NEST applier writes the new
+  // subdir's stub `index.md` with id === slug, so a slug equal to the
+  // parent's basename produces TWO index.md files with the same id
+  // (parent + new child) and trips DUP-ID at validate time.
+  //
+  // Earlier versions of this function's documentation claimed
+  // applyNest's `existsSync(targetDir)` check caught this class, but
+  // that check only fires when `<parentDir>/<slug>/` already EXISTS —
+  // which it doesn't, because we're about to create it. The
+  // parent-name collision is only reachable at validate-time unless
+  // we pre-empt it here. Adding basename(parentDir) to the local set
+  // redirects the collision into the deterministic `-group` suffix
+  // branch above.
+  local.add(basename(parentDir));
+
+  // Parent-dir walk. When wikiRoot is not supplied this walk is the
+  // ONLY source of "live ids at this depth" — the legacy slot used by
+  // unit tests that predate cross-depth awareness. When wikiRoot IS
+  // supplied, the parent-dir walk runs first as a cheap O(siblings)
+  // seed before the wiki-wide walk / precomputed-index path below.
+  //
+  // Note: this loop now skips dot-prefixed entries (`.DS_Store`,
+  // `.foo.md`, `.git/`, etc) to match the skill's repo-wide dot-skip
+  // convention (walkWikiIds, buildWikiForbiddenIndex, indices::
+  // listChildren all do the same). That IS a behavioural change vs.
+  // the v1.0.0 parent-dir-only path, which iterated every entry
+  // regardless of name prefix. The change is intentional: v1.0.0's
+  // non-skip was a latent bug — a stray dotfile carrying frontmatter
+  // with a conflicting id would have spuriously forced a valid slug
+  // to auto-suffix, a false positive the validator would never have
+  // caught. No production consumer has reported hitting that path,
+  // so aligning with the repo convention is strictly an improvement.
+  // Legacy callers that DO pass dotfiles into the cluster's parent
+  // directory see different (but correct) resolver output.
   let entries;
   try {
     entries = readdirSync(parentDir, { withFileTypes: true });
   } catch {
-    return forbidden;
+    entries = [];
   }
   for (const entry of entries) {
-    // Skip the parent's own index.md: its id is the parent's basename
-    // (i.e., the parent directory name), not something the new
-    // subcategory could collide with. Parent-name collisions — where
-    // the slug equals the parent dir's name — are a separate case that
-    // applyNest itself rejects via its existsSync(targetDir) check.
+    // Skip dot-prefixed entries (directories AND files) on the same
+    // blanket-rule basis the full-tree walkers use (`walkWikiIds`,
+    // `buildWikiForbiddenIndex`, `indices.mjs::listChildren`). Without
+    // this skip, a stray `.DS_Store` or a `.foo.md` dotfile carrying
+    // frontmatter could spuriously poison the forbidden set and force
+    // a valid slug to auto-suffix for no legitimate reason.
+    if (entry.name.startsWith(".")) continue;
+    // Skip the parent's own index.md inside this loop: its id is
+    // always `basename(parentDir)` (per the validator invariant) and
+    // that value was explicitly added to `local` above. The parent's
+    // `aliases[]` ARE harvested — separately, after this loop — so a
+    // slug matching a parent-index alias doesn't slip past the
+    // resolver and trip ALIAS-COLLIDES-ID at validate time. That has
+    // to be a one-shot streaming read rather than inline here because
+    // we deliberately skip the rest of index.md's record on this
+    // hot-path loop (no point re-parsing its id).
     if (entry.name === "index.md") continue;
     const entryPath = join(parentDir, entry.name);
     if (memberPaths.has(entryPath)) continue;
     if (entry.isDirectory()) {
-      forbidden.add(entry.name);
+      local.add(entry.name);
       continue;
     }
     if (!entry.name.endsWith(".md")) continue;
+    // Only regular files qualify. Without this guard a symlink or
+    // special dirent named `*.md` would get opened + parsed; the
+    // rest of the pipeline's walks (`chunk.mjs::collectEntryPaths`,
+    // `indices.mjs::listChildren`) already require `isFile()`, so
+    // this keeps the walk discipline symmetric and forecloses the
+    // "planted symlink poisons the forbidden set" class.
+    if (!entry.isFile()) continue;
     try {
-      const raw = readFileSync(entryPath, "utf8");
-      const { data } = parseFrontmatter(raw, entryPath);
-      if (data?.id) forbidden.add(data.id);
+      // Use the streaming frontmatter reader (bounded to
+      // MAX_FRONTMATTER_BYTES) instead of slurping the whole file
+      // via readFileSync. Keeps sibling-id collection scale-safe
+      // when a parent directory contains large leaves, and stays
+      // consistent with walkWikiIds + buildWikiForbiddenIndex
+      // which both read the same way.
+      const captured = readFrontmatterStreaming(entryPath);
+      if (captured === null) continue;
+      const { data } = parseFrontmatter(captured.frontmatterText, entryPath);
+      if (data?.id) local.add(data.id);
+      // Also reserve any declared aliases. A new NEST stub carrying
+      // id === slug would trip ALIAS-COLLIDES-ID at validate time if
+      // the slug matches an existing alias on any live entry, and
+      // the pre-apply guard is the only place we can pre-empt that
+      // class of rollback.
+      if (Array.isArray(data?.aliases)) {
+        for (const alias of data.aliases) {
+          if (typeof alias === "string" && alias) local.add(alias);
+        }
+      }
     } catch {
-      /* skip unreadable siblings */
+      /* skip unreadable / malformed frontmatter */
     }
   }
-  return forbidden;
+
+  // Harvest the parent's own index.md aliases. The inline loop above
+  // skips `index.md` wholesale because its id is already covered by
+  // the explicit `basename(parentDir)` add, but the aliases it carries
+  // aren't reconstructible from the directory name. A slug matching a
+  // parent-index alias would slip past every other collision check
+  // here and surface only as ALIAS-COLLIDES-ID at validate time. One
+  // targeted streaming read closes that gap.
+  const parentIndexPath = join(parentDir, "index.md");
+  try {
+    const captured = readFrontmatterStreaming(parentIndexPath);
+    if (captured !== null) {
+      const { data } = parseFrontmatter(captured.frontmatterText, parentIndexPath);
+      if (Array.isArray(data?.aliases)) {
+        for (const alias of data.aliases) {
+          if (typeof alias === "string" && alias) local.add(alias);
+        }
+      }
+    }
+  } catch {
+    /* skip unreadable parent index (or no index.md at the root) */
+  }
+
+  // Wiki-wide path. Precomputed index short-circuits the walk AND we
+  // keep it by reference inside the predicate instead of copying it
+  // into `local`. Legacy callers without precomputedWikiIndex fall
+  // back to the one-shot walkWikiIds, which materializes into `local`
+  // (the walk's output is bounded to "this call only" so no memory
+  // concern there).
+  //
+  // Full-tree walk catches cross-depth collisions that the parent-dir
+  // walk alone misses. Observed case: a leaf at
+  // `arch/event-patterns/index.md` (id "event-patterns") makes the
+  // slug "event-patterns" unsafe for a cluster proposed under
+  // `design-patterns-group/` in a different branch — even though the
+  // two are at different depths and not siblings. Validation catches
+  // this post-apply as DUP-ID, forcing rollback; the pre-apply walk
+  // here prevents the wasted round-trip.
+  //
+  // wikiRoot is optional: when absent (legacy callers / unit tests
+  // that predate cross-depth awareness), the parent-dir-only walk
+  // above is the effective behaviour, preserving prior semantics.
+  if (!precomputedWikiIndex && wikiRoot) {
+    walkWikiIds(wikiRoot, parentDir, memberPaths, local);
+  }
+
+  if (precomputedWikiIndex) {
+    return (id) => local.has(id) || precomputedWikiIndex.has(id);
+  }
+  return (id) => local.has(id);
+}
+
+// Build a wiki-wide forbidden-id index: the set of every `.md`
+// entry's frontmatter id + aliases (both leaves AND `index.md` at
+// every depth), plus every non-hidden directory basename under
+// `wikiRoot`. Exposed as a reusable snapshot the caller can build
+// once and pass to `resolveNestSlug` via `opts.wikiIndex` instead of
+// paying for a full-tree walk on every invocation.
+//
+// Index.md entries are included (not skipped) because the validator
+// treats leaves and indices as the same entry class on the
+// DUP-ID / ALIAS-COLLIDES-ID axes — a slug matching a nested
+// subcategory's id or alias would trip validation just as a slug
+// matching a leaf id would. Aliases are included for the same
+// reason: the resolver pre-empts both DUP-ID (slug === some entry's
+// `id`) AND ALIAS-COLLIDES-ID (slug === some entry's alias)
+// validation failures in one pass. Directory basenames cover
+// the sibling-subdirectory class — a NEST creating `<parent>/<slug>/`
+// where `<slug>` matches an existing directory anywhere in the tree
+// would collide on `type: index` id at validate time.
+//
+// Mutation contract: after a successful NEST apply, the caller must
+// call `wikiIndex.add(resolvedSlug)` so subsequent `resolveNestSlug`
+// calls in the same iteration see the new directory as occupied.
+// No other mutations are needed — leaf ids don't change when leaves
+// move into the new subdir, and nothing is deleted by a NEST apply.
+//
+// Dot-prefixed entries (directories AND files — anything whose name
+// starts with `.`) are skipped under the same blanket rule as
+// `walkWikiIds` / `collectEntryPaths`. Covers skill-owned internals
+// (`.llmwiki/`, `.work/`, `.shape/`), the user's git metadata
+// (`.git/`, `.github/`), transient dotfiles (`.DS_Store`, editor
+// backups), and hypothetical `.foo.md` leaves. Per-file frontmatter
+// is extracted via `readFrontmatterStreaming` for bounded reads on
+// large corpora.
+export function buildWikiForbiddenIndex(wikiRoot) {
+  const set = new Set();
+  if (!wikiRoot) return set;
+  const stack = [wikiRoot];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      const entryPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        set.add(entry.name);
+        stack.push(entryPath);
+        continue;
+      }
+      if (!entry.name.endsWith(".md")) continue;
+      // Regular-file-only: keeps the walk discipline aligned with
+      // chunk.mjs::collectEntryPaths / indices.mjs::listChildren and
+      // prevents symlinks / special dirents from being opened.
+      if (!entry.isFile()) continue;
+      try {
+        const captured = readFrontmatterStreaming(entryPath);
+        if (captured === null) continue;
+        const { data } = parseFrontmatter(captured.frontmatterText, entryPath);
+        if (data?.id) set.add(data.id);
+        // Aliases are also reserved — a slug matching an existing
+        // alias is the other DUP-adjacent class the validator flags
+        // (ALIAS-COLLIDES-ID). Including them here keeps
+        // opts.wikiIndex callers in sync with the full-tree walk
+        // path's guarantee.
+        if (Array.isArray(data?.aliases)) {
+          for (const alias of data.aliases) {
+            if (typeof alias === "string" && alias) set.add(alias);
+          }
+        }
+      } catch {
+        /* skip unreadable / malformed frontmatter */
+      }
+    }
+  }
+  return set;
+}
+
+// Walk the entire wiki under wikiRoot, adding every leaf frontmatter
+// id and every non-hidden directory basename to the `forbidden` set.
+// `parentDir` and `memberPaths` are the cluster's own context — leaves
+// already inside the cluster are excluded because they'll be moved
+// into the new subdirectory and their id will live there, not collide.
+// The parent-dir walk above has already collected direct siblings;
+// this pass covers every OTHER directory in the tree.
+//
+// Dot-prefixed entries (directories AND files) are skipped as a
+// blanket rule — this matches the discipline in
+// `scripts/lib/chunk.mjs::collectEntryPaths` and covers every
+// metadata surface the skill owns (`.llmwiki/`, `.work/`, `.shape/`),
+// any user dotfile directory the corpus might carry (`.git/`,
+// `.github/`, etc), AND any stray dotfiles (`.DS_Store`, hypothetical
+// `.foo.md` leaves). There is no allow-list: if a dot-prefixed entry
+// is worth considering as a routable leaf, rename it.
+//
+// Per-file frontmatter is extracted via the streaming reader so this
+// collision pass reads bounded (≤ `MAX_FRONTMATTER_BYTES`) from each
+// file rather than the full body — a real concern on large corpora
+// (the frontmatter-bearing leaves at the consumer 596-leaf scale
+// already parse through `readFrontmatterStreaming` elsewhere in the
+// pipeline for the same reason).
+function walkWikiIds(wikiRoot, parentDir, memberPaths, forbidden) {
+  const stack = [wikiRoot];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      // Skip dot-prefixed entries (directories AND files — this is
+      // a blanket rule, not a directories-only skip). Covers skill
+      // internals (`.llmwiki/`, `.work/`), user metadata (`.git/`,
+      // `.github/`), and stray dotfiles (`.DS_Store`, hypothetical
+      // `.foo.md`). Matches the rest of the pipeline's walk
+      // discipline — see the walkWikiIds header comment above.
+      if (entry.name.startsWith(".")) continue;
+      const entryPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        // Directory basename is a potential slug collision (a NEST
+        // elsewhere in the tree carrying the same slug would produce
+        // two directories with the same id).
+        forbidden.add(entry.name);
+        stack.push(entryPath);
+        continue;
+      }
+      if (!entry.name.endsWith(".md")) continue;
+      // Regular-file-only guard (matches the rest of the pipeline's
+      // walk discipline — chunk.mjs::collectEntryPaths and
+      // indices.mjs::listChildren both require isFile). Without this
+      // a symlink or special dirent named `*.md` could feed into
+      // readFrontmatterStreaming and poison the forbidden set.
+      if (!entry.isFile()) continue;
+      // Skip ordinary leaves that are in the cluster's own parent
+      // dir — the parent-dir walk above has already handled them
+      // (including the member-exclusion logic). Skipping avoids
+      // double-reading frontmatter on the hot path.
+      //
+      // EXCEPTION: parent's own index.md. Normally the parent-dir
+      // walk above already injects `basename(parentDir)` into the
+      // forbidden set (see the explicit `local.add(basename(parentDir))`
+      // right before this loop), so a slug matching the parent's id
+      // would auto-suffix without our help. But when
+      // parentDir === wikiRoot, this walk is the ONLY pass that sees
+      // the root at all — it starts AT wikiRoot and only visits
+      // children as directory entries, never wikiRoot itself, so the
+      // wiki-root basename isn't added via the `entry.isDirectory()`
+      // branch either. Parsing root/index.md picks up the canonical
+      // root id (also equal to basename(wikiRoot) under the validator
+      // invariant) via the frontmatter read; the explicit add above
+      // would cover the name but parsing also catches any alias
+      // entries the root might carry. Cheap: one extra
+      // frontmatter-stream read per walk.
+      if (dir === parentDir && entry.name !== "index.md") continue;
+      if (memberPaths.has(entryPath)) continue;
+      try {
+        const captured = readFrontmatterStreaming(entryPath);
+        if (captured === null) continue;
+        const { data } = parseFrontmatter(captured.frontmatterText, entryPath);
+        if (data?.id) forbidden.add(data.id);
+        // Reserve aliases too so the full-tree fallback path has the
+        // same ALIAS-COLLIDES-ID coverage as buildWikiForbiddenIndex.
+        if (Array.isArray(data?.aliases)) {
+          for (const alias of data.aliases) {
+            if (typeof alias === "string" && alias) forbidden.add(alias);
+          }
+        }
+      } catch {
+        /* skip unreadable / malformed frontmatter */
+      }
+    }
+  }
 }
 
 export function applyNest(wikiRoot, proposal, slug, opts = {}) {
