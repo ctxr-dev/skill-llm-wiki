@@ -35,8 +35,12 @@
 //   INT-13   unknown --quality-mode value
 //   INT-14   invalid --fanout-target value (must be a positive integer
 //            in [FANOUT_TARGET_MIN, FANOUT_TARGET_MAX])
+//   INT-14a  --fanout-target used on a subcommand other than build /
+//            rebuild (balance enforcement is build/rebuild-only)
 //   INT-15   invalid --max-depth value (must be a positive integer in
 //            [MAX_DEPTH_MIN, MAX_DEPTH_MAX])
+//   INT-15a  --max-depth used on a subcommand other than build /
+//            rebuild (balance enforcement is build/rebuild-only)
 //
 // Plan shape (status === "ok"):
 //   {
@@ -306,7 +310,31 @@ export function resolveIntent(ctx) {
       "--quality-mode",
     );
   }
+  // Balance-enforcement flags are build/rebuild-only. The CLI parser
+  // accepts them globally (to produce a uniform flag table), so intent
+  // has to gate the subcommand explicitly — otherwise `fix`, `join`,
+  // `rollback` etc. would silently carry them through to the
+  // orchestrator, where the hook would fire and apply unexpected
+  // structural mutations outside the documented surface.
+  const BALANCE_FLAG_SUBCOMMANDS = new Set(["build", "rebuild"]);
   if (f.fanout_target !== undefined) {
+    if (!BALANCE_FLAG_SUBCOMMANDS.has(subcommand)) {
+      return ambiguous(
+        "INT-14a",
+        `--fanout-target is only supported on build / rebuild (got "${subcommand}")`,
+        [
+          {
+            description: "drop --fanout-target",
+            flag: "(remove --fanout-target)",
+          },
+          {
+            description: "run on a build / rebuild instead",
+            flag: `${subcommand === "extend" ? "rebuild" : "build"} ... --fanout-target <N>`,
+          },
+        ],
+        "--fanout-target",
+      );
+    }
     const bad = invalidIntInRange(
       f.fanout_target,
       FANOUT_TARGET_MIN,
@@ -327,6 +355,23 @@ export function resolveIntent(ctx) {
     }
   }
   if (f.max_depth !== undefined) {
+    if (!BALANCE_FLAG_SUBCOMMANDS.has(subcommand)) {
+      return ambiguous(
+        "INT-15a",
+        `--max-depth is only supported on build / rebuild (got "${subcommand}")`,
+        [
+          {
+            description: "drop --max-depth",
+            flag: "(remove --max-depth)",
+          },
+          {
+            description: "run on a build / rebuild instead",
+            flag: `${subcommand === "extend" ? "rebuild" : "build"} ... --max-depth <D>`,
+          },
+        ],
+        "--max-depth",
+      );
+    }
     const bad = invalidIntInRange(f.max_depth, MAX_DEPTH_MIN, MAX_DEPTH_MAX);
     if (bad) {
       return ambiguous(

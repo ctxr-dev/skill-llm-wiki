@@ -414,10 +414,17 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     // the same git-add + git-commit callback convergence uses wires
     // into the private-git machinery. A no-op run (no overfull /
     // overdeep candidates) leaves the working tree byte-identical.
-    const fanoutTarget = plan.flags?.fanout_target != null
+    // Balance-enforcement is build/rebuild-only per contract.mjs and
+    // `--help`. Intent-resolution already rejects the flags on other
+    // subcommands (INT-14a / INT-15a), but gate here as well in
+    // defense-in-depth — any future code path that constructs a plan
+    // with balance flags outside of build/rebuild would otherwise
+    // trigger structural mutations outside the documented surface.
+    const BALANCE_OPS = new Set(["build", "rebuild"]);
+    const fanoutTarget = plan.flags?.fanout_target != null && BALANCE_OPS.has(plan.operation)
       ? Number.parseInt(plan.flags.fanout_target, 10)
       : null;
-    const maxDepth = plan.flags?.max_depth != null
+    const maxDepth = plan.flags?.max_depth != null && BALANCE_OPS.has(plan.operation)
       ? Number.parseInt(plan.flags.max_depth, 10)
       : null;
     let balance = null;
