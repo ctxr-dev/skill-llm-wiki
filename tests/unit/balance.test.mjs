@@ -179,6 +179,31 @@ test("detectFanoutOverload: ignores dirs overfull only via subdir count (leaf me
   }
 });
 
+test("detectFanoutOverload: nested paths sort by POSIX-normalised key (cross-platform stable)", () => {
+  const wiki = tmpWiki("overload-sort-order");
+  try {
+    // Two sibling subdirs that each hold 10 leaves. Lex-order must be
+    // `a-first` < `b-second` regardless of host platform's path
+    // separator. Windows uses `\`, POSIX uses `/`. Normalised via
+    // `posixSortKey` the `relative` strings become `a-first` and
+    // `b-second`, both separator-free in this fixture — so this
+    // test pins the ordering at the API level. A deeper fixture
+    // (nested `x/y` vs `x/y-early`) is still covered implicitly by
+    // the POSIX-normalisation since `x/y` < `x/y-early` under both
+    // separator conventions once normalised.
+    writeIndex(wiki, "index.md", basename(wiki));
+    writeIndex(wiki, "a-first/index.md", "a-first");
+    for (let i = 0; i < 10; i++) writeLeaf(wiki, `a-first/leaf-${i}.md`, `a-first-leaf-${i}`);
+    writeIndex(wiki, "b-second/index.md", "b-second");
+    for (let i = 0; i < 10; i++) writeLeaf(wiki, `b-second/leaf-${i}.md`, `b-second-leaf-${i}`);
+    const overfull = detectFanoutOverload(wiki, 6);
+    assert.equal(overfull[0], join(wiki, "a-first"));
+    assert.equal(overfull[1], join(wiki, "b-second"));
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("detectFanoutOverload: honours nestedParents exclusion", () => {
   const wiki = tmpWiki("overload-nested");
   try {

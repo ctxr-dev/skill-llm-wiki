@@ -36,7 +36,7 @@
 // residual "we didn't nest this deep enough" surface.
 
 import { existsSync, readdirSync, renameSync, rmSync, rmdirSync } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import {
   buildSiblingIdfContext,
   deterministicPurpose,
@@ -62,6 +62,18 @@ export const MAX_BALANCE_ITERATIONS = 20;
 // dirs are left alone so the target is the landing zone, not the
 // rejection threshold.
 export const FANOUT_OVERLOAD_MULTIPLIER = 1.5;
+
+// Platform-stable sort key for absolute paths. `relative(wikiRoot, p)`
+// returns OS-native separators — `\\` on Windows, `/` on POSIX — which
+// means raw string comparison across those strings produces different
+// lex orders on different platforms and breaks the phase's
+// byte-reproducibility guarantee. Normalise every `sep` to `/` before
+// comparing so the sort key is identical on ubuntu-latest and
+// windows-latest.
+function posixSortKey(wikiRoot, p) {
+  const rel = relative(wikiRoot, p);
+  return sep === "/" ? rel : rel.split(sep).join("/");
+}
 
 // Compute the depth of each directory reachable from wikiRoot.
 // Depth is the number of path segments between wikiRoot and the
@@ -188,7 +200,7 @@ export function detectFanoutOverload(wikiRoot, fanoutTarget, nestedParents = new
   const dirs = Array.from(leafCounts.keys())
     .filter((d) => !nestedParents.has(d))
     .filter((d) => leafCounts.get(d) > threshold);
-  dirs.sort((a, b) => relative(wikiRoot, a).localeCompare(relative(wikiRoot, b)));
+  dirs.sort((a, b) => posixSortKey(wikiRoot, a).localeCompare(posixSortKey(wikiRoot, b)));
   return dirs;
 }
 
@@ -214,7 +226,7 @@ export function detectDepthOverage(wikiRoot, maxDepth) {
     }
   }
   candidates.sort((a, b) =>
-    relative(wikiRoot, a).localeCompare(relative(wikiRoot, b)),
+    posixSortKey(wikiRoot, a).localeCompare(posixSortKey(wikiRoot, b)),
   );
   return candidates;
 }
@@ -275,15 +287,16 @@ export function applyBalanceFlatten(wikiRoot, passthroughDir) {
   // `rmSync(dir, {recursive: true})` would silently delete it.
   //
   // Dot-prefixed entries (`.DS_Store`, editor backups, `.shape/`
-  // internals) are deliberately skipped — the rest of the pipeline
-  // (`listChildren`, `buildWikiForbiddenIndex`, `collectEntryPaths`)
-  // all skip them under the same blanket rule. They're non-routable
-  // noise, so refusing to flatten because a `.DS_Store` lives in
-  // the passthrough would surprise users. Dotfiles are left in
-  // place post-rename; `rmdirSync` at the end will refuse non-empty
-  // removal if any dotfile is still present, at which point the
-  // orchestrator's snapshot cleanly restores — we prefer that
-  // fail-loud over a silent recursive delete.
+  // internals) are deliberately skipped during this stray check —
+  // the rest of the pipeline (`listChildren`, `buildWikiForbiddenIndex`,
+  // `collectEntryPaths`) all skip them under the same blanket rule.
+  // They're non-routable noise, so refusing to flatten because a
+  // `.DS_Store` lives in the passthrough would surprise users. Since
+  // `rmdirSync` at the end of this function requires an empty
+  // directory, dotfile noise is actively removed before the rename
+  // (see the dotEntries cleanup pass below the stray check); the
+  // final `rmdirSync` would otherwise fail ENOTEMPTY if any dot
+  // entry remained.
   //
   // An earlier draft checked this AFTER the rename + index.md drop,
   // which left the wiki partially-mutated (child already promoted,
@@ -370,21 +383,23 @@ export async function runBalance(wikiRoot, ctx = {}) {
   const applied = [];
   let iteration = 0;
   let reachedFixedPoint = false;
-  // Build the wiki-wide forbidden-id index once up front and mutate
-  // it after each successful BALANCE_SUBCLUSTER (add the new subdir's
-  // slug). Previous drafts called `buildWikiForbiddenIndex` inside
-  // the per-iteration overfull loop, which walked every file in the
-  // wiki on each candidate attempt — fine at small-corpus scale but
-  // quadratic on the main target-workload for balance enforcement
-  // (the hand-authored 596-leaf consumer corpus). Mirrors the reuse
-  // pattern in `operators.mjs::tryClusterNestIteration`.
+  // Build the wiki-wide forbidden-id index ONLY when the fanout pass
+  // could actually fire (fanoutTarget set). `--max-depth`-only runs
+  // never call resolveNestSlug, so walking the whole tree to build
+  // the forbidden-id set on their behalf is wasted I/O — significant
+  // on large hand-authored corpora. The index is mutated after each
+  // successful BALANCE_SUBCLUSTER (add the new subdir's slug),
+  // mirroring the reuse pattern in
+  // `operators.mjs::tryClusterNestIteration`.
   //
   // BALANCE_FLATTEN doesn't mutate the index: a flattened passthrough's
   // basename stays in the set (stale, conservative — may trigger a
   // `-group-N` fallback on a future attempt using that exact basename
   // as a slug, which is safe because renaming-into-a-now-free-slot is
   // cheaper to re-do than walking the full wiki again per iteration).
-  const wikiIndex = buildWikiForbiddenIndex(wikiRoot);
+  const wikiIndex = fanoutTarget != null
+    ? buildWikiForbiddenIndex(wikiRoot)
+    : null;
   while (iteration < MAX_BALANCE_ITERATIONS) {
     iteration++;
     let didWork = false;
