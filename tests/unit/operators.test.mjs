@@ -17,6 +17,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parseFrontmatter } from "../../scripts/lib/frontmatter.mjs";
 import {
+  DETECT_MERGE_PAIR_BATCH_SIZE,
+  DETECT_MERGE_PAIR_RETRIES,
+  DETECT_MERGE_PAIR_RETRY_MAX_MS,
+  DETECT_MERGE_PAIR_RETRY_MIN_MS,
+  DETECT_MERGE_PAIR_TIMEOUT_MS,
   collectLiveIds,
   detectDescend,
   detectLift,
@@ -228,6 +233,23 @@ test("LIFT apply: moves the leaf up, removes the empty folder", async () => {
 });
 
 // ── MERGE ────────────────────────────────────────────────────────────
+
+test("detectMerge guard constants: retry/timeout bounds are the documented defaults", () => {
+  // Pin every exported guard constant so a future change that
+  // silently retunes the reliability envelope shows up in the
+  // test diff instead of drifting invisibly. If any of these
+  // numbers legitimately need to move, the test updates
+  // alongside a CHANGELOG entry explaining why.
+  assert.equal(DETECT_MERGE_PAIR_BATCH_SIZE, 32);
+  assert.equal(DETECT_MERGE_PAIR_TIMEOUT_MS, 30_000);
+  assert.equal(DETECT_MERGE_PAIR_RETRIES, 2);
+  assert.equal(DETECT_MERGE_PAIR_RETRY_MIN_MS, 500);
+  assert.equal(DETECT_MERGE_PAIR_RETRY_MAX_MS, 5_000);
+  // Sanity: min ≤ max and retries ≥ 1 (else there's no retry at
+  // all and the whole p-retry wrapper is a no-op).
+  assert.ok(DETECT_MERGE_PAIR_RETRY_MIN_MS <= DETECT_MERGE_PAIR_RETRY_MAX_MS);
+  assert.ok(DETECT_MERGE_PAIR_RETRIES >= 1);
+});
 
 test("detectMerge: near-identical siblings yield a MERGE proposal", async () => {
   const wiki = tmpWiki("merge-basic");
