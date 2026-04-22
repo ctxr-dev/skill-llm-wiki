@@ -57,6 +57,7 @@ import {
   MAX_DEPTH_MAX,
   MAX_DEPTH_MIN,
 } from "./intent.mjs";
+import { applySoftParentEntries, runSoftDagParents } from "./soft-dag.mjs";
 import { runConvergence } from "./operators.mjs";
 import { runReviewCycle } from "../commands/review.mjs";
 import {
@@ -431,7 +432,13 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     // maxDepth would make `detectDepthOverage` treat every depth as
     // over (NaN comparisons are false), potentially flattening the
     // wiki root and moving directories outside the wiki.
-    const BALANCE_OPS = new Set(["build", "rebuild"]);
+    // Single source of truth for the set of operations that can
+    // reach the post-convergence hooks (balance enforcement + soft-
+    // DAG synthesis). Named for the actual invariant (operation
+    // membership), not a specific feature, so adding a third
+    // post-convergence phase in the future doesn't demand another
+    // one-purpose constant.
+    const BUILD_REBUILD_OPS = new Set(["build", "rebuild"]);
     // Strict parse: must be a canonical base-10 integer string (no
     // leading `+`/`-`, no trailing garbage, no decimal parts, no
     // scientific notation), and must fall inside the intent-validated
@@ -449,7 +456,7 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
       if (n < min || n > max) return null;
       return n;
     };
-    const opSupportsBalance = BALANCE_OPS.has(plan.operation);
+    const opSupportsBalance = BUILD_REBUILD_OPS.has(plan.operation);
     const fanoutTarget = opSupportsBalance
       ? parseBalanceInt(plan.flags?.fanout_target, FANOUT_TARGET_MIN, FANOUT_TARGET_MAX)
       : null;
@@ -501,21 +508,87 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
       }
     }
 
+    // Phase 4.4 — optional soft-DAG parent synthesis. Runs only when
+    // the user passed `--soft-dag-parents` on build / rebuild (intent
+    // rejects the flag everywhere else via INT-16a). Writes soft
+    // parents into each routable leaf's `parents[]` frontmatter based
+    // on TF-IDF cosine similarity against candidate category
+    // directories. The downstream `applySoftParentEntries` pass, which
+    // runs in Phase 5 AFTER `rebuildAllIndices`, propagates each
+    // leaf's soft claims into the corresponding index `entries[]`
+    // arrays so a Claude navigator arriving at any claimed parent
+    // sees the leaf in that parent's entries.
+    //
+    // Fan-in control is via `SOFT_PARENT_MAX_PER_LEAF` (default 3) and
+    // `SOFT_PARENT_AFFINITY_THRESHOLD` (default 0.35). Both exported
+    // from `soft-dag.mjs` — tests that want boundary behaviour can
+    // pass overrides, but the CLI flag is a pure boolean.
+    const softDagRequested =
+      plan.flags?.soft_dag_parents === true && BUILD_REBUILD_OPS.has(plan.operation);
+    let softDag = null;
+    // Tracks whether the soft-DAG phase actually created a commit
+    // (not just whether it found soft parents). A run with zero
+    // softParentsAdded can still dirty the tree — e.g., a rerun
+    // that removes previously-synthesised soft parents now below
+    // threshold, or a canonical-order frontmatter rewrite that
+    // leaves no net soft-parent change but still alters bytes. The
+    // `--review` gate below consumes this flag to decide whether
+    // Phase 4.4 contributed to the diff.
+    let softDagDidCommit = false;
+    if (softDagRequested) {
+      softDag = await runSoftDagParents(wikiRoot);
+      record(
+        "soft-dag-parents",
+        `${softDag.leavesProcessed} leaf/leaves scanned; ` +
+          `${softDag.softParentsAdded} soft-parent pointer(s) selected`,
+      );
+      // Commit the frontmatter rewrites as a single iteration so the
+      // private-git history preserves the DAG synthesis as a
+      // distinguishable artefact. Review cycle picks up this commit
+      // via the anyMutation gate below.
+      gitRunChecked(wikiRoot, ["add", "-A"]);
+      if (!gitWorkingTreeClean(wikiRoot)) {
+        // Commit subject stays generic over the leaf count alone.
+        // A per-run delta (added / removed / reordered) against the
+        // pre-run parents[] would be the ideal audit trail, but the
+        // orchestrator doesn't snapshot pre-run frontmatter state
+        // and wiring that plumbing adds cost for a diagnostic
+        // message; the per-phase record() call above already surfaces
+        // `softParentsAdded` (the count of selected pointers this
+        // run, which equals the "pointers present after synthesis"
+        // since runSoftDagParents rewrites parents[] top-to-bottom
+        // from scratch each pass). The private-git diff on the
+        // commit itself is the byte-exact source of truth.
+        gitCommit(
+          wikiRoot,
+          `phase soft-dag-parents: parents[] synthesis across ` +
+            `${softDag.leavesProcessed} leaf/leaves`,
+        );
+        softDagDidCommit = true;
+      }
+    }
+
     // Phase 4.5 — optional interactive review. Fires only when the
     // user passed --review AND at least one tree-mutating phase
-    // actually produced commits. That's EITHER convergence OR the
-    // balance-enforcement phase above — both commit separately via
-    // their `commitBetweenIterations` callbacks. Pre-round-6 the gate
-    // only checked convergence, which meant a no-op-convergence +
-    // active-balance op (e.g. a hand-authored corpus where the
-    // initial tree is already operator-clean but violates the
-    // fanout/depth targets) would silently skip review. The review
-    // flow prints a diff + commit list and lets the user approve,
-    // abort, or drop specific iterations before validation runs.
-    // Abort throws so the orchestrator's catch block handles the
-    // rollback uniformly with any other failure path.
+    // actually produced commits. That's ANY of convergence, the
+    // balance-enforcement phase, or the soft-DAG parent phase above —
+    // each commits separately via its own git callback. Pre-round-6
+    // the gate only checked convergence, which meant a no-op-
+    // convergence + active-balance op (e.g. a hand-authored corpus
+    // that's already operator-clean but violates the fanout/depth
+    // targets) would silently skip review. The review flow prints a
+    // diff + commit list and lets the user approve, abort, or drop
+    // specific iterations before validation runs. Abort throws so
+    // the orchestrator's catch block handles the rollback uniformly
+    // with any other failure path.
     const balanceApplied = balance?.applied?.length ?? 0;
-    const anyMutation = convergence.applied.length > 0 || balanceApplied > 0;
+    // Use the commit-did-fire flag for soft-DAG, not the `softParentsAdded`
+    // counter: a rerun that removes previously-synthesised soft parents
+    // below threshold, or a canonical-order frontmatter rewrite that
+    // preserves logical content while altering bytes, produces
+    // `softParentsAdded === 0` but still dirties the tree and commits.
+    const anyMutation =
+      convergence.applied.length > 0 || balanceApplied > 0 || softDagDidCommit;
     if (plan.flags?.review && anyMutation) {
       const reviewResult = await runReviewCycle(wikiRoot, opId, {
         forceInteractive: plan.flags?.force_interactive === true,
@@ -548,11 +621,30 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     // the rebuild pass can fill them in with frontmatter.
     bootstrapIndexStubs(wikiRoot);
     const rebuilt = rebuildAllIndices(wikiRoot, { indexInputs });
+    // Phase 5.1 — soft-DAG propagation. When Phase 4.4 synthesised
+    // soft-parent pointers, `rebuildAllIndices` has just placed every
+    // leaf in its DIRECT parent's `entries[]` (the primary parent) —
+    // but the DAG view requires leaves to also show up under every
+    // parent they claim. `applySoftParentEntries` walks each leaf's
+    // `parents[]` and appends its record into each claimed non-primary
+    // parent's index. Idempotent: records are deduped by id, so
+    // re-running the pass produces byte-identical output.
+    let softDagAppends = null;
+    if (softDagRequested) {
+      softDagAppends = applySoftParentEntries(wikiRoot);
+      record(
+        "soft-dag-propagate",
+        `${softDagAppends.indicesTouched} index(es) updated; ` +
+          `${softDagAppends.softEntriesAdded} soft-entry record(s) added`,
+      );
+    }
     gitRunChecked(wikiRoot, ["add", "-A"]);
     if (!gitWorkingTreeClean(wikiRoot)) {
       gitCommit(
         wikiRoot,
-        `phase index-generation: rebuilt ${rebuilt.length} index.md files`,
+        softDagRequested
+          ? `phase index-generation: rebuilt ${rebuilt.length} index.md files + soft-DAG propagation`
+          : `phase index-generation: rebuilt ${rebuilt.length} index.md files`,
       );
     }
     record("index-generation", `rebuilt ${rebuilt.length} indices`);

@@ -333,7 +333,7 @@ Tiered-AI flags:
                                    (no Tier 2 calls) for byte-reproducible
                                    builds. See guide/tiered-ai.md.
 
-Balance-enforcement flags (build/rebuild):
+Post-convergence enforcement flags (build/rebuild):
   --fanout-target <N>              Post-convergence phase ATTEMPTS to
                                    sub-cluster any directory whose movable
                                    leaf count exceeds N × 1.5 (subdirs aren't
@@ -348,6 +348,16 @@ Balance-enforcement flags (build/rebuild):
                                    single-child passthrough deeper than D. D
                                    must be an integer in [1, 10]. No-op when
                                    omitted.
+  --soft-dag-parents               Post-convergence phase synthesises
+                                   soft-parent pointers in each leaf's
+                                   parents[] based on TF-IDF cosine
+                                   similarity against candidate category
+                                   directories. Leaves appear in multiple
+                                   index.md entries[] (DAG view) rather
+                                   than only their direct parent. Uses
+                                   SOFT_PARENT_AFFINITY_THRESHOLD (0.35)
+                                   and caps at SOFT_PARENT_MAX_PER_LEAF (3)
+                                   per leaf. No-op when omitted.
 
 UX flags:
   --no-prompt                      Never prompt; fail loud on ambiguity
@@ -407,6 +417,7 @@ const FLAG_BOOLEAN = new Set([
   "--accept-dirty",
   "--accept-foreign-target",
   "--review",
+  "--soft-dag-parents",
 ]);
 
 function parseSubArgv(raw) {

@@ -238,6 +238,69 @@ test("INT-15a: --max-depth is rejected on subcommands other than build/rebuild",
   }
 });
 
+test("INT-16a: --soft-dag-parents is rejected on subcommands other than build/rebuild", async () => {
+  const parent = freshDir("int16a");
+  try {
+    const src = join(parent, "docs");
+    mkdirSync(src);
+    for (const sub of ["fix", "extend", "validate", "join", "rollback"]) {
+      const r = resolveIntent({
+        subcommand: sub,
+        args: [src],
+        flags: { soft_dag_parents: true },
+        cwd: parent,
+      });
+      assert.equal(
+        r.status,
+        "ambiguous",
+        `expected ${sub} to be rejected, got ${JSON.stringify(r)}`,
+      );
+      assert.equal(r.error.code, "INT-16a");
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("INT-16a: --soft-dag-parents accepted on build + rebuild", async () => {
+  const parent = freshDir("int16a-ok");
+  try {
+    const src = join(parent, "docs");
+    mkdirSync(src);
+    // build with a fresh source dir resolves cleanly (status="ok").
+    const buildResult = resolveIntent({
+      subcommand: "build",
+      args: [src],
+      flags: { soft_dag_parents: true },
+      cwd: parent,
+    });
+    assert.equal(
+      buildResult.status,
+      "ok",
+      `build with --soft-dag-parents must resolve to ok; got ${JSON.stringify(buildResult)}`,
+    );
+    // rebuild needs a managed wiki to target; without one it fails
+    // with INT-06 (no managed wiki). The critical assertion is that
+    // INT-16a does NOT fire on rebuild — an INT-06 here is fine
+    // because it confirms the scope gate passed.
+    const rebuildResult = resolveIntent({
+      subcommand: "rebuild",
+      args: [src],
+      flags: { soft_dag_parents: true },
+      cwd: parent,
+    });
+    if (rebuildResult.status === "ambiguous") {
+      assert.notEqual(
+        rebuildResult.error.code,
+        "INT-16a",
+        `INT-16a must NOT fire on rebuild; got ${JSON.stringify(rebuildResult)}`,
+      );
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("INT-13: known --quality-mode values are accepted", async () => {
   const parent = freshDir("int13-ok");
   try {

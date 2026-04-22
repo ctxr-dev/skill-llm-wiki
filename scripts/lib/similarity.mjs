@@ -92,6 +92,17 @@ export function computeIdf(tokenLists) {
 // every pair — the difference between O(N³) and O(N²) work.
 export function buildComparisonModel(entries) {
   const texts = entries.map((e) => entryText(e));
+  return buildComparisonModelFromTexts(texts);
+}
+
+// Build the same model shape directly from pre-assembled text
+// strings. Useful when the caller has already done its own
+// aggregation (e.g. `soft-dag.mjs` concatenates multiple leaves'
+// `entryText` outputs into a single "category text") and passing
+// the result back through `entryText` would either double-count
+// the doubled-focus treatment or simply waste tokenisation work.
+// No `entryText` roundtrip — the text goes straight to tokenisation.
+export function buildComparisonModelFromTexts(texts) {
   const tokenLists = texts.map((t) => tokenize(t));
   const idfMap = computeIdf(tokenLists);
   return { texts, tokenLists, idfMap };

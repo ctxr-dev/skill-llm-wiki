@@ -41,6 +41,8 @@
 //            [MAX_DEPTH_MIN, MAX_DEPTH_MAX])
 //   INT-15a  --max-depth used on a subcommand other than build /
 //            rebuild (balance enforcement is build/rebuild-only)
+//   INT-16a  --soft-dag-parents used on a subcommand other than build /
+//            rebuild (soft-DAG synthesis is build/rebuild-only)
 //
 // Plan shape (status === "ok"):
 //   {
@@ -391,6 +393,31 @@ export function resolveIntent(ctx) {
           },
         ],
         "--max-depth",
+      );
+    }
+  }
+  // --soft-dag-parents shares balance's subcommand scope (build /
+  // rebuild only). Same defense-in-depth as INT-14a / INT-15a: the
+  // CLI parser accepts the flag globally, so intent has to gate
+  // explicitly — otherwise `fix`, `join`, `rollback` etc. would
+  // silently carry the flag through to the orchestrator and rewrite
+  // parents[] on every leaf, outside the documented surface.
+  if (f.soft_dag_parents === true) {
+    if (!BALANCE_FLAG_SUBCOMMANDS.has(subcommand)) {
+      return ambiguous(
+        "INT-16a",
+        `--soft-dag-parents is only supported on build / rebuild (got "${subcommand}")`,
+        [
+          {
+            description: "drop --soft-dag-parents",
+            flag: "(remove --soft-dag-parents)",
+          },
+          {
+            description: `run on a ${suggestedSub} instead`,
+            flag: `${suggestedSub} ... --soft-dag-parents`,
+          },
+        ],
+        "--soft-dag-parents",
       );
     }
   }
