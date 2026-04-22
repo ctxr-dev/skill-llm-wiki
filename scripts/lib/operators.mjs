@@ -196,29 +196,27 @@ export async function detectMerge(wikiRoot, ctx) {
     // between 10⁹ and 10⁶ operations.
     const corpus = leaves.map((l) => l.data);
     const model = buildComparisonModel(corpus);
-    // Enumerate every (i, j) pair once. Preserve the (i, j) index
-    // alongside the leaf refs so the batched concurrent awaits can
-    // unscramble back into deterministic i-j-ascending order when
-    // pushing proposals.
-    const pairs = [];
-    for (let i = 0; i < leaves.length; i++) {
-      for (let j = i + 1; j < leaves.length; j++) {
-        pairs.push({ a: leaves[i], b: leaves[j] });
-      }
-    }
-    // Batched concurrent await. In-flight pair count is capped at
-    // DETECT_MERGE_PAIR_BATCH_SIZE so the filesystem isn't
-    // overwhelmed and the Node event loop's microtask queue stays
-    // bounded. Each batch resolves in (batch-max-pair-latency)
-    // wall time instead of (sum-of-pair-latencies) — which for a
-    // 596-leaf pre-NEST root turns a 2-hour serial sweep into ~5
-    // minutes of concurrent I/O on modern SSDs.
+    // Stream pairs in batches without ever materialising the full
+    // O(N²) pair list. The outer/inner (i, j) indices advance
+    // monotonically; once a batch of DETECT_MERGE_PAIR_BATCH_SIZE
+    // pairs is ready we run them concurrently, drain results in
+    // deterministic order, and continue. Memory stays O(batch
+    // size) instead of O(N²). For a flat 600-leaf directory the
+    // pre-allocation would have been ~180k pair objects at ~200
+    // bytes each ≈ 36 MB — not fatal but wasteful when all we need
+    // is a rolling 32-pair window.
+    //
+    // Determinism: each batch's pairs are processed in the order
+    // they were generated (pure i-ascending, j-ascending), and the
+    // within-batch map preserves that order via Promise.all's
+    // positional result semantics. Cross-batch ordering is
+    // preserved by draining each batch before advancing.
     const BATCH = DETECT_MERGE_PAIR_BATCH_SIZE;
-    const results = new Array(pairs.length);
-    for (let start = 0; start < pairs.length; start += BATCH) {
-      const slice = pairs.slice(start, start + BATCH);
-      const batchResults = await Promise.all(
-        slice.map(({ a, b }) =>
+    const pending = [];
+    const flush = async () => {
+      if (pending.length === 0) return;
+      const results = await Promise.all(
+        pending.map(({ a, b }) =>
           decide(a.data, b.data, corpus, {
             wikiRoot,
             opId: ctx.opId,
@@ -230,26 +228,28 @@ export async function detectMerge(wikiRoot, ctx) {
           }),
         ),
       );
-      for (let k = 0; k < batchResults.length; k++) {
-        results[start + k] = batchResults[k];
+      for (let k = 0; k < results.length; k++) {
+        const r = results[k];
+        const { a, b } = pending[k];
+        if (r.decision === "same") {
+          proposals.push({
+            operator: "MERGE",
+            priority: PRIORITY.MERGE,
+            sources: [a.path, b.path],
+            describe: `MERGE ${a.data.id} + ${b.data.id} (tier ${r.tier}, sim ${r.similarity.toFixed(2)})`,
+            apply: async () => applyMerge(wikiRoot, a, b, r),
+          });
+        }
+      }
+      pending.length = 0;
+    };
+    for (let i = 0; i < leaves.length; i++) {
+      for (let j = i + 1; j < leaves.length; j++) {
+        pending.push({ a: leaves[i], b: leaves[j] });
+        if (pending.length >= BATCH) await flush();
       }
     }
-    // Re-serialise into deterministic i-j order: pairs[] is already
-    // in that order, and results[] is aligned to it, so a single
-    // forward scan is all we need.
-    for (let k = 0; k < pairs.length; k++) {
-      const r = results[k];
-      const { a, b } = pairs[k];
-      if (r.decision === "same") {
-        proposals.push({
-          operator: "MERGE",
-          priority: PRIORITY.MERGE,
-          sources: [a.path, b.path],
-          describe: `MERGE ${a.data.id} + ${b.data.id} (tier ${r.tier}, sim ${r.similarity.toFixed(2)})`,
-          apply: async () => applyMerge(wikiRoot, a, b, r),
-        });
-      }
-    }
+    await flush(); // drain the tail
   }
   return proposals;
 }

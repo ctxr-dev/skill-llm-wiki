@@ -131,7 +131,7 @@ function emitEntry(entry) {
   return lines.join("\n");
 }
 
-// Append an entry atomically.
+// Append an entry.
 //
 // Hot path: at large-corpus scale (596 leaves → 189k pairwise
 // decisions observed) this is called once per decision. An earlier
@@ -141,16 +141,44 @@ function emitEntry(entry) {
 // calls ≈ 4 TB of I/O, which alone accounted for most of a 2h15m
 // build's wall-clock time.
 //
-// Current implementation uses POSIX append:
-//   - First call (file doesn't exist): write header + first entry
-//     via temp+rename so the initial file is atomic.
-//   - Subsequent calls: `appendFileSync` writes just the new entry
-//     block. Entry blocks are small (~200 bytes) and below the
-//     PIPE_BUF atomic-write boundary (~4 KB on Linux/macOS), so
-//     partial-entry corruption under single-process writes is
-//     effectively impossible. Under multi-process writes the
-//     kernel's O_APPEND still serialises the writes atomically for
-//     entries ≤ PIPE_BUF.
+// Durability guarantees:
+//
+//   - First call (file doesn't exist): writes header + first entry
+//     via temp+rename. The initial file materialises atomically —
+//     a crash during the first call leaves either no file or a
+//     well-formed single-entry file.
+//
+//   - Subsequent calls: best-effort `appendFileSync`. Each call is
+//     a single `write(2)` syscall of the serialised entry. In the
+//     common case the kernel writes the full buffer atomically,
+//     but this is NOT a formal durability contract for regular
+//     files the way temp+rename is:
+//
+//       * A crash mid-write can leave a torn trailing entry. On
+//         recovery the YAML parser will reject the truncated
+//         scalar; the audit log is recoverable by removing the
+//         last partial `- ...` block and re-running the op.
+//
+//       * Node's `writeSync`/`appendFileSync` MAY split a large
+//         buffer into multiple `write(2)` calls. Typical entry
+//         blocks here are ~200 bytes — well under typical
+//         single-write thresholds — but there is no portable
+//         small-write atomicity guarantee for regular files
+//         (POSIX's PIPE_BUF atomicity applies to pipes/FIFOs, not
+//         disk files).
+//
+//       * On Windows, `appendFileSync` has no equivalent of
+//         POSIX O_APPEND kernel serialisation under concurrent
+//         writers from multiple processes. This phase runs
+//         single-process though, so cross-process interleaving
+//         is not a concern in practice.
+//
+// The decision log is an audit trail, not a reproducibility
+// artefact — lost tail bytes on a crash are annoying but
+// recoverable, and the output tree's byte-reproducibility is
+// independent of this file's exact contents. If stronger
+// durability is needed for a specific use case, callers should
+// batch-flush to a temp file and rename on phase boundaries.
 //
 // Cost per append: O(entry-size), not O(file-size). ~200 µs vs
 // ~20 ms on a big log — a 100× speedup at scale.

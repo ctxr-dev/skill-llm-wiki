@@ -22,6 +22,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  CACHE_SHARD_PREFIX_LEN,
   cacheDir,
   cacheEntryPath,
   cacheKey,
@@ -63,19 +64,23 @@ test("cacheKey: filename-safe (no slashes or special chars)", () => {
   assert.match(k, /^[a-f0-9]{32}$/);
 });
 
-test("cacheEntryPath: entries are sharded by the first 2 hex chars", () => {
+test("cacheEntryPath: entries are sharded by the CACHE_SHARD_PREFIX_LEN-char prefix", () => {
   const wiki = tmpWiki("shard-layout");
   try {
     const path = cacheEntryPath(wiki, "sha256:a", "sha256:b");
     const key = cacheKey("sha256:a", "sha256:b");
-    const expectedShard = key.slice(0, 2);
-    const expectedRest = key.slice(2);
-    // Path format: <cacheDir>/<2hex>/<rest>.json
+    // Use the exported constant so the test self-updates when the
+    // shard width is tuned — hardcoding would silently stop
+    // enforcing the layout invariant if `CACHE_SHARD_PREFIX_LEN`
+    // ever changes.
+    const expectedShard = key.slice(0, CACHE_SHARD_PREFIX_LEN);
+    const expectedRest = key.slice(CACHE_SHARD_PREFIX_LEN);
+    // Path format: <cacheDir>/<shard>/<rest>.json
     const expectedPath = join(cacheDir(wiki), expectedShard, expectedRest + ".json");
     assert.equal(path, expectedPath);
-    // The filename's basename still matches the 30-char stem + `.json`
-    // — the other 2 chars live in the parent-dir name, so the full
-    // 32-char discriminant survives across the shard split.
+    // The filename's basename keeps the non-shard portion of the
+    // 32-char discriminant, so the full key is preserved across
+    // shard-dir + filename.
     assert.equal(basename(path), expectedRest + ".json");
   } finally {
     rmSync(wiki, { recursive: true, force: true });

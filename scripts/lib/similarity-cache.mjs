@@ -32,7 +32,6 @@ import {
   readdirSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -134,27 +133,33 @@ export function writeCached(wikiRoot, hashA, hashB, decision) {
 // when the cache dir doesn't exist. Walks every shard directory
 // plus the top-level (tolerates pre-sharding flat caches from
 // before the layout change — they get cleared on first clear-call).
+//
+// `readdirSync({ withFileTypes: true })` returns `Dirent` entries
+// that already carry `isDirectory()` / `isFile()` metadata, so we
+// can branch on type without a per-entry `statSync` syscall. On a
+// pre-sharding flat cache with 178k entries that's 178k syscalls
+// saved on the first post-upgrade clear.
 export function clearCache(wikiRoot) {
   const dir = cacheDir(wikiRoot);
   if (!existsSync(dir)) return 0;
   let count = 0;
-  for (const name of readdirSync(dir)) {
-    const entryPath = join(dir, name);
-    let isDir = false;
-    try {
-      isDir = statSync(entryPath).isDirectory();
-    } catch {
-      continue;
-    }
-    if (isDir) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const dirent of entries) {
+    const entryPath = join(dir, dirent.name);
+    if (dirent.isDirectory()) {
       // Shard subdirectory — clear every .json beneath it, then
       // the directory itself. Best-effort; a shard that's locked
       // or mid-write doesn't abort the whole clear.
       try {
-        for (const entry of readdirSync(entryPath)) {
-          if (!entry.endsWith(".json")) continue;
+        for (const sub of readdirSync(entryPath, { withFileTypes: true })) {
+          if (!sub.isFile() || !sub.name.endsWith(".json")) continue;
           try {
-            rmSync(join(entryPath, entry), { force: true });
+            rmSync(join(entryPath, sub.name), { force: true });
             count++;
           } catch {
             /* best-effort */
@@ -164,7 +169,7 @@ export function clearCache(wikiRoot) {
       } catch {
         /* best-effort */
       }
-    } else if (name.endsWith(".json")) {
+    } else if (dirent.isFile() && dirent.name.endsWith(".json")) {
       // Pre-sharding flat entry — clear in place.
       try {
         rmSync(entryPath, { force: true });
@@ -180,28 +185,29 @@ export function clearCache(wikiRoot) {
 // Count cached entries — convenience for tests and metrics. Walks
 // every shard directory; also counts any pre-sharding flat entries
 // if they exist (so a pre-upgrade cache still reports meaningful
-// size until the user runs a build that regenerates).
+// size until the user runs a build that regenerates). Uses
+// `withFileTypes: true` for the same per-syscall saving as
+// `clearCache`.
 export function cacheSize(wikiRoot) {
   const dir = cacheDir(wikiRoot);
   if (!existsSync(dir)) return 0;
   let n = 0;
-  for (const name of readdirSync(dir)) {
-    const entryPath = join(dir, name);
-    let isDir = false;
-    try {
-      isDir = statSync(entryPath).isDirectory();
-    } catch {
-      continue;
-    }
-    if (isDir) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const dirent of entries) {
+    if (dirent.isDirectory()) {
       try {
-        for (const entry of readdirSync(entryPath)) {
-          if (entry.endsWith(".json")) n++;
+        for (const sub of readdirSync(join(dir, dirent.name), { withFileTypes: true })) {
+          if (sub.isFile() && sub.name.endsWith(".json")) n++;
         }
       } catch {
         /* best-effort */
       }
-    } else if (name.endsWith(".json")) {
+    } else if (dirent.isFile() && dirent.name.endsWith(".json")) {
       n++; // pre-sharding flat entry
     }
   }
