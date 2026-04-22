@@ -25,6 +25,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
@@ -49,7 +50,13 @@ import {
   recordSource,
   startCorpus,
 } from "./provenance.mjs";
-import { rmSync } from "node:fs";
+import { MAX_BALANCE_ITERATIONS, runBalance } from "./balance.mjs";
+import {
+  FANOUT_TARGET_MAX,
+  FANOUT_TARGET_MIN,
+  MAX_DEPTH_MAX,
+  MAX_DEPTH_MIN,
+} from "./intent.mjs";
 import { runConvergence } from "./operators.mjs";
 import { runReviewCycle } from "../commands/review.mjs";
 import {
@@ -390,14 +397,126 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
         `${convergence.suggestions.length} suggestion(s) recorded`,
     );
 
+    // Phase 4.3 — balance enforcement. Runs only when at least one
+    // of `--fanout-target` / `--max-depth` is set on the plan (both
+    // validated at intent time). No-op otherwise. Iterates until
+    // fixed point applying two transform classes:
+    //   - Sub-cluster an overfull directory (movable leaf count >
+    //     target × 1.5 — subdirs are structurally cemented and can't
+    //     be carved by the math cluster detector, so a dir overfull
+    //     *only* due to subdirs is un-actionable and is skipped) via
+    //     the math cluster detector + deterministic naming, reusing
+    //     the same helpers Phase X.3 built for the deterministic
+    //     quality mode so two runs on the same tree produce identical
+    //     sub-clusters.
+    //   - Flatten an overdeep single-child passthrough by promoting
+    //     its only subdir up one level. Descendants' `parents[]`
+    //     paths are left unchanged — they are relative to the direct
+    //     parent's `index.md`, so promoting an entire subtree up one
+    //     level preserves every relative path by construction. Only
+    //     pure passthroughs qualify; multi-child subcategories would
+    //     lose structure.
+    // The phase has its own commit cadence (one commit per apply);
+    // the same git-add + git-commit callback convergence uses wires
+    // into the private-git machinery. A no-op run (no overfull /
+    // overdeep candidates) leaves the working tree byte-identical.
+    // Balance-enforcement is build/rebuild-only per contract.mjs and
+    // `--help`. Intent-resolution already rejects the flags on other
+    // subcommands (INT-14a / INT-15a) and rejects non-integer values
+    // (INT-14 / INT-15), but gate here as well in defense-in-depth —
+    // any future code path that constructs a plan with balance flags
+    // outside of build/rebuild (or with garbage values) would otherwise
+    // trigger structural mutations outside the documented surface.
+    // `Number.isFinite` rejects NaN from a non-numeric string: a NaN
+    // maxDepth would make `detectDepthOverage` treat every depth as
+    // over (NaN comparisons are false), potentially flattening the
+    // wiki root and moving directories outside the wiki.
+    const BALANCE_OPS = new Set(["build", "rebuild"]);
+    // Strict parse: must be a canonical base-10 integer string (no
+    // leading `+`/`-`, no trailing garbage, no decimal parts, no
+    // scientific notation), and must fall inside the intent-validated
+    // range for its flag. `Number.parseInt` would accept `"3.5"` as
+    // `3` and `"5xyz"` as `5`, which an adversarial or faulty caller
+    // could use to bypass the range bounds. `/^\d+$/` + explicit
+    // bounds keep orchestrator behaviour aligned with what intent
+    // resolution already enforces (INT-14 / INT-15).
+    const parseBalanceInt = (raw, min, max) => {
+      if (raw == null) return null;
+      const s = String(raw);
+      if (!/^\d+$/.test(s)) return null;
+      const n = Number.parseInt(s, 10);
+      if (!Number.isFinite(n)) return null;
+      if (n < min || n > max) return null;
+      return n;
+    };
+    const opSupportsBalance = BALANCE_OPS.has(plan.operation);
+    const fanoutTarget = opSupportsBalance
+      ? parseBalanceInt(plan.flags?.fanout_target, FANOUT_TARGET_MIN, FANOUT_TARGET_MAX)
+      : null;
+    const maxDepth = opSupportsBalance
+      ? parseBalanceInt(plan.flags?.max_depth, MAX_DEPTH_MIN, MAX_DEPTH_MAX)
+      : null;
+    let balance = null;
+    if (fanoutTarget != null || maxDepth != null) {
+      balance = await runBalance(wikiRoot, {
+        opId,
+        qualityMode: plan.flags?.quality_mode || "tiered-fast",
+        fanoutTarget,
+        maxDepth,
+        commitBetweenIterations: async ({ iteration, operator, summary }) => {
+          gitRunChecked(wikiRoot, ["add", "-A"]);
+          if (!gitWorkingTreeClean(wikiRoot)) {
+            gitCommit(
+              wikiRoot,
+              `phase balance-enforcement: iteration ${iteration} ${operator} — ${summary}`,
+            );
+          }
+        },
+      });
+      record(
+        "balance-enforcement",
+        `${balance.applied.length} operation(s) applied across ` +
+          `${balance.iterations} iteration(s); converged=${balance.converged}`,
+      );
+      if (!balance.converged) {
+        // Enforcement contract: a user who asked for a balanced tree
+        // expects the post-convergence shape to honour `--fanout-target`
+        // / `--max-depth`. Hitting the 20-iteration cap means the
+        // rebalance didn't reach a fixed point — any downstream
+        // assumption "the tree is now balanced" would silently be
+        // wrong. Fail loud here so the orchestrator's pre-op snapshot
+        // restores and the user sees the problem, instead of shipping
+        // a half-balanced wiki with no error.
+        throw new Error(
+          `balance enforcement did not converge after ${balance.iterations} ` +
+            `iteration(s) (cap=${MAX_BALANCE_ITERATIONS}); applied ` +
+            `${balance.applied.length} op(s). Inspect the private git ` +
+            `history via the skill's hidden-git passthrough (e.g. ` +
+            `\`node scripts/cli.mjs log ${wikiRoot}\`) — the private repo ` +
+            `lives under \`<wiki>/.llmwiki/git\` and requires the skill's ` +
+            `isolation env, which the passthrough wraps. Reduce ` +
+            `--fanout-target / --max-depth strictness, or file a ` +
+            `ping-pong repro.`,
+        );
+      }
+    }
+
     // Phase 4.5 — optional interactive review. Fires only when the
-    // user passed --review AND convergence actually produced at
-    // least one commit. The review flow prints a diff + commit
-    // list and lets the user approve, abort, or drop specific
-    // iterations before validation runs. Abort throws so the
-    // orchestrator's catch block handles the rollback uniformly
-    // with any other failure path.
-    if (plan.flags?.review && convergence.applied.length > 0) {
+    // user passed --review AND at least one tree-mutating phase
+    // actually produced commits. That's EITHER convergence OR the
+    // balance-enforcement phase above — both commit separately via
+    // their `commitBetweenIterations` callbacks. Pre-round-6 the gate
+    // only checked convergence, which meant a no-op-convergence +
+    // active-balance op (e.g. a hand-authored corpus where the
+    // initial tree is already operator-clean but violates the
+    // fanout/depth targets) would silently skip review. The review
+    // flow prints a diff + commit list and lets the user approve,
+    // abort, or drop specific iterations before validation runs.
+    // Abort throws so the orchestrator's catch block handles the
+    // rollback uniformly with any other failure path.
+    const balanceApplied = balance?.applied?.length ?? 0;
+    const anyMutation = convergence.applied.length > 0 || balanceApplied > 0;
+    if (plan.flags?.review && anyMutation) {
       const reviewResult = await runReviewCycle(wikiRoot, opId, {
         forceInteractive: plan.flags?.force_interactive === true,
       });

@@ -326,9 +326,28 @@ Layout-mode flags (build/extend/rebuild/fix/join):
   --target <path>                  Explicit destination (required for hosted)
 
 Tiered-AI flags:
-  --quality-mode tiered-fast|claude-first|tier0-only
+  --quality-mode tiered-fast|claude-first|tier0-only|deterministic
                                    Default: tiered-fast (TF-IDF → embeddings
-                                   → Claude ladder). See guide/tiered-ai.md.
+                                   → Claude ladder). The 'deterministic' mode
+                                   resolves every decision algorithmically
+                                   (no Tier 2 calls) for byte-reproducible
+                                   builds. See guide/tiered-ai.md.
+
+Balance-enforcement flags (build/rebuild):
+  --fanout-target <N>              Post-convergence phase ATTEMPTS to
+                                   sub-cluster any directory whose movable
+                                   leaf count exceeds N × 1.5 (subdirs aren't
+                                   counted — the rebalance can only carve
+                                   clusters from leaves, so subdir-heavy
+                                   dirs are un-actionable). An overfull dir
+                                   is left unchanged when no coherent
+                                   cluster is detected (leaves too diverse
+                                   or too few). N must be an integer in
+                                   [2, 100]. No-op when omitted.
+  --max-depth <D>                  Post-convergence phase flattens any
+                                   single-child passthrough deeper than D. D
+                                   must be an integer in [1, 10]. No-op when
+                                   omitted.
 
 UX flags:
   --no-prompt                      Never prompt; fail loud on ambiguity
@@ -378,6 +397,8 @@ const FLAG_WITH_VALUE = new Set([
   "--to",
   "--canonical",
   "--quality-mode",
+  "--fanout-target",
+  "--max-depth",
 ]);
 const FLAG_BOOLEAN = new Set([
   "--no-prompt",

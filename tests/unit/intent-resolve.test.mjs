@@ -68,6 +68,176 @@ test("INT-13: unknown --quality-mode value is rejected at intent time", async ()
   }
 });
 
+test("INT-14: invalid --fanout-target values are rejected at intent time", async () => {
+  const parent = freshDir("int14");
+  try {
+    const src = join(parent, "docs");
+    mkdirSync(src);
+    for (const bad of ["abc", "-5", "1", "101", "3.5", ""]) {
+      const r = resolveIntent({
+        subcommand: "build",
+        args: [src],
+        flags: { fanout_target: bad },
+        cwd: parent,
+      });
+      assert.equal(
+        r.status,
+        "ambiguous",
+        `expected "${bad}" to be rejected, got ${JSON.stringify(r)}`,
+      );
+      assert.equal(r.error.code, "INT-14");
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("INT-14: valid --fanout-target values resolve cleanly", async () => {
+  const parent = freshDir("int14-ok");
+  try {
+    const src = join(parent, "docs");
+    mkdirSync(src);
+    for (const good of ["2", "6", "100"]) {
+      const r = resolveIntent({
+        subcommand: "build",
+        args: [src],
+        flags: { fanout_target: good },
+        cwd: parent,
+      });
+      assert.equal(
+        r.status,
+        "ok",
+        `expected "${good}" to resolve, got ${JSON.stringify(r)}`,
+      );
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("INT-15: invalid --max-depth values are rejected at intent time", async () => {
+  const parent = freshDir("int15");
+  try {
+    const src = join(parent, "docs");
+    mkdirSync(src);
+    for (const bad of ["abc", "-1", "0", "11", "100"]) {
+      const r = resolveIntent({
+        subcommand: "build",
+        args: [src],
+        flags: { max_depth: bad },
+        cwd: parent,
+      });
+      assert.equal(
+        r.status,
+        "ambiguous",
+        `expected "${bad}" to be rejected, got ${JSON.stringify(r)}`,
+      );
+      assert.equal(r.error.code, "INT-15");
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("INT-15: valid --max-depth values resolve cleanly", async () => {
+  const parent = freshDir("int15-ok");
+  try {
+    const src = join(parent, "docs");
+    mkdirSync(src);
+    for (const good of ["1", "5", "10"]) {
+      const r = resolveIntent({
+        subcommand: "build",
+        args: [src],
+        flags: { max_depth: good },
+        cwd: parent,
+      });
+      assert.equal(
+        r.status,
+        "ok",
+        `expected "${good}" to resolve, got ${JSON.stringify(r)}`,
+      );
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("INT-14a: --fanout-target is rejected on subcommands other than build/rebuild", async () => {
+  const parent = freshDir("int14a");
+  try {
+    const src = join(parent, "docs");
+    mkdirSync(src);
+    // Every non-{build,rebuild} op that accepts a positional wiki arg
+    // (per contract.mjs::SUBCOMMANDS): fix, extend, validate, join,
+    // rollback. The intent resolver fires INT-14a before any other
+    // check on the subcommand, so pairing with a trivial flags set
+    // is enough.
+    for (const sub of ["fix", "extend", "validate", "join", "rollback"]) {
+      const r = resolveIntent({
+        subcommand: sub,
+        args: [src],
+        flags: { fanout_target: "5" },
+        cwd: parent,
+      });
+      assert.equal(
+        r.status,
+        "ambiguous",
+        `expected ${sub} to be rejected, got ${JSON.stringify(r)}`,
+      );
+      assert.equal(r.error.code, "INT-14a");
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("INT-14a: --fanout-target accepted on build + rebuild", async () => {
+  const parent = freshDir("int14a-ok");
+  try {
+    const src = join(parent, "docs");
+    mkdirSync(src);
+    for (const sub of ["build", "rebuild"]) {
+      const r = resolveIntent({
+        subcommand: sub,
+        args: [src],
+        flags: { fanout_target: "6" },
+        cwd: parent,
+      });
+      // Either "ok" or some unrelated ambiguity is fine — what
+      // matters is that INT-14a does NOT fire on build/rebuild.
+      if (r.status === "ambiguous") {
+        assert.notEqual(r.error.code, "INT-14a");
+      }
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("INT-15a: --max-depth is rejected on subcommands other than build/rebuild", async () => {
+  const parent = freshDir("int15a");
+  try {
+    const src = join(parent, "docs");
+    mkdirSync(src);
+    for (const sub of ["fix", "extend", "validate", "join", "rollback"]) {
+      const r = resolveIntent({
+        subcommand: sub,
+        args: [src],
+        flags: { max_depth: "5" },
+        cwd: parent,
+      });
+      assert.equal(
+        r.status,
+        "ambiguous",
+        `expected ${sub} to be rejected, got ${JSON.stringify(r)}`,
+      );
+      assert.equal(r.error.code, "INT-15a");
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("INT-13: known --quality-mode values are accepted", async () => {
   const parent = freshDir("int13-ok");
   try {

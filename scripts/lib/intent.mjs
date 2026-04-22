@@ -33,6 +33,14 @@
 //   INT-12   ambiguity reached interactive resolution in a non-TTY
 //            context (emitted by cli.mjs when NonInteractiveError fires)
 //   INT-13   unknown --quality-mode value
+//   INT-14   invalid --fanout-target value (must be a positive integer
+//            in [FANOUT_TARGET_MIN, FANOUT_TARGET_MAX])
+//   INT-14a  --fanout-target used on a subcommand other than build /
+//            rebuild (balance enforcement is build/rebuild-only)
+//   INT-15   invalid --max-depth value (must be a positive integer in
+//            [MAX_DEPTH_MIN, MAX_DEPTH_MAX])
+//   INT-15a  --max-depth used on a subcommand other than build /
+//            rebuild (balance enforcement is build/rebuild-only)
 //
 // Plan shape (status === "ok"):
 //   {
@@ -72,6 +80,42 @@ export const VALID_QUALITY_MODES = Object.freeze([
   "tier0-only",
   "deterministic",
 ]);
+
+// Range bounds for the balance-enforcement flags (`--fanout-target`,
+// `--max-depth`). Exported so tests and the balance module can
+// reference them directly without re-stating the literal values.
+//
+// The ranges cover the band where a post-convergence rebalance pass
+// has a meaningful effect. Fanout 1 is degenerate (every split forces
+// single-child chains); 100+ is effectively unbounded for any real
+// corpus (the cluster detector caps individual clusters at 8).
+// Max depth starts at 1 — the "no nesting"/flat-layout case is out
+// of this flag's scope; balance's purpose is to flatten OVERDEEP
+// branches, not to undo nesting the pipeline already decided to
+// create, and the regular NEST operator handles the no-nesting
+// starting condition anyway. 11+ max-depth is deeper than any
+// hand-authored corpus anyone has reported, so the flag becomes a
+// silent no-op above that. Out-of-range values are treated as user
+// errors at intent time so the flag is never a silent no-op at
+// runtime.
+export const FANOUT_TARGET_MIN = 2;
+export const FANOUT_TARGET_MAX = 100;
+export const MAX_DEPTH_MIN = 1;
+export const MAX_DEPTH_MAX = 10;
+
+// Parse + validate an integer-in-range flag value. Returns a short
+// human-readable reason string when the value is invalid (for use in
+// the ambiguity error), or null when valid. Factored out so INT-14
+// and INT-15 share one implementation.
+function invalidIntInRange(raw, min, max) {
+  if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
+    return `expected a positive integer, got "${raw}"`;
+  }
+  const n = Number.parseInt(raw, 10);
+  if (n < min) return `${n} is below the minimum ${min}`;
+  if (n > max) return `${n} is above the maximum ${max}`;
+  return null;
+}
 
 export function ok(plan) {
   return { status: "ok", plan };
@@ -265,6 +309,90 @@ export function resolveIntent(ctx) {
       })),
       "--quality-mode",
     );
+  }
+  // Balance-enforcement flags are build/rebuild-only. The CLI parser
+  // accepts them globally (to produce a uniform flag table), so intent
+  // has to gate the subcommand explicitly — otherwise `fix`, `join`,
+  // `rollback` etc. would silently carry them through to the
+  // orchestrator, where the hook would fire and apply unexpected
+  // structural mutations outside the documented surface.
+  const BALANCE_FLAG_SUBCOMMANDS = new Set(["build", "rebuild"]);
+  // Subcommands that operate on an existing wiki (take a wiki path).
+  // For these, the natural remediation is `rebuild` (which walks an
+  // existing wiki). For source-operating subcommands with no wiki
+  // path, `build` is the right suggestion. `build` itself isn't in
+  // either set since it can't reach this branch.
+  const WIKI_OPERATING = new Set(["fix", "validate", "extend", "rebuild", "rollback", "join"]);
+  const suggestedSub = WIKI_OPERATING.has(subcommand) ? "rebuild" : "build";
+  if (f.fanout_target !== undefined) {
+    if (!BALANCE_FLAG_SUBCOMMANDS.has(subcommand)) {
+      return ambiguous(
+        "INT-14a",
+        `--fanout-target is only supported on build / rebuild (got "${subcommand}")`,
+        [
+          {
+            description: "drop --fanout-target",
+            flag: "(remove --fanout-target)",
+          },
+          {
+            description: `run on a ${suggestedSub} instead`,
+            flag: `${suggestedSub} ... --fanout-target <N>`,
+          },
+        ],
+        "--fanout-target",
+      );
+    }
+    const bad = invalidIntInRange(
+      f.fanout_target,
+      FANOUT_TARGET_MIN,
+      FANOUT_TARGET_MAX,
+    );
+    if (bad) {
+      return ambiguous(
+        "INT-14",
+        `invalid --fanout-target "${f.fanout_target}" (${bad})`,
+        [
+          {
+            description: `use a positive integer in [${FANOUT_TARGET_MIN}, ${FANOUT_TARGET_MAX}]`,
+            flag: "--fanout-target <integer>",
+          },
+        ],
+        "--fanout-target",
+      );
+    }
+  }
+  if (f.max_depth !== undefined) {
+    if (!BALANCE_FLAG_SUBCOMMANDS.has(subcommand)) {
+      return ambiguous(
+        "INT-15a",
+        `--max-depth is only supported on build / rebuild (got "${subcommand}")`,
+        [
+          {
+            description: "drop --max-depth",
+            flag: "(remove --max-depth)",
+          },
+          {
+            description: `run on a ${suggestedSub} instead`,
+            flag: `${suggestedSub} ... --max-depth <D>`,
+          },
+        ],
+        "--max-depth",
+      );
+    }
+    const bad = invalidIntInRange(f.max_depth, MAX_DEPTH_MIN, MAX_DEPTH_MAX);
+    if (bad) {
+      return ambiguous(
+        "INT-15",
+        `invalid --max-depth "${f.max_depth}" (${bad})`,
+        [
+          {
+            description: `use a positive integer in [${MAX_DEPTH_MIN}, ${MAX_DEPTH_MAX}]`,
+            flag: "--max-depth <integer>",
+          },
+        ],
+        "--max-depth",
+      );
+    }
   }
   if (f.layout_mode === "in-place" && f.target) {
     return ambiguous(
