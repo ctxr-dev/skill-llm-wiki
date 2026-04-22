@@ -534,7 +534,7 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
       record(
         "soft-dag-parents",
         `${softDag.leavesProcessed} leaf/leaves scanned; ` +
-          `${softDag.softParentsAdded} soft-parent pointer(s) added`,
+          `${softDag.softParentsAdded} soft-parent pointer(s) selected`,
       );
       // Commit the frontmatter rewrites as a single iteration so the
       // private-git history preserves the DAG synthesis as a
@@ -542,18 +542,21 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
       // via the anyMutation gate below.
       gitRunChecked(wikiRoot, ["add", "-A"]);
       if (!gitWorkingTreeClean(wikiRoot)) {
-        // Commit message avoids naming the added-count directly:
-        // a rerun that REMOVES soft parents (now below threshold)
-        // would otherwise say "0 soft-parent pointer(s)" despite
-        // the diff being real. Phrased as "parents[] synthesis"
-        // so the message stays honest across all rewrite cases
-        // (added, removed, canonical-reorder); the per-phase
-        // record() call above already surfaces the specific
-        // added-count for auditing.
+        // Commit subject stays generic over the leaf count alone.
+        // A per-run delta (added / removed / reordered) against the
+        // pre-run parents[] would be the ideal audit trail, but the
+        // orchestrator doesn't snapshot pre-run frontmatter state
+        // and wiring that plumbing adds cost for a diagnostic
+        // message; the per-phase record() call above already surfaces
+        // `softParentsAdded` (the count of selected pointers this
+        // run, which equals the "pointers present after synthesis"
+        // since runSoftDagParents rewrites parents[] top-to-bottom
+        // from scratch each pass). The private-git diff on the
+        // commit itself is the byte-exact source of truth.
         gitCommit(
           wikiRoot,
           `phase soft-dag-parents: parents[] synthesis across ` +
-            `${softDag.leavesProcessed} leaf/leaves (${softDag.softParentsAdded} added)`,
+            `${softDag.leavesProcessed} leaf/leaves`,
         );
         softDagDidCommit = true;
       }

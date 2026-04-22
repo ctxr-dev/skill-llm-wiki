@@ -507,6 +507,16 @@ export function applySoftParentEntries(wikiRoot) {
       continue;
     }
     if (!parsed?.data) continue;
+    // Sanity check: only touch files that ARE managed indices. A
+    // file that passes the path guard and exists but has no
+    // frontmatter fence (`parseFrontmatter` returns `{data: {}}`),
+    // or has frontmatter but isn't `type: index`, is not something
+    // we should append `entries:` into. Skip defensively — the
+    // rest of the pipeline would produce confusing validator
+    // errors if we smuggled an `entries[]` into an arbitrary .md
+    // with the filename `index.md`.
+    if (parsed.data.type !== "index") continue;
+    if (typeof parsed.data.id !== "string" || parsed.data.id.length === 0) continue;
     const existing = Array.isArray(parsed.data.entries)
       ? parsed.data.entries
       : [];

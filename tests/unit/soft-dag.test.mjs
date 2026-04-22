@@ -469,6 +469,40 @@ test("applySoftParentEntries: rejects symlinked index.md pointing outside wikiRo
   }
 });
 
+test("applySoftParentEntries: refuses to mutate a file that isn't a managed index (no type: index)", () => {
+  const wiki = tmpWiki("non-index");
+  try {
+    writeIndex(wiki, "index.md", basename(wiki));
+    // `junk/index.md` exists under wikiRoot and has the right
+    // filename, but its frontmatter lacks `type: index` — it's a
+    // random markdown file that happens to share the name. The
+    // sanity check must refuse to append `entries:` into it so
+    // arbitrary user content under wikiRoot isn't corrupted by
+    // soft-DAG propagation.
+    mkdirSync(join(wiki, "junk"), { recursive: true });
+    const junkPath = join(wiki, "junk", "index.md");
+    writeFileSync(
+      junkPath,
+      "---\nid: random-notes\n---\n\n# Random notes, not a managed index\n",
+      "utf8",
+    );
+    const junkBefore = readFileSync(junkPath, "utf8");
+    writeLeaf(wiki, "junk-sibling.md", "leaf", {
+      parents: ["index.md", "junk/index.md"],
+    });
+    const r = applySoftParentEntries(wiki);
+    assert.equal(r.softEntriesAdded, 0, "non-index target must not be touched");
+    const junkAfter = readFileSync(junkPath, "utf8");
+    assert.equal(
+      junkAfter,
+      junkBefore,
+      "non-index target must be byte-unchanged",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("applySoftParentEntries: tolerates malformed parents[] entries without crashing", () => {
   const wiki = tmpWiki("malformed");
   try {
