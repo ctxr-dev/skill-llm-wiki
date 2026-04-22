@@ -134,6 +134,22 @@ function collectAllLeaves(wikiRoot, withBody = true) {
           // is the byte index just after the CLOSING fence.
           const raw = readFileSync(full);
           body = raw.slice(captured.bodyOffset).toString("utf8");
+          // CRLF-fenced files slice a body that starts with "\r\n".
+          // `renderFrontmatter` only checks `body.startsWith("\n")`
+          // when deciding whether to prepend the separator newline,
+          // so a CRLF-leading body would produce "\n\r\n" at the
+          // fence boundary — a mixed-EOL corruption. Normalise the
+          // whole body to LF on rewrite: the wider codebase is LF-
+          // only for on-disk output (`renderFrontmatter` always
+          // emits LF fences, `writeFrontmatter` ditto), so the
+          // rewritten leaf ends up entirely LF regardless of the
+          // input style. This aligns with the existing pipeline
+          // convention; the alternative (CRLF-preserving renderer)
+          // would require API changes across call sites that have
+          // all been LF-only since v1.0.0.
+          if (captured.lineEnding === "crlf") {
+            body = body.replace(/\r\n/g, "\n");
+          }
         }
       } catch {
         continue;

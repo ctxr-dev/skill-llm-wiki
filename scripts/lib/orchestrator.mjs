@@ -432,7 +432,13 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     // maxDepth would make `detectDepthOverage` treat every depth as
     // over (NaN comparisons are false), potentially flattening the
     // wiki root and moving directories outside the wiki.
-    const BALANCE_OPS = new Set(["build", "rebuild"]);
+    // Single source of truth for the set of operations that can
+    // reach the post-convergence hooks (balance enforcement + soft-
+    // DAG synthesis). Named for the actual invariant (operation
+    // membership), not a specific feature, so adding a third
+    // post-convergence phase in the future doesn't demand another
+    // one-purpose constant.
+    const BUILD_REBUILD_OPS = new Set(["build", "rebuild"]);
     // Strict parse: must be a canonical base-10 integer string (no
     // leading `+`/`-`, no trailing garbage, no decimal parts, no
     // scientific notation), and must fall inside the intent-validated
@@ -450,7 +456,7 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
       if (n < min || n > max) return null;
       return n;
     };
-    const opSupportsBalance = BALANCE_OPS.has(plan.operation);
+    const opSupportsBalance = BUILD_REBUILD_OPS.has(plan.operation);
     const fanoutTarget = opSupportsBalance
       ? parseBalanceInt(plan.flags?.fanout_target, FANOUT_TARGET_MIN, FANOUT_TARGET_MAX)
       : null;
@@ -518,7 +524,7 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     // from `soft-dag.mjs` — tests that want boundary behaviour can
     // pass overrides, but the CLI flag is a pure boolean.
     const softDagRequested =
-      plan.flags?.soft_dag_parents === true && BALANCE_OPS.has(plan.operation);
+      plan.flags?.soft_dag_parents === true && BUILD_REBUILD_OPS.has(plan.operation);
     let softDag = null;
     // Tracks whether the soft-DAG phase actually created a commit
     // (not just whether it found soft parents). A run with zero

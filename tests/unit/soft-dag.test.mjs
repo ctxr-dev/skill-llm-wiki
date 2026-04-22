@@ -557,6 +557,30 @@ test("runSoftDagParents: handles CRLF-fence leaves (Windows editor output)", asy
       r.perLeaf.has(crlfLeaf),
       `CRLF-fence leaf must be visible to soft-DAG synthesis; got keys ${JSON.stringify(Array.from(r.perLeaf.keys()))}`,
     );
+    // Boundary integrity: the rewrite must not leave a "\r\n\n",
+    // "\n\r\n", or stray "\r" bytes mixed in — that would happen if
+    // `renderFrontmatter` prepended a separator newline to a
+    // CRLF-leading body. The wider codebase is LF-only on write,
+    // so the re-serialised leaf must be entirely LF.
+    const rewritten = readFileSync(crlfLeaf, "utf8");
+    assert.ok(
+      !rewritten.includes("\r"),
+      `rewritten leaf must be LF-only (no stray \\r); got ${JSON.stringify(rewritten.slice(0, 200))}`,
+    );
+    // Body content preserved modulo EOL normalisation: the heading
+    // line survives (leading `# redis-crlf` text).
+    assert.ok(
+      rewritten.includes("# redis-crlf"),
+      "body content must survive the rewrite",
+    );
+    // Close fence cleanly terminates the frontmatter (no mid-content
+    // dashes from a botched rewrite): `---\n` appears as a close
+    // fence at most once in the serialised file, and the content
+    // starts on the very next line.
+    assert.ok(
+      /---\n# redis-crlf/.test(rewritten),
+      `close fence must sit directly before content on LF boundary; got ${JSON.stringify(rewritten.slice(-80))}`,
+    );
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }
