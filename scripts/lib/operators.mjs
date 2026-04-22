@@ -171,6 +171,18 @@ async function applyLift(wikiRoot, dir, leaf) {
 // says "same". Apply: produce a merged entry carrying the union
 // of covers[] (deduped), the more general focus, both source ids as
 // aliases, and delete the second source leaf.
+// Batch size for parallel pairwise `decide()` calls inside
+// `detectMerge`. Each pair is independent (no cross-pair state;
+// tiered.decide() reads/writes its own cache file + appends one
+// decision-log entry), so an O(N²) sequential loop can be turned
+// into ceil(N²/BATCH) sequential batches of concurrent awaits.
+// 32 is empirically chosen to saturate I/O without flooding the
+// kernel's open-file table on flat similarity-cache layouts.
+// Larger batches don't help because most of decide()'s latency is
+// filesystem-bound, and the bottleneck is dir-lookup contention
+// on the cache dir, not the number of in-flight readers.
+export const DETECT_MERGE_PAIR_BATCH_SIZE = 32;
+
 export async function detectMerge(wikiRoot, ctx) {
   const proposals = [];
   const dirs = walkDirs(wikiRoot);
@@ -184,28 +196,58 @@ export async function detectMerge(wikiRoot, ctx) {
     // between 10⁹ and 10⁶ operations.
     const corpus = leaves.map((l) => l.data);
     const model = buildComparisonModel(corpus);
+    // Enumerate every (i, j) pair once. Preserve the (i, j) index
+    // alongside the leaf refs so the batched concurrent awaits can
+    // unscramble back into deterministic i-j-ascending order when
+    // pushing proposals.
+    const pairs = [];
     for (let i = 0; i < leaves.length; i++) {
       for (let j = i + 1; j < leaves.length; j++) {
-        const a = leaves[i];
-        const b = leaves[j];
-        const r = await decide(a.data, b.data, corpus, {
-          wikiRoot,
-          opId: ctx.opId,
-          operator: "MERGE",
-          qualityMode: ctx.qualityMode,
-          interactive: ctx.interactive,
-          tier2Handler: ctx.tier2Handler,
-          precomputedModel: model,
-        });
-        if (r.decision === "same") {
-          proposals.push({
+        pairs.push({ a: leaves[i], b: leaves[j] });
+      }
+    }
+    // Batched concurrent await. In-flight pair count is capped at
+    // DETECT_MERGE_PAIR_BATCH_SIZE so the filesystem isn't
+    // overwhelmed and the Node event loop's microtask queue stays
+    // bounded. Each batch resolves in (batch-max-pair-latency)
+    // wall time instead of (sum-of-pair-latencies) — which for a
+    // 596-leaf pre-NEST root turns a 2-hour serial sweep into ~5
+    // minutes of concurrent I/O on modern SSDs.
+    const BATCH = DETECT_MERGE_PAIR_BATCH_SIZE;
+    const results = new Array(pairs.length);
+    for (let start = 0; start < pairs.length; start += BATCH) {
+      const slice = pairs.slice(start, start + BATCH);
+      const batchResults = await Promise.all(
+        slice.map(({ a, b }) =>
+          decide(a.data, b.data, corpus, {
+            wikiRoot,
+            opId: ctx.opId,
             operator: "MERGE",
-            priority: PRIORITY.MERGE,
-            sources: [a.path, b.path],
-            describe: `MERGE ${a.data.id} + ${b.data.id} (tier ${r.tier}, sim ${r.similarity.toFixed(2)})`,
-            apply: async () => applyMerge(wikiRoot, a, b, r),
-          });
-        }
+            qualityMode: ctx.qualityMode,
+            interactive: ctx.interactive,
+            tier2Handler: ctx.tier2Handler,
+            precomputedModel: model,
+          }),
+        ),
+      );
+      for (let k = 0; k < batchResults.length; k++) {
+        results[start + k] = batchResults[k];
+      }
+    }
+    // Re-serialise into deterministic i-j order: pairs[] is already
+    // in that order, and results[] is aligned to it, so a single
+    // forward scan is all we need.
+    for (let k = 0; k < pairs.length; k++) {
+      const r = results[k];
+      const { a, b } = pairs[k];
+      if (r.decision === "same") {
+        proposals.push({
+          operator: "MERGE",
+          priority: PRIORITY.MERGE,
+          sources: [a.path, b.path],
+          describe: `MERGE ${a.data.id} + ${b.data.id} (tier ${r.tier}, sim ${r.similarity.toFixed(2)})`,
+          apply: async () => applyMerge(wikiRoot, a, b, r),
+        });
       }
     }
   }

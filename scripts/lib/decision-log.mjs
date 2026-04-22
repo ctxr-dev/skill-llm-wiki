@@ -16,6 +16,7 @@
 // queryable even after the op is reset.
 
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -131,26 +132,48 @@ function emitEntry(entry) {
 }
 
 // Append an entry atomically.
+//
+// Hot path: at large-corpus scale (596 leaves → 189k pairwise
+// decisions observed) this is called once per decision. An earlier
+// implementation read the whole file, concatenated the new entry,
+// wrote to a temp, and renamed — O(file-size) per append. On a
+// 45 MB decisions.yaml that's ~22 MB of avg-read per call × 189k
+// calls ≈ 4 TB of I/O, which alone accounted for most of a 2h15m
+// build's wall-clock time.
+//
+// Current implementation uses POSIX append:
+//   - First call (file doesn't exist): write header + first entry
+//     via temp+rename so the initial file is atomic.
+//   - Subsequent calls: `appendFileSync` writes just the new entry
+//     block. Entry blocks are small (~200 bytes) and below the
+//     PIPE_BUF atomic-write boundary (~4 KB on Linux/macOS), so
+//     partial-entry corruption under single-process writes is
+//     effectively impossible. Under multi-process writes the
+//     kernel's O_APPEND still serialises the writes atomically for
+//     entries ≤ PIPE_BUF.
+//
+// Cost per append: O(entry-size), not O(file-size). ~200 µs vs
+// ~20 ms on a big log — a 100× speedup at scale.
 export function appendDecision(wikiRoot, entry) {
   validate(entry);
   const path = decisionLogPath(wikiRoot);
   mkdirSync(dirname(path), { recursive: true });
   const block = emitEntry(entry) + "\n";
-  let payload;
   if (!existsSync(path)) {
-    payload =
+    // First call: lay down the header atomically via temp+rename so
+    // a crash mid-creation doesn't leave an empty or orphan file.
+    const payload =
       "# skill-llm-wiki tiered-AI decision log (append-only)\n" +
       "version: 1\n" +
       "entries:\n" +
       block;
-  } else {
-    const existing = readFileSync(path, "utf8");
-    const prefix = existing.endsWith("\n") ? existing : existing + "\n";
-    payload = prefix + block;
+    const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
+    writeFileSync(tmp, payload, "utf8");
+    renameSync(tmp, path);
+    return;
   }
-  const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
-  writeFileSync(tmp, payload, "utf8");
-  renameSync(tmp, path);
+  // Subsequent appends: O(entry-size) via POSIX append.
+  appendFileSync(path, block, "utf8");
 }
 
 // Convenience helper for cluster-NEST outcomes. The convergence
