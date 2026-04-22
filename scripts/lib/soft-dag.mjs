@@ -461,7 +461,7 @@ export function applySoftParentEntries(wikiRoot) {
     const parents = Array.isArray(leaf.data.parents) ? leaf.data.parents : [];
     if (parents.length <= 1) continue; // primary-only, nothing to do
     const leafDir = dirname(leaf.path);
-    const record = buildEntryRecord(leaf, leafDir);
+    const record = buildEntryRecord(leaf);
     // Skip the first entry (primary); everything after is soft.
     for (let i = 1; i < parents.length; i++) {
       const rel = parents[i];
@@ -470,11 +470,18 @@ export function applySoftParentEntries(wikiRoot) {
       if (!absIndex) continue;
       if (!existsSync(absIndex)) continue;
       // The `file:` field is relative to the target index's directory,
-      // not the leaf's direct parent.
+      // not the leaf's direct parent. Use OS-native `path.relative`
+      // (not `posixRelative`) to match the convention
+      // `indices.mjs::rebuildIndex` produces for primary entries —
+      // on Windows `rebuildIndex` emits `\`-separator file paths, so
+      // mixing POSIX-normalised appends into the same array would
+      // produce inconsistent separators within one `entries[]` and
+      // break link rendering. Byte-reproducibility across OSes is a
+      // concern shared with rebuildIndex itself, out of scope here.
       const targetDir = dirname(absIndex);
       const targetRecord = {
         ...record,
-        file: posixRelative(targetDir, leaf.path),
+        file: relative(targetDir, leaf.path),
       };
       const list = softAppendsByIndex.get(absIndex) ?? [];
       list.push(targetRecord);
@@ -548,15 +555,18 @@ export function applySoftParentEntries(wikiRoot) {
 }
 
 // Build a minimal `entries[]` record for a leaf, matching the shape
-// `indices.mjs::rebuildIndex` produces. The `file` field is
-// recomputed per call site — see the call in `applySoftParentEntries`
-// — because each soft parent index lives in a different directory
-// and the relative link must anchor to THAT index's directory, not
-// the leaf's own.
-function buildEntryRecord(leaf, leafDir) {
+// `indices.mjs::rebuildIndex` produces. The `file` field is left
+// absent — the caller (`applySoftParentEntries`) always sets it to
+// `path.relative(targetDir, leaf.path)` per call site because each
+// soft parent index lives in a different directory and the relative
+// link must anchor to THAT index's directory, not the leaf's own.
+// Using OS-native `path.relative` (not a POSIX normaliser) matches
+// what `indices.mjs::rebuildIndex` produces for the primary-parent
+// entry, avoiding mixed `\` + `/` separators within the same
+// `entries[]` on Windows.
+function buildEntryRecord(leaf) {
   const record = {
     id: leaf.data.id,
-    file: posixRelative(leafDir, leaf.path),
     type: leaf.data.type ?? "primary",
     focus: leaf.data.focus ?? "",
   };

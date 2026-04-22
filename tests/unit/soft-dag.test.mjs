@@ -324,10 +324,15 @@ test("applySoftParentEntries: appends a soft-claimed leaf into the claimed paren
     // The appended record's file path must be relative to the target
     // index dir (cache/), NOT the leaf's own directory (retry/).
     const appended = cacheIdx.data.entries.find((e) => e.id === "cached-retry");
+    // OS-native separators to match `indices.mjs::rebuildIndex`
+    // convention (no soft-DAG-specific POSIX normalisation — that
+    // would mix `/` into a Windows-native entries[] array and break
+    // link rendering).
+    const { relative: rel } = await import("node:path");
     assert.equal(
       appended.file,
-      "../retry/cached-retry.md",
-      `file path must resolve from cache/ to retry/cached-retry.md`,
+      rel(join(wiki, "cache"), join(wiki, "retry", "cached-retry.md")),
+      `file path must resolve from cache/ to retry/cached-retry.md via OS-native relative`,
     );
   } finally {
     rmSync(wiki, { recursive: true, force: true });
