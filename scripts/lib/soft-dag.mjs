@@ -597,8 +597,15 @@ export function applySoftParentEntries(wikiRoot) {
     // Deterministic sort: lex by id. `rebuildIndex` already produces
     // entries in walk-order, but the DAG pass adds them at the end,
     // and a future run's grouping may differ — lex-sort keeps the
-    // on-disk order stable across runs.
-    newEntries.sort((a, b) => (a.id ?? "").localeCompare(b.id ?? ""));
+    // on-disk order stable across runs. `localeCompare` would throw
+    // on a non-string `id` (e.g., a manually edited index with
+    // `id: 123`), which for a best-effort propagation pass is the
+    // wrong trade-off — one malformed index shouldn't abort
+    // propagation for the other valid ones. Coerce to string first;
+    // downstream validation still catches the bad id shape.
+    newEntries.sort((a, b) =>
+      String(a?.id ?? "").localeCompare(String(b?.id ?? "")),
+    );
     parsed.data.entries = newEntries;
     atomicWriteFile(indexPath, renderFrontmatter(parsed.data, parsed.body));
     indicesTouched++;
