@@ -17,9 +17,13 @@
 
 import {
   appendFileSync,
+  closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   renameSync,
   writeFileSync,
 } from "node:fs";
@@ -200,8 +204,43 @@ export function appendDecision(wikiRoot, entry) {
     renameSync(tmp, path);
     return;
   }
-  // Subsequent appends: O(entry-size) via POSIX append.
-  appendFileSync(path, block, "utf8");
+  // Subsequent appends: O(entry-size) via POSIX append. Peek at
+  // the last byte first: if the existing file doesn't end in a
+  // newline (manual edit, prior torn-tail truncation, or a
+  // creative crash), appending directly would concatenate the new
+  // entry onto the previous line and produce invalid YAML. Prefix
+  // a newline in that case — a leading blank line inside the
+  // entries[] list is harmless and parses fine.
+  const needsLeadingNewline = !endsWithNewline(path);
+  appendFileSync(path, needsLeadingNewline ? "\n" + block : block, "utf8");
+}
+
+// Check the last byte of the decision log without reading the
+// whole file. Uses a small anchored read rather than `readFileSync`
+// so the hot append path still pays O(1) regardless of log size.
+// An unreadable file (ENOENT, EACCES, race window) is treated as
+// "already newline-terminated" so the caller doesn't double up on
+// leading newlines on a transient read error.
+function endsWithNewline(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const { size } = fstatSync(fd);
+    if (size === 0) return true; // empty file has no trailing content to collide
+    const buf = Buffer.alloc(1);
+    readSync(fd, buf, 0, 1, size - 1);
+    return buf[0] === 0x0a; // 0x0a == '\n'
+  } catch {
+    return true;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
 }
 
 // Convenience helper for cluster-NEST outcomes. The convergence

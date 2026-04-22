@@ -237,12 +237,17 @@ export async function detectMerge(wikiRoot, ctx) {
     // and skips instead of aborting the whole batch — the previous
     // `Promise.all` semantic would have discarded every
     // successfully-completed pair alongside the one failure.
-    // Validation errors from inside `decide()` are AbortError'd
-    // (non-retryable) so a structural bug doesn't burn the retry
-    // budget on something that would fail the same way every
-    // time. Stuck pairs (NFS hang, runaway embed call, fs lockup)
-    // timeout at `DETECT_MERGE_PAIR_TIMEOUT_MS` instead of stalling
-    // the phase forever.
+    // Timeout is non-retryable: a `TimeoutError` is re-thrown as
+    // `AbortError` so pRetry gives up immediately on the first
+    // deadline hit. Rationale: the underlying `decide()` call is
+    // still running on the event loop when pTimeout fires and may
+    // still write its cache entry + decision log. A retry would
+    // run a second `decide()` for the same pair and duplicate
+    // those side effects. Fail-fast on timeout keeps the write
+    // footprint to one cache/log entry per pair, which matters for
+    // post-run auditability. Transient errors (EAGAIN, partial
+    // writes, parse rejects) still retry up to
+    // `DETECT_MERGE_PAIR_RETRIES` times with backoff.
     //
     // Determinism: each batch's pairs are processed in the order
     // they were generated (pure i-ascending, j-ascending), and the
@@ -263,14 +268,37 @@ export async function detectMerge(wikiRoot, ctx) {
     let failureCount = 0;
     const decideWithGuards = (a, b) =>
       pRetry(
-        () =>
-          pTimeout(decide(a.data, b.data, corpus, decideCtx), {
-            milliseconds: DETECT_MERGE_PAIR_TIMEOUT_MS,
-            message:
-              `detectMerge: decide() timed out after ` +
-              `${DETECT_MERGE_PAIR_TIMEOUT_MS}ms for pair ` +
-              `(${a.data.id ?? "?"} ↔ ${b.data.id ?? "?"})`,
-          }),
+        async () => {
+          try {
+            return await pTimeout(decide(a.data, b.data, corpus, decideCtx), {
+              milliseconds: DETECT_MERGE_PAIR_TIMEOUT_MS,
+              message:
+                `detectMerge: decide() timed out after ` +
+                `${DETECT_MERGE_PAIR_TIMEOUT_MS}ms for pair ` +
+                `(${a.data.id ?? "?"} ↔ ${b.data.id ?? "?"})`,
+            });
+          } catch (err) {
+            // Convert timeouts into non-retryable AbortErrors. The
+            // underlying `decide()` call is still running on the
+            // event loop when pTimeout rejects — it will eventually
+            // settle and may still write the similarity-cache entry
+            // AND append a decision-log entry for this pair. Running
+            // a retry attempt after that would trigger a SECOND
+            // `decide()` for the same pair, doubling the cache writes
+            // and decision-log entries (on the happy-if-slow path)
+            // or doubling the timeout cost (on the stuck path).
+            // Treating timeouts as fail-fast skips the pair cleanly
+            // so the only visible residue is whatever the dangling
+            // decide() eventually writes — one cache entry, one log
+            // entry, never amplified. True cancellation would
+            // require an AbortSignal plumbed through decide →
+            // similarity-cache → embeddings, which is a bigger
+            // refactor; the non-retry shortcut is the honest
+            // trade-off for this release.
+            if (err instanceof TimeoutError) throw new AbortError(err);
+            throw err;
+          }
+        },
         {
           retries: DETECT_MERGE_PAIR_RETRIES,
           minTimeout: DETECT_MERGE_PAIR_RETRY_MIN_MS,
@@ -328,15 +356,9 @@ export async function detectMerge(wikiRoot, ctx) {
     await flush(); // drain the tail
     if (failureCount > 0) {
       process.stderr.write(
-        `[detectMerge] finished ${dir}: ${failureCount} pair(s) skipped after exhausting retries\n`,
+        `[detectMerge] finished ${dir}: ${failureCount} pair(s) skipped after exhausting retries (or on timeout)\n`,
       );
     }
-    // Keep AbortError in scope here so a future extension that
-    // throws AbortError from inside decide()'s path surfaces as a
-    // non-retryable failure (already honoured by pRetry). Guard
-    // against the linter flagging the import as unused if this
-    // module is ever stripped back to a no-timeout variant.
-    void AbortError;
   }
   return proposals;
 }

@@ -105,13 +105,16 @@ export function writeCached(wikiRoot, hashA, hashB, decision) {
   if (!decision || typeof decision !== "object") {
     throw new Error("similarity-cache: decision must be an object");
   }
-  const path = cacheEntryPath(wikiRoot, hashA, hashB);
-  // `dirname(path)` would also work, but cacheEntryPath already
-  // encodes the shard structure, so synthesising the shard dir
-  // from the same slice avoids parsing the path back out.
+  // Compute the key once — previously we hashed twice (once via
+  // cacheEntryPath + once inline for the shard slice). The hot
+  // write path of a 596-leaf sweep calls this ~178k times, so
+  // halving the sha256 work is a small-but-cheap win.
   const key = cacheKey(hashA, hashB);
   const shard = key.slice(0, CACHE_SHARD_PREFIX_LEN);
-  mkdirSync(join(cacheDir(wikiRoot), shard), { recursive: true });
+  const rest = key.slice(CACHE_SHARD_PREFIX_LEN);
+  const shardDir = join(cacheDir(wikiRoot), shard);
+  const path = join(shardDir, rest + ".json");
+  mkdirSync(shardDir, { recursive: true });
   const payload = JSON.stringify(
     {
       tier: decision.tier,
