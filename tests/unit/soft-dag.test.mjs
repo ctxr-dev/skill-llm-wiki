@@ -7,7 +7,7 @@
 // claimed parents' `entries[]`.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test } from "node:test";
@@ -415,6 +415,53 @@ test("applySoftParentEntries: rejects path-traversal parents[] entries (defense-
       externalAfter,
       externalBefore,
       "external index.md must be byte-unchanged after the guard rejects the traversal",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+    rmSync(external, { recursive: true, force: true });
+  }
+});
+
+test("applySoftParentEntries: rejects symlinked index.md pointing outside wikiRoot", () => {
+  const wiki = tmpWiki("symlink");
+  // External sibling whose index.md a symlink inside the wiki
+  // points at. The lexical guard alone wouldn't catch this because
+  // the in-wiki path sits under wikiRoot — only `realpathSync`
+  // containment reveals the escape.
+  const external = join(wiki, "..", `skill-llm-wiki-softdag-ext-${Date.now()}`);
+  mkdirSync(external, { recursive: true });
+  const externalIndex = join(external, "index.md");
+  writeFileSync(
+    externalIndex,
+    renderFrontmatter(
+      { id: "external-target", type: "index", entries: [] },
+      "\n# external\n",
+    ),
+    "utf8",
+  );
+  const externalBefore = readFileSync(externalIndex, "utf8");
+  try {
+    writeIndex(wiki, "index.md", basename(wiki));
+    mkdirSync(join(wiki, "trap"), { recursive: true });
+    // A symlinked index.md inside the wiki pointing at the external
+    // target. lexical containment holds (wiki/trap/index.md sits
+    // under wikiRoot) but realpath resolves out.
+    symlinkSync(externalIndex, join(wiki, "trap", "index.md"));
+    writeIndex(wiki, "legit/index.md", "legit", { entries: [] });
+    writeLeaf(wiki, "legit/hostile.md", "hostile", {
+      parents: ["index.md", "../trap/index.md"],
+    });
+    const r = applySoftParentEntries(wiki);
+    assert.equal(
+      r.softEntriesAdded,
+      0,
+      "symlinked-out index.md must be rejected by realpath guard",
+    );
+    const externalAfter = readFileSync(externalIndex, "utf8");
+    assert.equal(
+      externalAfter,
+      externalBefore,
+      "external target must be byte-unchanged after symlink guard rejects the claim",
     );
   } finally {
     rmSync(wiki, { recursive: true, force: true });

@@ -32,7 +32,14 @@
 // the flag elsewhere via `INT-16a` for the same reasons the balance
 // flags reject in non-{build,rebuild} (see intent.mjs).
 
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { readFrontmatterStreaming } from "./chunk.mjs";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
@@ -194,12 +201,13 @@ function collectCandidateDirs(wikiRoot) {
 
 // Build the aggregate semantic text for a candidate category
 // directory. Includes the directory's `index.md` frontmatter
-// (`focus`, `covers`, `tags`) when present PLUS each routable leaf
-// directly under it via `entryText`. Descendant leaves are
-// deliberately NOT included — soft parents claim leaves on direct
-// topical overlap, not on transitive subtree content, so aggregating
-// across depths would let a leaf latch onto a root category it only
-// matches through a deeply nested cousin.
+// (`focus`, `covers`, `tags`, `domains` — the full set `entryText`
+// uses, with focus doubled for emphasis) when present PLUS each
+// routable leaf directly under it via `entryText`. Descendant
+// leaves are deliberately NOT included — soft parents claim leaves
+// on direct topical overlap, not on transitive subtree content, so
+// aggregating across depths would let a leaf latch onto a root
+// category it only matches through a deeply nested cousin.
 function buildCategoryText(dir) {
   const parts = [];
   const idx = readIndex(dir);
@@ -547,6 +555,22 @@ function buildEntryRecord(leaf, leafDir) {
 // is a defense-in-depth check alongside validate's DUP-ID /
 // ALIAS-COLLIDES-ID; a hostile leaf's parents[] shouldn't be able to
 // mutate arbitrary filesystem paths even transiently.
+//
+// Two guards fire here:
+//
+//   1. Lexical guard on `resolve(leafDir, nativeRel)` prefix.
+//      Rejects pure `..`-traversal that would escape the wikiRoot
+//      prefix on disk without touching the filesystem.
+//   2. Symlink guard on `realpathSync`. `readFileSync` /
+//      `writeFileSync` FOLLOW symlinks, so a symlinked index.md
+//      inside the wiki pointing at an external file would bypass
+//      guard (1) even though the lexical path sits inside the
+//      wikiRoot prefix. `realpathSync` resolves the whole chain;
+//      the resolved target must still sit under the wikiRoot
+//      realpath for the claim to be accepted. `lstatSync` + a
+//      dedicated symlink check would also work, but realpath is
+//      the cleaner containment check since it handles intermediate
+//      symlinked directories too.
 function normaliseIndexPath(leafDir, rel, wikiRoot) {
   if (typeof rel !== "string") return null;
   if (rel.length === 0) return null;
@@ -558,11 +582,35 @@ function normaliseIndexPath(leafDir, rel, wikiRoot) {
   const abs = resolve(leafDir, nativeRel);
   // Only index.md entries are valid parents.
   if (basename(abs) !== "index.md") return null;
-  // Path-traversal guard: the resolved absolute path must sit under
-  // the wiki root. A leaf escaping via ".."-traversal is rejected
-  // silently (the pass is best-effort; we never throw on bad claims).
+  // Guard 1: lexical containment of the resolved path.
   const rootPrefix = resolve(wikiRoot) + sep;
   const rootExact = resolve(wikiRoot);
   if (abs !== rootExact && !abs.startsWith(rootPrefix)) return null;
+  // Guard 2: symlink-aware containment. Only applies when the
+  // target exists (realpath throws on ENOENT) — we'd otherwise
+  // reject every brand-new target. Caller (`applySoftParentEntries`)
+  // already runs an `existsSync(absIndex)` check before reading /
+  // writing, so non-existent targets short-circuit that branch.
+  if (existsSync(abs)) {
+    try {
+      // `lstatSync` confirms whether the final component is itself
+      // a symlink; `realpathSync` follows the full chain. We check
+      // both so a direct symlink on the target index AND an
+      // intermediate symlinked directory are both caught.
+      const realAbs = realpathSync(abs);
+      const realRoot = realpathSync(rootExact);
+      const realRootPrefix = realRoot + sep;
+      if (realAbs !== realRoot && !realAbs.startsWith(realRootPrefix)) {
+        return null;
+      }
+      // Belt-and-braces: if the final component is a symlink, the
+      // realpath check above is the real guarantee, but explicit
+      // lstat makes the intent visible. A symlink whose target is
+      // inside wikiRoot's realpath is still accepted.
+      void lstatSync(abs);
+    } catch {
+      return null; // realpath / lstat failure → reject defensively
+    }
+  }
   return abs;
 }

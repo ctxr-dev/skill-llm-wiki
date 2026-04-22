@@ -520,6 +520,15 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     const softDagRequested =
       plan.flags?.soft_dag_parents === true && BALANCE_OPS.has(plan.operation);
     let softDag = null;
+    // Tracks whether the soft-DAG phase actually created a commit
+    // (not just whether it found soft parents). A run with zero
+    // softParentsAdded can still dirty the tree — e.g., a rerun
+    // that removes previously-synthesised soft parents now below
+    // threshold, or a canonical-order frontmatter rewrite that
+    // leaves no net soft-parent change but still alters bytes. The
+    // `--review` gate below consumes this flag to decide whether
+    // Phase 4.4 contributed to the diff.
+    let softDagDidCommit = false;
     if (softDagRequested) {
       softDag = await runSoftDagParents(wikiRoot);
       record(
@@ -537,6 +546,7 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
           wikiRoot,
           `phase soft-dag-parents: ${softDag.softParentsAdded} soft-parent pointer(s)`,
         );
+        softDagDidCommit = true;
       }
     }
 
@@ -554,9 +564,13 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     // the orchestrator's catch block handles the rollback uniformly
     // with any other failure path.
     const balanceApplied = balance?.applied?.length ?? 0;
-    const softDagApplied = softDag?.softParentsAdded ?? 0;
+    // Use the commit-did-fire flag for soft-DAG, not the `softParentsAdded`
+    // counter: a rerun that removes previously-synthesised soft parents
+    // below threshold, or a canonical-order frontmatter rewrite that
+    // preserves logical content while altering bytes, produces
+    // `softParentsAdded === 0` but still dirties the tree and commits.
     const anyMutation =
-      convergence.applied.length > 0 || balanceApplied > 0 || softDagApplied > 0;
+      convergence.applied.length > 0 || balanceApplied > 0 || softDagDidCommit;
     if (plan.flags?.review && anyMutation) {
       const reviewResult = await runReviewCycle(wikiRoot, opId, {
         forceInteractive: plan.flags?.force_interactive === true,
