@@ -34,7 +34,6 @@
 
 import {
   existsSync,
-  lstatSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -45,7 +44,7 @@ import { readFrontmatterStreaming } from "./chunk.mjs";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
 import { listChildren, readIndex } from "./indices.mjs";
 import {
-  buildComparisonModel,
+  buildComparisonModelFromTexts,
   cosine,
   entryText,
   tfidfVector,
@@ -350,19 +349,22 @@ export async function runSoftDagParents(wikiRoot, ctx = {}) {
   // texts. Unified IDF means leaf-vs-category cosines sit on the
   // same TF-IDF basis as Phase X.3 / similarity.mjs's pairwise
   // scores, so threshold calibration transfers.
-  const leafTexts = leaves.map((l) => ({ text: entryText(l.data) }));
+  //
+  // Leaf text comes from `entryText(leaf.data)` which already
+  // applies the doubled-focus weighting. Category text is
+  // pre-aggregated by `buildCategoryText` (which also routes
+  // through `entryText` for each contributor). Both are passed
+  // as-is to `buildComparisonModelFromTexts` — a plain texts-array
+  // constructor that skips the `entryText` roundtrip
+  // `buildComparisonModel` would otherwise perform, avoiding a
+  // second round of focus-doubling on pre-assembled strings.
+  const leafTexts = leaves.map((l) => entryText(l.data));
   const catTextMap = new Map();
   for (const dir of candidateDirs) {
     catTextMap.set(dir, buildCategoryText(dir));
   }
-  const corpusEntries = [
-    ...leafTexts.map((t) => ({ focus: t.text })),
-    ...Array.from(catTextMap.values()).map((t) => ({ focus: t })),
-  ];
-  const model = buildComparisonModel(corpusEntries);
-  // `buildComparisonModel` doubles the focus field inside
-  // `entryText`, so we passed pre-assembled text under `focus` to
-  // reuse the doubled-weight treatment without duplicating logic.
+  const corpusTexts = [...leafTexts, ...Array.from(catTextMap.values())];
+  const model = buildComparisonModelFromTexts(corpusTexts);
   const leafVectors = new Map();
   for (let i = 0; i < leaves.length; i++) {
     leafVectors.set(leaves[i].path, tfidfVector(model.tokenLists[i], model.idfMap));
@@ -561,16 +563,16 @@ function buildEntryRecord(leaf, leafDir) {
 //   1. Lexical guard on `resolve(leafDir, nativeRel)` prefix.
 //      Rejects pure `..`-traversal that would escape the wikiRoot
 //      prefix on disk without touching the filesystem.
-//   2. Symlink guard on `realpathSync`. `readFileSync` /
+//   2. Symlink-aware guard on `realpathSync`. `readFileSync` /
 //      `writeFileSync` FOLLOW symlinks, so a symlinked index.md
 //      inside the wiki pointing at an external file would bypass
 //      guard (1) even though the lexical path sits inside the
-//      wikiRoot prefix. `realpathSync` resolves the whole chain;
-//      the resolved target must still sit under the wikiRoot
-//      realpath for the claim to be accepted. `lstatSync` + a
-//      dedicated symlink check would also work, but realpath is
-//      the cleaner containment check since it handles intermediate
-//      symlinked directories too.
+//      wikiRoot prefix. `realpathSync` resolves the whole chain
+//      (including intermediate symlinked directories); the
+//      resolved target must still sit under the wikiRoot realpath
+//      for the claim to be accepted. Only fires when the target
+//      already exists — realpath throws ENOENT on a new index, and
+//      the caller's `existsSync` branch below handles that case.
 function normaliseIndexPath(leafDir, rel, wikiRoot) {
   if (typeof rel !== "string") return null;
   if (rel.length === 0) return null;
@@ -582,9 +584,13 @@ function normaliseIndexPath(leafDir, rel, wikiRoot) {
   const abs = resolve(leafDir, nativeRel);
   // Only index.md entries are valid parents.
   if (basename(abs) !== "index.md") return null;
-  // Guard 1: lexical containment of the resolved path.
-  const rootPrefix = resolve(wikiRoot) + sep;
+  // Guard 1: lexical containment of the resolved path. Build the
+  // prefix by concatenating `sep` only when `rootExact` doesn't
+  // already end in one — avoids a degenerate `"//"` prefix when
+  // `wikiRoot` is the filesystem root on POSIX (`"/"` → prefix
+  // `"/"` not `"//"`).
   const rootExact = resolve(wikiRoot);
+  const rootPrefix = rootExact.endsWith(sep) ? rootExact : rootExact + sep;
   if (abs !== rootExact && !abs.startsWith(rootPrefix)) return null;
   // Guard 2: symlink-aware containment. Only applies when the
   // target exists (realpath throws on ENOENT) — we'd otherwise
@@ -599,15 +605,10 @@ function normaliseIndexPath(leafDir, rel, wikiRoot) {
       // intermediate symlinked directory are both caught.
       const realAbs = realpathSync(abs);
       const realRoot = realpathSync(rootExact);
-      const realRootPrefix = realRoot + sep;
+      const realRootPrefix = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
       if (realAbs !== realRoot && !realAbs.startsWith(realRootPrefix)) {
         return null;
       }
-      // Belt-and-braces: if the final component is a symlink, the
-      // realpath check above is the real guarantee, but explicit
-      // lstat makes the intent visible. A symlink whose target is
-      // inside wikiRoot's realpath is still accepted.
-      void lstatSync(abs);
     } catch {
       return null; // realpath / lstat failure → reject defensively
     }
