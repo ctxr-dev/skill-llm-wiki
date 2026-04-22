@@ -5,10 +5,13 @@
 //
 // Cache entries are JSON files under
 // `<wiki>/.llmwiki/similarity-cache/<shard>/<rest>.json`, where
-// `<shard>` is the first 2 hex chars of the cache key and `<rest>`
-// is the remaining 30 chars. 256 shards keep each shard dir's
-// inode count ~cacheSize/256, so a 178k-pair corpus has ~700
-// entries per shard instead of 178k in a single flat directory.
+// `<shard>` is the first `CACHE_SHARD_PREFIX_LEN` hex chars of the
+// 32-char cache key and `<rest>` is the remaining
+// `32 - CACHE_SHARD_PREFIX_LEN` chars. The default
+// `CACHE_SHARD_PREFIX_LEN = 2` gives 16² = 256 shards, which keeps
+// each shard dir's inode count ~cacheSize/256 — a 178k-pair
+// corpus has ~700 entries per shard instead of 178k in a single
+// flat directory.
 // APFS/ext4/ZFS directory lookups degrade with entry count once
 // the VFS dirent cache overflows (~10k on typical kernels), so
 // sharding turns the per-lookup cost from O(log N)-with-large-N

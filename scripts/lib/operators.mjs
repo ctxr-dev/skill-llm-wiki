@@ -200,9 +200,17 @@ export const DETECT_MERGE_PAIR_TIMEOUT_MS = 30_000;
 // fs glitches (EAGAIN on a contested shard dir, a partial write
 // that parse rejected) — three attempts total (1 initial + 2
 // retries) with 500 ms → 5 s exponential backoff handles those
-// cleanly. Validation errors from `decide()` are AbortError'd so
-// they don't burn retries on something that would fail the same
-// way every time.
+// cleanly. Only timeouts (wrapped as AbortError) are explicitly
+// non-retryable; all other errors (including deterministic
+// validation errors from `decide()` — unknown qualityMode, missing
+// ctx fields, etc.) currently consume the full retry budget. That
+// wastes a few seconds on what would be a repeat failure, but
+// classifying decide()'s error surface would require pattern-
+// matching on error messages or a dedicated error-code layer, and
+// the waste in practice is small vs the correctness risk of
+// misclassifying a legitimate transient failure. Acceptable
+// trade-off for now; a targeted shouldRetry() refinement is
+// tracked as a follow-up.
 export const DETECT_MERGE_PAIR_RETRIES = 2;
 export const DETECT_MERGE_PAIR_RETRY_MIN_MS = 500;
 export const DETECT_MERGE_PAIR_RETRY_MAX_MS = 5_000;
@@ -327,10 +335,25 @@ export async function detectMerge(wikiRoot, ctx) {
         if (outcome.status === "rejected") {
           failureCount++;
           const reason = outcome.reason;
-          const kind = reason instanceof TimeoutError ? "timeout" : "error";
+          // Timeout path: decideWithGuards converts `TimeoutError`
+          // into `AbortError` so pRetry skips the pair
+          // immediately (see the note in decideWithGuards on why
+          // re-running decide() after a timeout would duplicate
+          // side effects). At this point `reason` is therefore an
+          // AbortError whose originalError is the TimeoutError —
+          // unwrap to distinguish "timed out and bailed" from
+          // "exhausted retries on a transient error". The phrasing
+          // in the breadcrumb matters for operators grepping logs
+          // after a slow run.
+          const original = reason?.originalError;
+          const isTimeout =
+            reason instanceof TimeoutError || original instanceof TimeoutError;
+          const kind = isTimeout ? "timeout" : "error";
+          const verb = isTimeout ? "aborted" : "exhausted retries";
+          const msg = (isTimeout ? original?.message : reason?.message) ?? reason;
           process.stderr.write(
             `[detectMerge] pair (${a.data.id ?? "?"} ↔ ${b.data.id ?? "?"}) ` +
-              `exhausted retries (${kind}): ${reason?.message ?? reason}\n`,
+              `${verb} (${kind}): ${msg}\n`,
           );
           continue;
         }
