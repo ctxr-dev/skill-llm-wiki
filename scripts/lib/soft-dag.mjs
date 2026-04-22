@@ -5,10 +5,12 @@
 // against every candidate category-directory's aggregate vector;
 // directories whose cosine similarity meets the threshold become
 // SOFT parents. The leaf's `parents[]` frontmatter is rewritten with
-// the primary parent FIRST (POSIX-relative to the direct parent
-// index.md, typically `"index.md"` or `"../index.md"`), followed by
-// one entry per chosen soft parent, likewise POSIX-relative to the
-// same origin (the leaf's direct parent's `index.md`).
+// the primary parent FIRST (always `"index.md"` for leaves — the
+// path is POSIX-relative to the LEAF's own directory, and the leaf
+// sits in the same directory as its direct-parent index.md by
+// construction; `"../index.md"` is the subcategory-index shape, not
+// a leaf shape), followed by one entry per chosen soft parent,
+// likewise POSIX-relative to the same origin (the leaf's directory).
 //
 // Downstream, `applySoftParentEntries` re-walks the tree after index
 // generation and appends each leaf's record into every soft-parent
@@ -43,7 +45,7 @@ import {
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { readFrontmatterStreaming } from "./chunk.mjs";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
-import { listChildren, readIndex } from "./indices.mjs";
+import { readIndex } from "./indices.mjs";
 import {
   buildComparisonModelFromTexts,
   cosine,
@@ -148,20 +150,36 @@ function collectAllLeaves(wikiRoot, withBody = true) {
   return out;
 }
 
+// Group already-collected leaves by their direct-parent directory.
+// Consumed by `collectCandidateDirs` (routable-leaf check) and
+// `buildCategoryText` (aggregate text) so neither has to call
+// `listChildren` again per directory. One pass at the top of
+// `runSoftDagParents` feeds both downstream helpers; the previous
+// layout did two full-tree walks (one in collectCandidateDirs via
+// listChildren, one per candidate in buildCategoryText) on top of
+// the full-leaf collection, which was wasteful on large corpora.
+function groupLeavesByDir(leaves) {
+  const map = new Map();
+  for (const leaf of leaves) {
+    const dir = dirname(leaf.path);
+    const list = map.get(dir) ?? [];
+    list.push(leaf);
+    map.set(dir, list);
+  }
+  return map;
+}
+
 // Walk the wiki and collect every non-dot category directory (any
 // directory that could be a soft-parent target). The wiki root is
 // included since leaves from deep subtrees can claim the root as a
 // soft parent (the typed "this is also broadly relevant to the root
 // topic" pointer). A category is eligible as a soft-parent target if
 // it has an `index.md` OR at least one ROUTABLE leaf directly
-// underneath. Routability matches `listChildren`'s semantics: the
-// `.md` file must have frontmatter with an `id`. A dir that holds
-// only non-routable markdown (README.md with no frontmatter, notes
-// from a manual edit) would otherwise become a tombstone candidate
-// and skew scoring against other real categories. `listChildren`
-// performs the frontmatter parse with bounded reads via
-// `readFrontmatterStreaming`; we reuse it rather than re-implementing.
-function collectCandidateDirs(wikiRoot) {
+// underneath. Routability is decided from the pre-collected
+// `leavesByDir` map (derived from `collectAllLeaves`), not from a
+// fresh `listChildren` call per dir — `listChildren` would parse
+// frontmatter for every `.md` again, duplicating I/O already done.
+function collectCandidateDirs(wikiRoot, leavesByDir) {
   const out = [];
   const stack = [wikiRoot];
   while (stack.length > 0) {
@@ -186,11 +204,7 @@ function collectCandidateDirs(wikiRoot) {
         hasIndex = true;
       }
     }
-    // Routable-leaf check via listChildren: only leaves whose
-    // frontmatter parses with an `id` count. A dir holding only
-    // README-style markdown without frontmatter is NOT a candidate.
-    const { leaves } = listChildren(dir);
-    const hasRoutableLeaf = leaves.length > 0;
+    const hasRoutableLeaf = (leavesByDir.get(dir)?.length ?? 0) > 0;
     if (dir === wikiRoot || hasIndex || hasRoutableLeaf) {
       out.push(dir);
     }
@@ -207,12 +221,14 @@ function collectCandidateDirs(wikiRoot) {
 // leaves are deliberately NOT included — soft parents claim leaves
 // on direct topical overlap, not on transitive subtree content, so
 // aggregating across depths would let a leaf latch onto a root
-// category it only matches through a deeply nested cousin.
-function buildCategoryText(dir) {
+// category it only matches through a deeply nested cousin. Takes
+// the pre-grouped `leavesByDir` map so no second `listChildren`
+// pass is needed here.
+function buildCategoryText(dir, leavesByDir) {
   const parts = [];
   const idx = readIndex(dir);
   if (idx?.data) parts.push(entryText(idx.data));
-  const { leaves } = listChildren(dir);
+  const leaves = leavesByDir.get(dir) ?? [];
   for (const leaf of leaves) parts.push(entryText(leaf.data));
   return parts.join(" ").trim();
 }
@@ -355,7 +371,12 @@ export async function runSoftDagParents(wikiRoot, ctx = {}) {
     return { leavesProcessed: 0, softParentsAdded: 0, perLeaf: new Map() };
   }
 
-  const candidateDirs = collectCandidateDirs(wikiRoot);
+  // One group-by-dir pass over the already-collected leaves feeds
+  // both `collectCandidateDirs` (routable-leaf check) and
+  // `buildCategoryText` (aggregate text). No extra filesystem I/O
+  // beyond the initial `collectAllLeaves` walk.
+  const leavesByDir = groupLeavesByDir(leaves);
+  const candidateDirs = collectCandidateDirs(wikiRoot, leavesByDir);
   candidateDirs.sort((a, b) =>
     posixRelative(wikiRoot, a).localeCompare(posixRelative(wikiRoot, b)),
   );
@@ -376,7 +397,7 @@ export async function runSoftDagParents(wikiRoot, ctx = {}) {
   const leafTexts = leaves.map((l) => entryText(l.data));
   const catTextMap = new Map();
   for (const dir of candidateDirs) {
-    catTextMap.set(dir, buildCategoryText(dir));
+    catTextMap.set(dir, buildCategoryText(dir, leavesByDir));
   }
   const corpusTexts = [...leafTexts, ...Array.from(catTextMap.values())];
   const model = buildComparisonModelFromTexts(corpusTexts);
@@ -611,8 +632,18 @@ function buildEntryRecord(leaf) {
 function normaliseIndexPath(leafDir, rel, wikiRoot) {
   if (typeof rel !== "string") return null;
   if (rel.length === 0) return null;
-  // Reject absolute paths — parents[] is always relative.
-  if (rel.startsWith("/") || /^[a-zA-Z]:/.test(rel)) return null;
+  // Reject every absolute-path form — parents[] is ALWAYS relative.
+  //   POSIX absolute:         "/foo/bar"
+  //   Drive-letter absolute:  "C:/foo/bar" or "C:\\foo\\bar"
+  //   Windows root-relative:  "\\foo\\bar"  (resolves from the current drive)
+  //   UNC path:               "\\\\server\\share\\foo"
+  // The containment guard below would catch most of these, but an
+  // adversarial fixture (or a wikiRoot that is itself a UNC path)
+  // could slip a `\\server\\...` form through prefix comparison,
+  // so fail-loud here keeps the "relative only" contract explicit
+  // without relying on downstream behaviour.
+  if (rel.startsWith("/") || rel.startsWith("\\")) return null;
+  if (/^[a-zA-Z]:/.test(rel)) return null;
   // Soft-parent convention: POSIX-style separators. Normalise to
   // OS-native for filesystem operations.
   const nativeRel = sep === "/" ? rel : rel.split("/").join(sep);
