@@ -446,6 +446,60 @@ test("applySoftParentEntries: tolerates malformed parents[] entries without cras
   }
 });
 
+test("runSoftDagParents: handles CRLF-fence leaves (Windows editor output)", async () => {
+  const wiki = tmpWiki("crlf");
+  try {
+    writeIndex(wiki, "index.md", basename(wiki));
+    writeIndex(wiki, "cache/index.md", "cache", {
+      focus: "cache eviction lru",
+      covers: ["cache", "eviction"],
+    });
+    // Write a CRLF-fenced leaf directly — simulate a Windows editor's
+    // line endings on the frontmatter. `parseFrontmatter` alone won't
+    // recognise the fence; only `readFrontmatterStreaming`'s CRLF-aware
+    // path will capture it.
+    const crlfLeaf = join(wiki, "cache", "redis-crlf.md");
+    const crlfFrontmatter =
+      "---\r\nid: redis-crlf\r\ntype: primary\r\nfocus: redis cache eviction\r\n" +
+      "covers:\r\n  - redis\r\n  - cache\r\ntags:\r\n  - cache\r\n" +
+      "parents:\r\n  - index.md\r\n---\r\n\r\n# redis-crlf\r\n";
+    writeFileSync(crlfLeaf, crlfFrontmatter, "utf8");
+    const r = await runSoftDagParents(wiki);
+    // The CRLF leaf must be in the perLeaf map — i.e., it was
+    // recognised as a routable leaf (has id) and processed.
+    assert.ok(
+      r.perLeaf.has(crlfLeaf),
+      `CRLF-fence leaf must be visible to soft-DAG synthesis; got keys ${JSON.stringify(Array.from(r.perLeaf.keys()))}`,
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("applySoftParentEntries: stats reflect ACTUAL writes, not planned appends", () => {
+  const wiki = tmpWiki("stats");
+  try {
+    writeIndex(wiki, "index.md", basename(wiki));
+    // Pre-seed the target index with the leaf's id so the soft-claim
+    // de-dupes at apply time. Stats must report zero touched /
+    // zero added — pre-round-2 they counted the planned append.
+    writeIndex(wiki, "cache/index.md", "cache", {
+      entries: [
+        { id: "dual", file: "../retry/dual.md", type: "primary", focus: "" },
+      ],
+    });
+    writeIndex(wiki, "retry/index.md", "retry", { entries: [] });
+    writeLeaf(wiki, "retry/dual.md", "dual", {
+      parents: ["index.md", "../cache/index.md"],
+    });
+    const r = applySoftParentEntries(wiki);
+    assert.equal(r.indicesTouched, 0, "already-deduped claim must not count as a touched index");
+    assert.equal(r.softEntriesAdded, 0, "already-deduped claim must not count as an added entry");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("runSoftDagParents + applySoftParentEntries: end-to-end synthesis + propagation", async () => {
   const wiki = tmpWiki("e2e");
   try {

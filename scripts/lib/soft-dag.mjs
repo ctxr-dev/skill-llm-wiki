@@ -106,14 +106,26 @@ function collectAllLeaves(wikiRoot, withBody = true) {
       if (!e.name.endsWith(".md")) continue;
       if (e.name === "index.md") continue;
       let parsed;
+      let body;
       try {
+        // Both modes use `readFrontmatterStreaming` to get the
+        // frontmatter text + byte offset. That function normalises
+        // CRLF → LF on the frontmatter payload so `parseFrontmatter`
+        // (which only recognises an LF fence) sees the expected
+        // form. Pre-round-2 the withBody path used `readFileSync` +
+        // `parseFrontmatter` directly, which silently dropped
+        // CRLF-fence leaves (common on Windows editors) and made
+        // them invisible to soft-DAG synthesis.
+        const captured = readFrontmatterStreaming(full);
+        if (!captured) continue;
+        parsed = parseFrontmatter(captured.frontmatterText, full);
         if (withBody) {
-          const raw = readFileSync(full, "utf8");
-          parsed = parseFrontmatter(raw, full);
-        } else {
-          const captured = readFrontmatterStreaming(full);
-          if (!captured) continue;
-          parsed = parseFrontmatter(captured.frontmatterText, full);
+          // Read the raw file as a buffer and slice at the original
+          // byte offset so multi-byte characters at the fence
+          // boundary don't corrupt the body. `captured.bodyOffset`
+          // is the byte index just after the CLOSING fence.
+          const raw = readFileSync(full);
+          body = raw.slice(captured.bodyOffset).toString("utf8");
         }
       } catch {
         continue;
@@ -121,7 +133,7 @@ function collectAllLeaves(wikiRoot, withBody = true) {
       if (!parsed?.data?.id) continue;
       out.push(
         withBody
-          ? { path: full, data: parsed.data, body: parsed.body }
+          ? { path: full, data: parsed.data, body }
           : { path: full, data: parsed.data },
       );
     }
@@ -445,6 +457,15 @@ export function applySoftParentEntries(wikiRoot) {
     }
   }
 
+  // Actual-write counters. Pre-round-2 the returned stats were
+  // derived from `softAppendsByIndex.size` and the sum of its value
+  // arrays — the PLANNED appends. That over-reported on reruns (every
+  // id already present → zero actual writes but indicesTouched still
+  // counted) and over-reported when an index failed to parse.
+  // Tracking the actual writes keeps orchestrator phase logging
+  // honest across idempotent and hostile-fixture cases.
+  let indicesTouched = 0;
+  let softEntriesAdded = 0;
   for (const [indexPath, appends] of softAppendsByIndex) {
     // Per-index try/catch: a malformed target `index.md` (e.g.,
     // user-edited YAML that fails to parse) must NOT abort the
@@ -469,12 +490,14 @@ export function applySoftParentEntries(wikiRoot) {
     // (primary case) or may appear twice across soft claims in
     // degenerate fixtures.
     const newEntries = existing.slice();
+    let addedThisIndex = 0;
     for (const rec of appends) {
       if (!rec.id || existingIds.has(rec.id)) continue;
       newEntries.push(rec);
       existingIds.add(rec.id);
+      addedThisIndex++;
     }
-    if (newEntries.length === existing.length) continue; // no change
+    if (addedThisIndex === 0) continue; // no change
     // Deterministic sort: lex by id. `rebuildIndex` already produces
     // entries in walk-order, but the DAG pass adds them at the end,
     // and a future run's grouping may differ — lex-sort keeps the
@@ -482,15 +505,11 @@ export function applySoftParentEntries(wikiRoot) {
     newEntries.sort((a, b) => (a.id ?? "").localeCompare(b.id ?? ""));
     parsed.data.entries = newEntries;
     writeFileSync(indexPath, renderFrontmatter(parsed.data, parsed.body), "utf8");
+    indicesTouched++;
+    softEntriesAdded += addedThisIndex;
   }
 
-  return {
-    indicesTouched: softAppendsByIndex.size,
-    softEntriesAdded: Array.from(softAppendsByIndex.values()).reduce(
-      (sum, arr) => sum + arr.length,
-      0,
-    ),
-  };
+  return { indicesTouched, softEntriesAdded };
 }
 
 // Build a minimal `entries[]` record for a leaf, matching the shape
