@@ -542,9 +542,18 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
       // via the anyMutation gate below.
       gitRunChecked(wikiRoot, ["add", "-A"]);
       if (!gitWorkingTreeClean(wikiRoot)) {
+        // Commit message avoids naming the added-count directly:
+        // a rerun that REMOVES soft parents (now below threshold)
+        // would otherwise say "0 soft-parent pointer(s)" despite
+        // the diff being real. Phrased as "parents[] synthesis"
+        // so the message stays honest across all rewrite cases
+        // (added, removed, canonical-reorder); the per-phase
+        // record() call above already surfaces the specific
+        // added-count for auditing.
         gitCommit(
           wikiRoot,
-          `phase soft-dag-parents: ${softDag.softParentsAdded} soft-parent pointer(s)`,
+          `phase soft-dag-parents: parents[] synthesis across ` +
+            `${softDag.leavesProcessed} leaf/leaves (${softDag.softParentsAdded} added)`,
         );
         softDagDidCommit = true;
       }

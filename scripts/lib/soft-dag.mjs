@@ -37,6 +37,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
@@ -296,13 +297,27 @@ function primaryParentPath() {
   return "index.md";
 }
 
+// Atomic write: materialise to `<path>.tmp` then rename into place.
+// Matches `indices.mjs::atomicWriteFile`'s discipline — a crash or
+// SIGKILL between writeFileSync and renameSync leaves EITHER the
+// old file intact OR the temp file orphaned, never a partially-
+// written target. Both leaf rewrites (`rewriteLeafParents`) and
+// index rewrites (`applySoftParentEntries`) route through this so
+// the soft-DAG phase matches the durability expectations the rest
+// of the index-generation pipeline sets.
+function atomicWriteFile(targetPath, content) {
+  const tmp = targetPath + ".tmp";
+  writeFileSync(tmp, content, "utf8");
+  renameSync(tmp, targetPath);
+}
+
 // Rewrite the leaf's frontmatter with an expanded `parents[]` array.
 // Primary parent first, soft parents after in score order. The body
 // is preserved byte-exact; only the frontmatter is re-serialised.
 function rewriteLeafParents(leaf, parentsArray) {
   const newData = { ...leaf.data, parents: parentsArray };
   const serialised = renderFrontmatter(newData, leaf.body);
-  writeFileSync(leaf.path, serialised, "utf8");
+  atomicWriteFile(leaf.path, serialised);
 }
 
 // Main entry point. Returns a summary of work done; the caller
@@ -514,7 +529,7 @@ export function applySoftParentEntries(wikiRoot) {
     // on-disk order stable across runs.
     newEntries.sort((a, b) => (a.id ?? "").localeCompare(b.id ?? ""));
     parsed.data.entries = newEntries;
-    writeFileSync(indexPath, renderFrontmatter(parsed.data, parsed.body), "utf8");
+    atomicWriteFile(indexPath, renderFrontmatter(parsed.data, parsed.body));
     indicesTouched++;
     softEntriesAdded += addedThisIndex;
   }
@@ -599,10 +614,13 @@ function normaliseIndexPath(leafDir, rel, wikiRoot) {
   // writing, so non-existent targets short-circuit that branch.
   if (existsSync(abs)) {
     try {
-      // `lstatSync` confirms whether the final component is itself
-      // a symlink; `realpathSync` follows the full chain. We check
-      // both so a direct symlink on the target index AND an
-      // intermediate symlinked directory are both caught.
+      // `realpathSync` resolves the full symlink chain, including
+      // any intermediate symlinked directories. That's a stronger
+      // containment check than `lstatSync(...).isSymbolicLink()`
+      // alone would give us: we don't care whether the final
+      // component itself is a symlink — we only care where the
+      // filesystem operations would actually land, which is what
+      // realpath reveals.
       const realAbs = realpathSync(abs);
       const realRoot = realpathSync(rootExact);
       const realRootPrefix = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
@@ -610,7 +628,7 @@ function normaliseIndexPath(leafDir, rel, wikiRoot) {
         return null;
       }
     } catch {
-      return null; // realpath / lstat failure → reject defensively
+      return null; // realpath failure → reject defensively
     }
   }
   return abs;
