@@ -378,6 +378,50 @@ test("applySoftParentEntries: ignores leaves with only a primary parent", () => 
   }
 });
 
+test("applySoftParentEntries: rejects path-traversal parents[] entries (defense-in-depth)", () => {
+  const wiki = tmpWiki("traversal");
+  // Plant a sibling `index.md` OUTSIDE the wiki that a hostile leaf
+  // might try to mutate via ..-traversal. The guard must keep the
+  // propagation pass from touching it — the external file's bytes
+  // must be unchanged after the pass runs.
+  const external = join(wiki, "..", `skill-llm-wiki-softdag-external-${Date.now()}`);
+  mkdirSync(external, { recursive: true });
+  const externalIndex = join(external, "index.md");
+  writeFileSync(
+    externalIndex,
+    renderFrontmatter(
+      { id: "external-target", type: "index", entries: [] },
+      "\n# external\n",
+    ),
+    "utf8",
+  );
+  const externalBefore = readFileSync(externalIndex, "utf8");
+  try {
+    writeIndex(wiki, "index.md", basename(wiki));
+    writeIndex(wiki, "legit/index.md", "legit", { entries: [] });
+    writeLeaf(wiki, "legit/hostile.md", "hostile", {
+      // Traversal attempt: a carefully-tuned chain of ../ takes us
+      // one level above wikiRoot and into the external dir.
+      parents: ["index.md", `../../${basename(external)}/index.md`],
+    });
+    const r = applySoftParentEntries(wiki);
+    assert.equal(
+      r.softEntriesAdded,
+      0,
+      "traversal attempt must not produce any soft-entry writes",
+    );
+    const externalAfter = readFileSync(externalIndex, "utf8");
+    assert.equal(
+      externalAfter,
+      externalBefore,
+      "external index.md must be byte-unchanged after the guard rejects the traversal",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+    rmSync(external, { recursive: true, force: true });
+  }
+});
+
 test("applySoftParentEntries: tolerates malformed parents[] entries without crashing", () => {
   const wiki = tmpWiki("malformed");
   try {

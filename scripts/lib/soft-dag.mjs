@@ -33,7 +33,8 @@
 // flags reject in non-{build,rebuild} (see intent.mjs).
 
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, relative, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { readFrontmatterStreaming } from "./chunk.mjs";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
 import { listChildren, readIndex } from "./indices.mjs";
 import {
@@ -73,7 +74,17 @@ export const SOFT_PARENT_MAX_PER_LEAF = 3;
 // themselves are validated with the same frontmatter-must-have-id
 // discipline `listChildren` uses. Dot-prefixed entries are skipped
 // under the blanket pipeline rule.
-function collectAllLeaves(wikiRoot) {
+//
+// `withBody` controls read mode:
+//   - `true` (default for `runSoftDagParents`): `readFileSync` +
+//     `parseFrontmatter` so the caller can write leaves back via
+//     `renderFrontmatter(data, body)` preserving the body bytes.
+//   - `false` (used by `applySoftParentEntries`): bounded
+//     `readFrontmatterStreaming` so the walk only pays the
+//     frontmatter-byte cost, not the full-file-bytes cost. Matters
+//     at the 596-leaf consumer-corpus scale where bodies can dwarf
+//     frontmatter.
+function collectAllLeaves(wikiRoot, withBody = true) {
   const out = [];
   const stack = [wikiRoot];
   while (stack.length > 0) {
@@ -96,13 +107,23 @@ function collectAllLeaves(wikiRoot) {
       if (e.name === "index.md") continue;
       let parsed;
       try {
-        const raw = readFileSync(full, "utf8");
-        parsed = parseFrontmatter(raw, full);
+        if (withBody) {
+          const raw = readFileSync(full, "utf8");
+          parsed = parseFrontmatter(raw, full);
+        } else {
+          const captured = readFrontmatterStreaming(full);
+          if (!captured) continue;
+          parsed = parseFrontmatter(captured.frontmatterText, full);
+        }
       } catch {
         continue;
       }
       if (!parsed?.data?.id) continue;
-      out.push({ path: full, data: parsed.data, body: parsed.body });
+      out.push(
+        withBody
+          ? { path: full, data: parsed.data, body: parsed.body }
+          : { path: full, data: parsed.data },
+      );
     }
   }
   return out;
@@ -113,9 +134,14 @@ function collectAllLeaves(wikiRoot) {
 // included since leaves from deep subtrees can claim the root as a
 // soft parent (the typed "this is also broadly relevant to the root
 // topic" pointer). A category is eligible as a soft-parent target if
-// it has an `index.md` OR at least one routable leaf directly
-// underneath; empty scaffold dirs are skipped so the DAG doesn't
-// point at tombstones.
+// it has an `index.md` OR at least one ROUTABLE leaf directly
+// underneath. Routability matches `listChildren`'s semantics: the
+// `.md` file must have frontmatter with an `id`. A dir that holds
+// only non-routable markdown (README.md with no frontmatter, notes
+// from a manual edit) would otherwise become a tombstone candidate
+// and skew scoring against other real categories. `listChildren`
+// performs the frontmatter parse with bounded reads via
+// `readFrontmatterStreaming`; we reuse it rather than re-implementing.
 function collectCandidateDirs(wikiRoot) {
   const out = [];
   const stack = [wikiRoot];
@@ -129,7 +155,6 @@ function collectCandidateDirs(wikiRoot) {
     }
     const subdirs = [];
     let hasIndex = false;
-    let hasLeaf = false;
     for (const e of entries) {
       if (e.name.startsWith(".")) continue;
       const full = join(dir, e.name);
@@ -140,13 +165,14 @@ function collectCandidateDirs(wikiRoot) {
       if (!e.isFile()) continue;
       if (e.name === "index.md") {
         hasIndex = true;
-        continue;
-      }
-      if (e.name.endsWith(".md")) {
-        hasLeaf = true;
       }
     }
-    if (dir === wikiRoot || hasIndex || hasLeaf) {
+    // Routable-leaf check via listChildren: only leaves whose
+    // frontmatter parses with an `id` count. A dir holding only
+    // README-style markdown without frontmatter is NOT a candidate.
+    const { leaves } = listChildren(dir);
+    const hasRoutableLeaf = leaves.length > 0;
+    if (dir === wikiRoot || hasIndex || hasRoutableLeaf) {
       out.push(dir);
     }
     for (const sub of subdirs) stack.push(sub);
@@ -202,13 +228,21 @@ function relativeParentPath(leafPath, targetDir) {
 // leaf's own direct parent — that's the primary, not a soft parent).
 // Returns an array of `{ dir, cosine }` sorted by cosine descending,
 // POSIX-path ascending as a deterministic tie-break. Only scores at
-// or above `SOFT_PARENT_AFFINITY_THRESHOLD` are included.
+// or above the caller's `threshold` are included.
+//
+// Threshold is passed as a parameter rather than hard-coded so an
+// override via `ctx.threshold` in `runSoftDagParents` takes effect
+// AT THIS FILTER. An earlier draft hard-coded the constant here and
+// re-filtered post-facto — if the override was LOWER than the
+// constant, candidates in the window [override, constant) were
+// dropped at scoring time and couldn't be reinstated.
 function scoreCandidates(
   leaf,
   leafVector,
   candidates,
   categoryVectors,
   wikiRoot,
+  threshold,
 ) {
   const primaryDir = dirname(leaf.path);
   const scored = [];
@@ -217,7 +251,7 @@ function scoreCandidates(
     const catVec = categoryVectors.get(dir);
     if (!catVec) continue;
     const sim = cosine(leafVector, catVec);
-    if (sim < SOFT_PARENT_AFFINITY_THRESHOLD) continue;
+    if (sim < threshold) continue;
     scored.push({ dir, cosine: sim });
   }
   scored.sort((a, b) => {
@@ -333,9 +367,9 @@ export async function runSoftDagParents(wikiRoot, ctx = {}) {
       candidateDirs,
       categoryVectors,
       wikiRoot,
+      threshold,
     );
-    const filtered = scored.filter((s) => s.cosine >= threshold);
-    const chosen = filtered.slice(0, maxPerLeaf);
+    const chosen = scored.slice(0, maxPerLeaf);
     const softParents = chosen.map((c) => relativeParentPath(leaf.path, c.dir));
     const parentsArray = [primaryParentPath(), ...softParents];
     rewriteLeafParents(leaf, parentsArray);
@@ -365,7 +399,13 @@ export async function runSoftDagParents(wikiRoot, ctx = {}) {
 // skipped so the pass is idempotent — running it twice on the same
 // tree produces the same bytes.
 export function applySoftParentEntries(wikiRoot) {
-  const leaves = collectAllLeaves(wikiRoot);
+  // Frontmatter-only reads for the propagation pass — we never
+  // rewrite leaves here, only their claimed parent index.md files,
+  // so there's no need to buffer bodies in memory. On large corpora
+  // (the 596-leaf target workload) body bytes dwarf frontmatter
+  // bytes, so bounded streaming reads turn this from O(total leaf
+  // bytes) into O(frontmatter bytes).
+  const leaves = collectAllLeaves(wikiRoot, /* withBody */ false);
   // Deterministic iteration so repeated runs produce byte-identical
   // output regardless of OS filesystem enumeration order.
   leaves.sort((a, b) =>
@@ -389,7 +429,7 @@ export function applySoftParentEntries(wikiRoot) {
     for (let i = 1; i < parents.length; i++) {
       const rel = parents[i];
       if (typeof rel !== "string" || rel.length === 0) continue;
-      const absIndex = normaliseIndexPath(leafDir, rel);
+      const absIndex = normaliseIndexPath(leafDir, rel, wikiRoot);
       if (!absIndex) continue;
       if (!existsSync(absIndex)) continue;
       // The `file:` field is relative to the target index's directory,
@@ -406,8 +446,20 @@ export function applySoftParentEntries(wikiRoot) {
   }
 
   for (const [indexPath, appends] of softAppendsByIndex) {
-    const raw = readFileSync(indexPath, "utf8");
-    const parsed = parseFrontmatter(raw, indexPath);
+    // Per-index try/catch: a malformed target `index.md` (e.g.,
+    // user-edited YAML that fails to parse) must NOT abort the
+    // entire propagation pass. Soft-DAG synthesis is best-effort;
+    // the rest of the pipeline (`listChildren`, `collectAllLeaves`)
+    // follows the same skip-and-continue discipline for malformed
+    // frontmatter. Downstream validation surfaces the bad index
+    // with its own diagnostic.
+    let raw, parsed;
+    try {
+      raw = readFileSync(indexPath, "utf8");
+      parsed = parseFrontmatter(raw, indexPath);
+    } catch {
+      continue;
+    }
     if (!parsed?.data) continue;
     const existing = Array.isArray(parsed.data.entries)
       ? parsed.data.entries
@@ -467,7 +519,16 @@ function buildEntryRecord(leaf, leafDir) {
 // crashing the phase — soft-dag synthesis is best-effort, and a
 // bad parents[] entry typically indicates manual frontmatter edits
 // that downstream validation will surface.
-function normaliseIndexPath(leafDir, rel) {
+//
+// Path-traversal guard: a crafted entry like
+// "../../../../somewhere/index.md" must not let this phase read or
+// write files outside the wiki tree. Resolve both the candidate path
+// and the wiki root to canonical absolute form, then confirm the
+// candidate sits under the wikiRoot prefix. Reject otherwise — this
+// is a defense-in-depth check alongside validate's DUP-ID /
+// ALIAS-COLLIDES-ID; a hostile leaf's parents[] shouldn't be able to
+// mutate arbitrary filesystem paths even transiently.
+function normaliseIndexPath(leafDir, rel, wikiRoot) {
   if (typeof rel !== "string") return null;
   if (rel.length === 0) return null;
   // Reject absolute paths — parents[] is always relative.
@@ -475,8 +536,14 @@ function normaliseIndexPath(leafDir, rel) {
   // Soft-parent convention: POSIX-style separators. Normalise to
   // OS-native for filesystem operations.
   const nativeRel = sep === "/" ? rel : rel.split("/").join(sep);
-  const abs = join(leafDir, nativeRel);
+  const abs = resolve(leafDir, nativeRel);
   // Only index.md entries are valid parents.
   if (basename(abs) !== "index.md") return null;
+  // Path-traversal guard: the resolved absolute path must sit under
+  // the wiki root. A leaf escaping via ".."-traversal is rejected
+  // silently (the pass is best-effort; we never throw on bad claims).
+  const rootPrefix = resolve(wikiRoot) + sep;
+  const rootExact = resolve(wikiRoot);
+  if (abs !== rootExact && !abs.startsWith(rootPrefix)) return null;
   return abs;
 }
