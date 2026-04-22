@@ -45,7 +45,6 @@ import {
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { readFrontmatterStreaming } from "./chunk.mjs";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
-import { readIndex } from "./indices.mjs";
 import {
   buildComparisonModelFromTexts,
   cosine,
@@ -224,10 +223,28 @@ function collectCandidateDirs(wikiRoot, leavesByDir) {
 // category it only matches through a deeply nested cousin. Takes
 // the pre-grouped `leavesByDir` map so no second `listChildren`
 // pass is needed here.
+//
+// Index reads go through `readFrontmatterStreaming` rather than a
+// full `readFileSync` — we only need frontmatter fields to build
+// `entryText`. Authored orientation blocks can be long, and this
+// phase only scores against frontmatter signals; reading the body
+// would be pure waste. `readIndex` from indices.mjs loads full
+// bodies, which is why it's avoided here.
 function buildCategoryText(dir, leavesByDir) {
   const parts = [];
-  const idx = readIndex(dir);
-  if (idx?.data) parts.push(entryText(idx.data));
+  const indexPath = join(dir, "index.md");
+  try {
+    const captured = readFrontmatterStreaming(indexPath);
+    if (captured) {
+      const { data } = parseFrontmatter(captured.frontmatterText, indexPath);
+      if (data) parts.push(entryText(data));
+    }
+  } catch {
+    // Missing / malformed index.md is tolerated: the dir may be
+    // pre-bootstrap (Phase 3 draft category) or the index may have
+    // a fence mismatch. We fall through to aggregating leaves only;
+    // downstream validation catches any real shape issue.
+  }
   const leaves = leavesByDir.get(dir) ?? [];
   for (const leaf of leaves) parts.push(entryText(leaf.data));
   return parts.join(" ").trim();
