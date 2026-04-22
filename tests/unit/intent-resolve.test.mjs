@@ -238,6 +238,55 @@ test("INT-15a: --max-depth is rejected on subcommands other than build/rebuild",
   }
 });
 
+test("INT-16a: --soft-dag-parents is rejected on subcommands other than build/rebuild", async () => {
+  const parent = freshDir("int16a");
+  try {
+    const src = join(parent, "docs");
+    mkdirSync(src);
+    for (const sub of ["fix", "extend", "validate", "join", "rollback"]) {
+      const r = resolveIntent({
+        subcommand: sub,
+        args: [src],
+        flags: { soft_dag_parents: true },
+        cwd: parent,
+      });
+      assert.equal(
+        r.status,
+        "ambiguous",
+        `expected ${sub} to be rejected, got ${JSON.stringify(r)}`,
+      );
+      assert.equal(r.error.code, "INT-16a");
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("INT-16a: --soft-dag-parents accepted on build + rebuild", async () => {
+  const parent = freshDir("int16a-ok");
+  try {
+    const src = join(parent, "docs");
+    mkdirSync(src);
+    for (const sub of ["build", "rebuild"]) {
+      const r = resolveIntent({
+        subcommand: sub,
+        args: [src],
+        flags: { soft_dag_parents: true },
+        cwd: parent,
+      });
+      if (r.status === "ambiguous") {
+        assert.notEqual(
+          r.error.code,
+          "INT-16a",
+          `INT-16a must NOT fire on ${sub}; got ${JSON.stringify(r)}`,
+        );
+      }
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("INT-13: known --quality-mode values are accepted", async () => {
   const parent = freshDir("int13-ok");
   try {
