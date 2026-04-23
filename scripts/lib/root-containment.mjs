@@ -220,6 +220,12 @@ function writeStubIndex(targetDir, slug, leaf) {
     generator: "skill-llm-wiki/v1",
   };
   writeFileSync(indexPath, renderFrontmatter(data, `\n# ${slug}\n`), "utf8");
+  // Return the exact data + path so the caller can append the new
+  // stub onto the in-memory sibling corpus for subsequent outliers.
+  // Keeping the write + record in-step guarantees the incremental
+  // sibling corpus stays byte-identical to what a fresh
+  // `collectRootSiblings` walk would produce on the final tree.
+  return { path: indexPath, data };
 }
 
 // Main entry. Returns a summary for the orchestrator phase log.
@@ -251,18 +257,38 @@ export async function runRootContainment(wikiRoot) {
   // and we add each resolved slug to the set so subsequent outliers
   // can't accidentally reuse it.
   const wikiIndex = buildWikiForbiddenIndex(wikiRoot);
+
+  // Sibling corpus is read ONCE at entry and mutated in-place as
+  // outliers land in their new subcategories. A naive
+  // `collectRootSiblings(wikiRoot, outlier.path)` per iteration
+  // would be O(N) reads × N outliers = O(N²) frontmatter reads on a
+  // flat-source wiki that drops many leaves at root. Same
+  // amortisation shape PR #5 / PR #8 use for `buildWikiForbiddenIndex`
+  // and `balance.mjs::computeFanoutStats`.
+  //
+  // Per-outlier workflow vs. the in-memory corpus:
+  //   1. Filter out the current outlier (it's still at root and
+  //      would appear as its own sibling), producing the IDF context.
+  //   2. Compute slug, resolve collisions, move the leaf, write stub.
+  //   3. Drop the moved outlier from `siblings` (its path is stale —
+  //      its frontmatter is still on disk at newLeafPath, but as a
+  //      wiki-root sibling record it's gone).
+  //   4. Append the new stub's { path, data } onto `siblings` so the
+  //      NEXT outlier sees this freshly-contained subcategory as a
+  //      sibling signal. Byte-identical to what a fresh
+  //      collectRootSiblings walk on the final tree would produce.
+  let siblings = collectRootSiblings(wikiRoot, /* excludePath */ null);
   const operations = [];
 
   for (const outlier of outliers) {
-    // Sibling corpus is recomputed per outlier so the newly-added
-    // subcategory from the previous iteration is included in the
-    // IDF ranking. This matters when two outliers are topically
-    // close — the second should emit a slug that discriminates
-    // against the first, not a near-duplicate.
-    const siblings = collectRootSiblings(wikiRoot, outlier.path);
+    const perOutlierSiblings = siblings.filter(
+      (s) => s.path !== outlier.path,
+    );
     const idfMap =
-      siblings.length > 0 ? buildSiblingIdfContext(siblings) : undefined;
-    const slug = generateDeterministicSlug([outlier], siblings, {
+      perOutlierSiblings.length > 0
+        ? buildSiblingIdfContext(perOutlierSiblings)
+        : undefined;
+    const slug = generateDeterministicSlug([outlier], perOutlierSiblings, {
       precomputedIdf: idfMap,
     });
     const proposal = { leaves: [outlier], parent_dir: wikiRoot };
@@ -283,8 +309,12 @@ export async function runRootContainment(wikiRoot) {
     const newLeafPath = join(targetDir, basename(outlier.path));
     renameSync(outlier.path, newLeafPath);
     rewriteParentsAfterContainment(newLeafPath);
-    writeStubIndex(targetDir, resolvedSlug, outlier);
+    const stubRecord = writeStubIndex(targetDir, resolvedSlug, outlier);
     wikiIndex.add(resolvedSlug);
+    // Incremental sibling corpus update — drop the moved outlier,
+    // add the new stub index.
+    siblings = siblings.filter((s) => s.path !== outlier.path);
+    siblings.push(stubRecord);
     operations.push({ from: outlier.path, to: newLeafPath, slug: resolvedSlug });
   }
 

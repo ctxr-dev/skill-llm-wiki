@@ -28,6 +28,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { readDecisions } from "../../scripts/lib/decision-log.mjs";
+import { findLeafByName } from "../helpers/fs-walk.mjs";
 
 const CLI = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -227,21 +228,7 @@ test("tiered build: build with one-leaf-per-subcategory triggers LIFT", () => {
     // per-outlier subcategories. We don't care where — we find
     // `lonely.md` anywhere under wiki and stage the LIFT setup from
     // its current location.
-    const findLeaf = (name) => {
-      const stack = [wiki];
-      while (stack.length) {
-        const d = stack.pop();
-        const entries = readdirSync(d, { withFileTypes: true });
-        for (const e of entries) {
-          if (e.name.startsWith(".")) continue;
-          const full = join(d, e.name);
-          if (e.isDirectory()) stack.push(full);
-          else if (e.isFile() && e.name === name) return full;
-        }
-      }
-      return null;
-    };
-    const lonelyCurrent = findLeaf("lonely.md");
+    const lonelyCurrent = findLeafByName(wiki, "lonely.md");
     assert.ok(lonelyCurrent, "lonely.md should exist somewhere in the wiki");
 
     // Build the LIFT-eligible topology under a non-root `outer/`

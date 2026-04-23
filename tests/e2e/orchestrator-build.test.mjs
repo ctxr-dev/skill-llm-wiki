@@ -9,13 +9,13 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import { findLeafByName } from "../helpers/fs-walk.mjs";
 
 const CLI = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -226,21 +226,7 @@ test("validation failure leaves no op/<id> final tag and rolls tree to pre-op", 
     // X.11 containment moved flat-source leaves into per-outlier
     // subcategories — locate `a.md` wherever it ended up before
     // overwriting it with the corrupted blob.
-    const findLeafPath = (name) => {
-      const stack = [wiki];
-      while (stack.length) {
-        const d = stack.pop();
-        const entries = readdirSync(d, { withFileTypes: true });
-        for (const e of entries) {
-          if (e.name.startsWith(".")) continue;
-          const full = join(d, e.name);
-          if (e.isDirectory()) stack.push(full);
-          else if (e.isFile() && e.name === name) return full;
-        }
-      }
-      return null;
-    };
-    const leafPath = findLeafPath("a.md");
+    const leafPath = findLeafByName(wiki, "a.md");
     assert.ok(leafPath, "fixture leaf `a.md` should exist somewhere in wiki");
     writeFileSync(leafPath, "---\nid: a\ntype: primary\n---\n\ncorrupted\n");
 

@@ -13,7 +13,6 @@ import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
-  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -36,6 +35,7 @@ import {
   gitRunChecked,
   gitWorkingTreeClean,
 } from "../../scripts/lib/git.mjs";
+import { findLeafByName } from "../helpers/fs-walk.mjs";
 
 const CLI = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -70,23 +70,6 @@ function tmpParent(tag) {
   return d;
 }
 
-// Locate `name` anywhere in the tree. X.11 containment means we can't
-// hardcode a root path for a fresh build's outlier leaves.
-function findLeaf(wiki, name) {
-  const stack = [wiki];
-  while (stack.length) {
-    const d = stack.pop();
-    const entries = readdirSync(d, { withFileTypes: true });
-    for (const e of entries) {
-      if (e.name.startsWith(".")) continue;
-      const full = join(d, e.name);
-      if (e.isDirectory()) stack.push(full);
-      else if (e.isFile() && e.name === name) return full;
-    }
-  }
-  return null;
-}
-
 // Build a wiki, then manually insert a single-leaf subfolder TWO
 // levels deep so LIFT targets a non-root depth (X.11 forbids LIFT to
 // wiki root). Returns { wiki, opId, liftTargetDir } for the NEW
@@ -104,7 +87,7 @@ function setupLiftScenario(tag) {
   // X.11 contained alpha.md inside a per-outlier subcategory. Build a
   // depth-2 single-leaf passthrough so LIFT fires at depth 2 → depth 1
   // (never landing at wiki root).
-  const alphaCurrent = findLeaf(wiki, "alpha.md");
+  const alphaCurrent = findLeafByName(wiki, "alpha.md");
   if (!alphaCurrent) throw new Error("alpha.md missing after build");
   const outerDir = join(wiki, "outer");
   mkdirSync(outerDir, { recursive: true });
