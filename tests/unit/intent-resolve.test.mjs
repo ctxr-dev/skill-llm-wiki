@@ -10,7 +10,12 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { resolveIntent, VALID_LAYOUT_MODES } from "../../scripts/lib/intent.mjs";
+import {
+  resolveIntent,
+  VALID_LAYOUT_MODES,
+  VALID_QUALITY_MODES,
+} from "../../scripts/lib/intent.mjs";
+import { QUALITY_MODES } from "../../scripts/lib/tiered.mjs";
 
 function freshDir(tag) {
   const dir = join(
@@ -299,6 +304,22 @@ test("INT-16a: --soft-dag-parents accepted on build + rebuild", async () => {
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }
+});
+
+test("VALID_QUALITY_MODES is in sync with tiered.mjs::QUALITY_MODES", () => {
+  // `intent.mjs` duplicates the mode list (rather than importing
+  // from tiered.mjs) so the intent layer can reject invalid values
+  // BEFORE the orchestrator starts. The duplication is only safe if
+  // both lists stay in lockstep — a drift means the intent layer
+  // either rejects a mode tiered accepts (hard break for users) or
+  // accepts one tiered rejects (expensive rollback after plan
+  // resolution). Compare as sorted arrays so the assertion doesn't
+  // break on a reordering that preserves membership.
+  assert.deepEqual(
+    [...VALID_QUALITY_MODES].sort(),
+    [...QUALITY_MODES].sort(),
+    `intent.mjs::VALID_QUALITY_MODES must contain the same modes as tiered.mjs::QUALITY_MODES`,
+  );
 });
 
 test("INT-13: known --quality-mode values are accepted", async () => {

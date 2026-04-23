@@ -1311,11 +1311,11 @@ For a typical corpus, >90% of operator applications resolve at Tier 0 or Tier 1.
 
 ### Quality modes
 
-The skill ships three modes, selected via `--quality-mode` or `LLM_WIKI_QUALITY_MODE`:
+The skill ships three modes, selected via `--quality-mode`:
 
 - **`tiered-fast` (default, recommended).** Full Tier 0 → 1 → 2 ladder. Tier 1 is now a REQUIRED dependency (`@xenova/transformers` in `dependencies`, not optional) — the overhaul discovered Tier 0 alone was too weak on terse technical frontmatter to leave every mid-band pair for Tier 2 to resolve. Tier 2 runs in a dedicated sub-agent per decision via the **exit-7 handshake**: the CLI writes a pending batch to `<wiki>/.work/tier2/` and exits 7; the wiki-runner spawns sub-agents, writes responses, and re-invokes the CLI. Zero Claude tokens for >90% of operator decisions on typical corpora once embeddings are warm.
 - **`claude-first`.** Tier 0 is still consulted for decisive cases (saves tokens on the obvious decisions), but anything in the Tier 0 mid-band goes straight to Tier 2 (exit-7 handshake), skipping Tier 1. Useful when the user values sub-agent judgment over speed/cost or when debugging a specific similarity call.
-- **`deterministic`.** Tier 0 → Tier 1 ladder only; mid-band Tier 1 pairs are resolved by a static threshold (`TIER1_DETERMINISTIC_THRESHOLD`, the midpoint of Tier 1's decisive bounds) so the ladder terminates without Tier 2. No LLM/sub-agent is ever consulted; cluster naming is produced by `generateDeterministicSlug` + `deterministicPurpose` from member frontmatters. Repeated runs on the same inputs are byte-reproducible. Useful for air-gapped environments, hermetic CI, and large corpus builds where deterministic output matters more than Tier 2's naming nuance.
+- **`deterministic`.** Tier 0 → Tier 1 ladder only; mid-band Tier 1 pairs are resolved by a static threshold (`TIER1_DETERMINISTIC_THRESHOLD`, the midpoint of Tier 1's decisive bounds) so the ladder terminates without Tier 2. No LLM/sub-agent is ever consulted; cluster naming is produced by `generateDeterministicSlug` + `deterministicPurpose` from member frontmatters. Repeated runs on the same inputs are byte-reproducible. Useful for hermetic CI and large corpus builds where deterministic output matters more than Tier 2's naming nuance. For air-gapped environments, pre-warm the Tier 1 MiniLM model cache (`~/.cache/huggingface`) on a networked machine before the air-gapped run — Tier 1 itself performs a one-time model download on first use through `@xenova/transformers`.
 
 ### Similarity cache and decision log
 

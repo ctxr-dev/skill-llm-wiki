@@ -276,13 +276,13 @@ all of its Tier 2 cost on subsequent rebuilds.
 
 ## Quality modes
 
-Choose via `--quality-mode` or the `LLM_WIKI_QUALITY_MODE` env var.
+Choose via `--quality-mode`.
 
 | Mode | Behaviour | Use when |
 |------|-----------|----------|
 | **`tiered-fast`** (default) | Full ladder. Tier 0 → Tier 1 → Tier 2 on mid-band escalations. | General-purpose builds. |
 | `claude-first` | Tier 0 is still consulted for decisive cases. Mid-band Tier 0 skips Tier 1 and goes directly to Tier 2. | When the user values Claude's judgment over speed/cost. |
-| `deterministic` | Tier 0 → Tier 1 ladder with a static threshold resolving mid-band Tier 1 pairs. No LLM/sub-agent is ever consulted. Cluster naming comes from `generateDeterministicSlug` + `deterministicPurpose`; Tier 2 escalations are skipped entirely. Repeated runs on the same inputs produce byte-reproducible output. | Air-gapped / hermetic CI; large deterministic corpus builds where reproducibility matters more than Tier 2's naming nuance. |
+| `deterministic` | Tier 0 → Tier 1 ladder with a static threshold resolving mid-band Tier 1 pairs. No LLM/sub-agent is ever consulted. Cluster naming comes from `generateDeterministicSlug` + `deterministicPurpose`; Tier 2 escalations are skipped entirely. Repeated runs on the same inputs produce byte-reproducible output. | Hermetic CI; large deterministic corpus builds where reproducibility matters more than Tier 2's naming nuance. For air-gapped use, pre-warm the Tier 1 MiniLM model cache on a networked host — `@xenova/transformers` downloads the model on first use otherwise. |
 
 ## Similarity cache
 

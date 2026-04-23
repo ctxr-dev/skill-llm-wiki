@@ -74,8 +74,11 @@ export const VALID_LAYOUT_MODES = Object.freeze(["sibling", "in-place", "hosted"
 // rejects typos BEFORE the orchestrator runs, avoiding expensive
 // rollbacks on a trivial flag error. Must stay in sync with
 // tiered.mjs:QUALITY_MODES — the unit test
-// tests/unit/intent-resolve.test.mjs:valid-quality-modes verifies
-// this.
+// tests/unit/intent-resolve.test.mjs::"VALID_QUALITY_MODES is in
+// sync with tiered.mjs::QUALITY_MODES" pins that both lists contain
+// the same modes in the same order so a future drift fails loud
+// instead of silently letting one layer accept a mode the other
+// rejects.
 export const VALID_QUALITY_MODES = Object.freeze([
   "tiered-fast",
   "claude-first",
