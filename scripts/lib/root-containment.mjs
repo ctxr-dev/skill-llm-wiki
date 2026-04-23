@@ -180,6 +180,16 @@ function rewriteParentsAfterContainment(leafPath) {
 // immediately sees what's inside. `rebuildAllIndices` in Phase 5
 // will populate the `entries[]` field on the next pass; we don't
 // pre-seed it here.
+//
+// `parents: ["../index.md"]` is pre-seeded on the stub so the
+// intermediate root-containment commit satisfies `PARENTS-REQUIRED`
+// BEFORE Phase 5's rebuild runs. Without this, a reviewer who later
+// drops the Phase-5 commit via `git revert` (the `--review` drop
+// flow) would leave a tree with a parentless subcategory index —
+// the dropped-state validate would fire `PARENTS-REQUIRED` on every
+// stub X.11 created. `rebuildAllIndices` line 185 only fills
+// `data.parents` when it's unset, so the seeded value survives the
+// Phase 5 pass byte-identical.
 function writeStubIndex(targetDir, slug, leaf) {
   const indexPath = join(targetDir, "index.md");
   const data = {
@@ -187,6 +197,7 @@ function writeStubIndex(targetDir, slug, leaf) {
     type: "index",
     depth_role: "subcategory",
     focus: deterministicPurpose([leaf]) || leaf.data.focus || "",
+    parents: ["../index.md"],
     generator: "skill-llm-wiki/v1",
   };
   writeFileSync(indexPath, renderFrontmatter(data, `\n# ${slug}\n`), "utf8");

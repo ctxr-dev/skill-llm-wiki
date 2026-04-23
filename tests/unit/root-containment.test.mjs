@@ -281,7 +281,7 @@ test("runRootContainment: parents[] rewrite — non-primary gains '../' prefix",
   }
 });
 
-test("runRootContainment: skips dotfiles and README at root", async () => {
+test("runRootContainment: skips dotfiles and frontmatter-less root files", async () => {
   const wiki = tmpWiki("skip");
   try {
     writeIndex(wiki, "index.md", "root");
@@ -289,13 +289,23 @@ test("runRootContainment: skips dotfiles and README at root", async () => {
     writeLeaf(wiki, "alpha/leaf-a.md", "leaf-a");
     // Dotfile at root — must not be treated as outlier.
     writeFileSync(join(wiki, ".gitignore"), "node_modules\n", "utf8");
-    // Unparseable root file — must be skipped silently.
-    writeFileSync(join(wiki, "rogue-no-frontmatter.md"), "no fm here\n", "utf8");
+    // Frontmatter-less root README — has no `id:`, so `collectRootLeaves`
+    // rejects it (the validator surfaces it separately as PARSE). X.11
+    // containment is about routable leaves; non-corpus markdown at
+    // root stays put.
+    writeFileSync(join(wiki, "README.md"), "# Readme\n\nnot corpus\n", "utf8");
+    // Another unparseable case: malformed frontmatter.
+    writeFileSync(
+      join(wiki, "rogue-no-frontmatter.md"),
+      "no fm here\n",
+      "utf8",
+    );
 
     const result = await runRootContainment(wiki);
     assert.equal(result.outliers, 0);
     assert.equal(result.moved, 0);
     assert.ok(existsSync(join(wiki, ".gitignore")));
+    assert.ok(existsSync(join(wiki, "README.md")));
     assert.ok(existsSync(join(wiki, "rogue-no-frontmatter.md")));
   } finally {
     rmSync(wiki, { recursive: true, force: true });
