@@ -132,8 +132,9 @@ const PRIORITY = {
 // X.11 constraint: LIFT refuses to land a leaf at the wiki root
 // (`dirname(dir) === wikiRoot`). The root-containment invariant
 // forbids non-index leaves at depth 0, and without this guard LIFT +
-// Phase 4.6 would oscillate forever on single-member subcategories
-// that X.11 itself creates for outliers. Single-member subcategories
+// X.11 root-containment (Phase 4.4.5) would oscillate forever on
+// single-member subcategories that X.11 itself creates for outliers.
+// Single-member subcategories
 // produced by X.11 are a valid transient end state — they stay until
 // future builds accrete topically-adjacent leaves that make the
 // cluster worth merging up. Flatten-to-root is the only direction
