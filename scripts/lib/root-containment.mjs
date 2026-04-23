@@ -4,8 +4,10 @@
 // containment commit participates in the `--review` diff — users can
 // drop/abort individual containment moves exactly like they can drop
 // any other tree-mutating phase's commits.
-// Walks `wikiRoot`, collects every `.md` file at depth 1 that isn't
-// `index.md`, and moves each into its own semantically-named
+// Walks `wikiRoot`, collects every direct-child `.md` file (i.e., a
+// leaf that sits at the wiki root itself — depth 0 per `depthOf`,
+// one level above any subcategory) other than `index.md`, and moves
+// each into its own semantically-named
 // subcategory derived from the leaf's own TF-IDF distinguishing
 // tokens. A stub `<slug>/index.md` is written so the new category
 // is routable; Phase 5's `rebuildAllIndices` populates the stub's
@@ -62,8 +64,9 @@ import {
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
 import { buildWikiForbiddenIndex, resolveNestSlug } from "./nest-applier.mjs";
 
-// Walk the wiki root and return outlier leaves (`.md` files at
-// depth 1, excluding `index.md`). Each item is `{ path, data }`
+// Walk the wiki root and return outlier leaves — non-index `.md`
+// files sitting directly at the wiki root (depth 0 per `depthOf`).
+// Each item is `{ path, data }`
 // with parsed frontmatter so the caller can feed directly into
 // `generateDeterministicSlug`. Files whose frontmatter fails to
 // parse are skipped silently — the validator will surface them

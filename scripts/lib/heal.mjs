@@ -52,6 +52,11 @@ export const FINDING_ACTIONS = Object.freeze({
   "DANGLING-LINK": "fix",
   "DANGLING-OVERLAY": "fix",
 
+  // X.11 root-leaf containment invariant — `fix` runs Phase 4.4.5
+  // root-containment to move outlier leaves into per-slug
+  // subcategories:
+  "LEAF-AT-WIKI-ROOT": "fix",
+
   // Size cap is a warning surface only:
   "SIZE-CAP": "none",
 });
