@@ -312,7 +312,7 @@ test("runRootContainment: parents[] rewrite — non-primary gains '../' prefix",
   }
 });
 
-test("runRootContainment: skips dotfiles and frontmatter-less root files", async () => {
+test("runRootContainment: skips dotfiles, frontmatter-less, and malformed-fence root files", async () => {
   const wiki = tmpWiki("skip");
   try {
     writeIndex(wiki, "index.md", "root");
@@ -320,15 +320,23 @@ test("runRootContainment: skips dotfiles and frontmatter-less root files", async
     writeLeaf(wiki, "alpha/leaf-a.md", "leaf-a");
     // Dotfile at root — must not be treated as outlier.
     writeFileSync(join(wiki, ".gitignore"), "node_modules\n", "utf8");
-    // Frontmatter-less root README — has no `id:`, so `collectRootLeaves`
-    // rejects it (the validator surfaces it separately as PARSE). X.11
+    // Frontmatter-less root README — no opening `---` fence, so
+    // `readFrontmatterStreaming` returns null and `collectRootLeaves`
+    // skips it silently. The validator does NOT emit a PARSE finding
+    // for this shape (no fence → not recognised as a wiki entry at
+    // all); it's invisible to ingest and validation alike. X.11
     // containment is about routable leaves; non-corpus markdown at
     // root stays put.
     writeFileSync(join(wiki, "README.md"), "# Readme\n\nnot corpus\n", "utf8");
-    // Another unparseable case: malformed frontmatter.
+    // Malformed frontmatter: opening fence with no closing fence
+    // within the streaming read's byte budget. This exercises the
+    // `catch` path in `collectRootLeaves` — `readFrontmatterStreaming`
+    // throws, the per-file try/catch swallows it, and the file is
+    // skipped rather than halting the pass.
     writeFileSync(
-      join(wiki, "rogue-no-frontmatter.md"),
-      "no fm here\n",
+      join(wiki, "rogue-unclosed-fence.md"),
+      "---\nid: rogue\ntype: primary\n\n# no closing fence ever\n\n" +
+        "body text without the terminating --- line\n",
       "utf8",
     );
 
@@ -337,7 +345,7 @@ test("runRootContainment: skips dotfiles and frontmatter-less root files", async
     assert.equal(result.moved, 0);
     assert.ok(existsSync(join(wiki, ".gitignore")));
     assert.ok(existsSync(join(wiki, "README.md")));
-    assert.ok(existsSync(join(wiki, "rogue-no-frontmatter.md")));
+    assert.ok(existsSync(join(wiki, "rogue-unclosed-fence.md")));
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }

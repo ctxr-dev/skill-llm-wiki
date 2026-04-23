@@ -56,6 +56,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
+import { readFrontmatterStreaming } from "./chunk.mjs";
 import {
   buildSiblingIdfContext,
   deterministicPurpose,
@@ -86,8 +87,9 @@ function collectRootLeaves(wikiRoot) {
     if (e.name.startsWith(".")) continue;
     const full = join(wikiRoot, e.name);
     try {
-      const raw = readFileSync(full, "utf8");
-      const { data } = parseFrontmatter(raw, full);
+      const captured = readFrontmatterStreaming(full);
+      if (captured === null) continue; // no frontmatter fence → plain md
+      const { data } = parseFrontmatter(captured.frontmatterText, full);
       if (!data?.id) continue; // unroutable, skip
       out.push({ path: full, data });
     } catch {
@@ -116,13 +118,18 @@ function collectRootSiblings(wikiRoot, excludePath) {
     return [];
   }
   const out = [];
+  const readSiblingFm = (absPath) => {
+    const captured = readFrontmatterStreaming(absPath);
+    if (captured === null) return null;
+    return parseFrontmatter(captured.frontmatterText, absPath).data;
+  };
   for (const e of entries) {
     if (e.name.startsWith(".")) continue;
     const full = join(wikiRoot, e.name);
     if (e.isFile() && e.name.endsWith(".md") && e.name !== "index.md") {
       if (full === excludePath) continue;
       try {
-        const { data } = parseFrontmatter(readFileSync(full, "utf8"), full);
+        const data = readSiblingFm(full);
         if (data?.id) out.push({ path: full, data });
       } catch {
         /* skip malformed */
@@ -132,7 +139,7 @@ function collectRootSiblings(wikiRoot, excludePath) {
       const indexPath = join(full, "index.md");
       if (!existsSync(indexPath)) continue;
       try {
-        const { data } = parseFrontmatter(readFileSync(indexPath, "utf8"), indexPath);
+        const data = readSiblingFm(indexPath);
         if (data?.id) out.push({ path: indexPath, data });
       } catch {
         /* skip malformed */
