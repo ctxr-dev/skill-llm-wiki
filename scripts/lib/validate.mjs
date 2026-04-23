@@ -133,6 +133,26 @@ export function validateWiki(wikiRoot) {
         }
       }
     }
+
+    // ROOT-LEAF-AT-DEPTH-1 — the wiki root must hold only `index.md`
+    // plus subdirectories. Any leaf `.md` at depth 0 is an outlier
+    // that escaped clustering (Phase X.11 root-containment should
+    // have placed it into its own single-member subcategory). The
+    // rule is navigational, not structural: Claude reading
+    // `<root>/index.md` and following its `entries[]` should reach
+    // every leaf via a semantically-named category; loose root
+    // leaves bypass that mental model and bloat the top-level index.
+    if (data.type !== "index") {
+      const absDir = dirname(e.absolute);
+      if (absDir === wikiRoot) {
+        push(
+          "error",
+          "ROOT-LEAF-AT-DEPTH-1",
+          e.absolute,
+          `leaf at wiki root — must live in a subcategory (run 'fix' to contain)`,
+        );
+      }
+    }
   }
 
   return findings;

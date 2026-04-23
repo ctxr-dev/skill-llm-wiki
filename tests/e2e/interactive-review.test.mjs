@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -69,9 +70,27 @@ function tmpParent(tag) {
   return d;
 }
 
-// Build a wiki, then manually insert a single-leaf subfolder that
-// LIFT will fire on during a subsequent rebuild. Returns { wiki,
-// opId } for the NEW rebuild op (not the initial build).
+// Locate `name` anywhere in the tree. X.11 containment means we can't
+// hardcode a root path for a fresh build's outlier leaves.
+function findLeaf(wiki, name) {
+  const stack = [wiki];
+  while (stack.length) {
+    const d = stack.pop();
+    const entries = readdirSync(d, { withFileTypes: true });
+    for (const e of entries) {
+      if (e.name.startsWith(".")) continue;
+      const full = join(d, e.name);
+      if (e.isDirectory()) stack.push(full);
+      else if (e.isFile() && e.name === name) return full;
+    }
+  }
+  return null;
+}
+
+// Build a wiki, then manually insert a single-leaf subfolder TWO
+// levels deep so LIFT targets a non-root depth (X.11 forbids LIFT to
+// wiki root). Returns { wiki, opId, liftTargetDir } for the NEW
+// rebuild op (not the initial build).
 function setupLiftScenario(tag) {
   const parent = tmpParent(tag);
   const src = join(parent, "corpus");
@@ -82,23 +101,37 @@ function setupLiftScenario(tag) {
   if (build.status !== 0) throw new Error(`build failed: ${build.stderr}`);
   const wiki = join(parent, "corpus.wiki");
 
-  // Set up a LIFT scenario: move alpha.md into its own subfolder.
-  // Flat sources now land at the wiki root (no `general/` bucket),
-  // so the fresh leaf is at `<wiki>/alpha.md`.
-  mkdirSync(join(wiki, "alpha-solo"));
-  const alphaSrc = join(wiki, "alpha.md");
-  const alphaDst = join(wiki, "alpha-solo", "alpha.md");
-  writeFileSync(alphaDst, readFileSync(alphaSrc, "utf8"));
-  rmSync(alphaSrc);
+  // X.11 contained alpha.md inside a per-outlier subcategory. Build a
+  // depth-2 single-leaf passthrough so LIFT fires at depth 2 → depth 1
+  // (never landing at wiki root).
+  const alphaCurrent = findLeaf(wiki, "alpha.md");
+  if (!alphaCurrent) throw new Error("alpha.md missing after build");
+  const outerDir = join(wiki, "outer");
+  mkdirSync(outerDir, { recursive: true });
   writeFileSync(
-    join(wiki, "alpha-solo", "index.md"),
+    join(outerDir, "index.md"),
+    "---\nid: outer\ntype: index\ndepth_role: subcategory\nfocus: outer container\ngenerator: skill-llm-wiki/v1\nparents:\n  - ../index.md\n---\n\n",
+  );
+  writeFileSync(
+    join(outerDir, "outer-sibling.md"),
+    "---\nid: outer-sibling\ntype: primary\ndepth_role: leaf\nfocus: sibling keeping outer alive\nparents:\n  - index.md\n---\n\n# Outer Sibling\n\nsibling content unique-token bbb\n",
+  );
+  const soloDir = join(outerDir, "alpha-solo");
+  mkdirSync(soloDir);
+  writeFileSync(
+    join(soloDir, "alpha.md"),
+    readFileSync(alphaCurrent, "utf8"),
+  );
+  rmSync(alphaCurrent);
+  writeFileSync(
+    join(soloDir, "index.md"),
     "---\nid: alpha-solo\ntype: index\ndepth_role: subcategory\nfocus: solo\ngenerator: skill-llm-wiki/v1\nparents:\n  - ../index.md\n---\n\n",
   );
 
   // Take a fresh pre-op snapshot so `pre-op/<new-opId>` exists.
   const opId = `review-test-${tag}-${Date.now()}`;
   preOpSnapshot(wiki, opId);
-  return { parent, wiki, opId };
+  return { parent, wiki, opId, liftTargetDir: outerDir };
 }
 
 async function runLift(wiki, opId) {
@@ -118,11 +151,11 @@ async function runLift(wiki, opId) {
 }
 
 test("runReviewCycle approve: leaves the working tree as-is", async () => {
-  const { parent, wiki, opId } = setupLiftScenario("approve");
+  const { parent, wiki, opId, liftTargetDir } = setupLiftScenario("approve");
   try {
     await runLift(wiki, opId);
-    // After the LIFT, alpha.md should be at wiki root.
-    assert.ok(existsSync(join(wiki, "alpha.md")));
+    // After the LIFT, alpha.md should sit at outer/ (depth 1), not root.
+    assert.ok(existsSync(join(liftTargetDir, "alpha.md")));
     const headBefore = gitHeadSha(wiki);
     const result = await runReviewCycle(wiki, opId, {
       forceInteractive: true,
@@ -130,28 +163,28 @@ test("runReviewCycle approve: leaves the working tree as-is", async () => {
     });
     assert.equal(result.outcome, "approve");
     assert.equal(gitHeadSha(wiki), headBefore);
-    // File still at root.
-    assert.ok(existsSync(join(wiki, "alpha.md")));
+    // File still at outer/.
+    assert.ok(existsSync(join(liftTargetDir, "alpha.md")));
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }
 });
 
 test("runReviewCycle abort: resets working tree to pre-op", async () => {
-  const { parent, wiki, opId } = setupLiftScenario("abort");
+  const { parent, wiki, opId, liftTargetDir } = setupLiftScenario("abort");
   try {
     await runLift(wiki, opId);
-    // Scenario applied → alpha.md at root.
-    assert.ok(existsSync(join(wiki, "alpha.md")));
+    // Scenario applied → alpha.md lifted up to outer/.
+    assert.ok(existsSync(join(liftTargetDir, "alpha.md")));
     const result = await runReviewCycle(wiki, opId, {
       forceInteractive: true,
       promptFn: async () => REVIEW_ABORT,
     });
     assert.equal(result.outcome, "abort");
-    // Working tree restored: alpha.md back in alpha-solo/, the
-    // folder exists again, and the leaf no longer lives at root.
-    assert.ok(!existsSync(join(wiki, "alpha.md")));
-    assert.ok(existsSync(join(wiki, "alpha-solo", "alpha.md")));
+    // Working tree restored: alpha.md back in outer/alpha-solo/, the
+    // folder exists again, and the leaf no longer lives at outer/.
+    assert.ok(!existsSync(join(liftTargetDir, "alpha.md")));
+    assert.ok(existsSync(join(liftTargetDir, "alpha-solo", "alpha.md")));
     // HEAD points at the pre-op tag.
     const headSha = gitHeadSha(wiki);
     const preSha = gitRevParse(wiki, `pre-op/${opId}`);
@@ -162,10 +195,10 @@ test("runReviewCycle abort: resets working tree to pre-op", async () => {
 });
 
 test("runReviewCycle drop: reverts a specific iteration commit", async () => {
-  const { parent, wiki, opId } = setupLiftScenario("drop");
+  const { parent, wiki, opId, liftTargetDir } = setupLiftScenario("drop");
   try {
     await runLift(wiki, opId);
-    assert.ok(existsSync(join(wiki, "alpha.md")));
+    assert.ok(existsSync(join(liftTargetDir, "alpha.md")));
     // Pick the most-recent operator-convergence commit and drop it,
     // then approve on the next prompt. (The review loop re-prompts
     // after each drop so the user can drop multiple iterations.)
@@ -183,15 +216,16 @@ test("runReviewCycle drop: reverts a specific iteration commit", async () => {
     assert.equal(result.dropped.length, 1);
     // The revert commit lives on top of HEAD; the tree state is
     // whatever the revert produced. For LIFT, revert undoes the
-    // move — alpha.md is no longer at wiki root.
-    assert.ok(!existsSync(join(wiki, "alpha.md")));
+    // move — alpha.md is no longer at outer/.
+    assert.ok(!existsSync(join(liftTargetDir, "alpha.md")));
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }
 });
 
 test("runReviewCycle non-interactive: outcome='non-interactive', no changes", async () => {
-  const { parent, wiki, opId } = setupLiftScenario("noninteractive");
+  const { parent, wiki, opId, liftTargetDir } =
+    setupLiftScenario("noninteractive");
   try {
     await runLift(wiki, opId);
     // No forceInteractive AND no TTY → non-interactive mode.
@@ -199,8 +233,8 @@ test("runReviewCycle non-interactive: outcome='non-interactive', no changes", as
       promptFn: async () => REVIEW_APPROVE,
     });
     assert.equal(result.outcome, "non-interactive");
-    // Nothing was applied or reverted — alpha.md still at root.
-    assert.ok(existsSync(join(wiki, "alpha.md")));
+    // Nothing was applied or reverted — alpha.md still at outer/.
+    assert.ok(existsSync(join(liftTargetDir, "alpha.md")));
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }

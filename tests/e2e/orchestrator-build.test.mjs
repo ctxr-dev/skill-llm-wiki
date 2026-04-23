@@ -9,6 +9,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -222,13 +223,25 @@ test("validation failure leaves no op/<id> final tag and rolls tree to pre-op", 
 
     // Corrupt a leaf: keep `id` so collectAll picks it up, strip every
     // other required field so the validator emits MISSING-FIELD.
-    // Leaves from a flat source live at the wiki root now (no `general/`
-    // bucket), matching the source layout.
-    const leafPath = join(wiki, "a.md");
-    assert.ok(
-      existsSync(leafPath),
-      `fixture leaf should be at ${leafPath} after build`,
-    );
+    // X.11 containment moved flat-source leaves into per-outlier
+    // subcategories — locate `a.md` wherever it ended up before
+    // overwriting it with the corrupted blob.
+    const findLeafPath = (name) => {
+      const stack = [wiki];
+      while (stack.length) {
+        const d = stack.pop();
+        const entries = readdirSync(d, { withFileTypes: true });
+        for (const e of entries) {
+          if (e.name.startsWith(".")) continue;
+          const full = join(d, e.name);
+          if (e.isDirectory()) stack.push(full);
+          else if (e.isFile() && e.name === name) return full;
+        }
+      }
+      return null;
+    };
+    const leafPath = findLeafPath("a.md");
+    assert.ok(leafPath, "fixture leaf `a.md` should exist somewhere in wiki");
     writeFileSync(leafPath, "---\nid: a\ntype: primary\n---\n\ncorrupted\n");
 
     const rebuild = runCli(["rebuild", wiki]);

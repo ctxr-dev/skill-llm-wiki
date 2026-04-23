@@ -59,6 +59,7 @@ import {
 } from "./intent.mjs";
 import { applySoftParentEntries, runSoftDagParents } from "./soft-dag.mjs";
 import { runConvergence } from "./operators.mjs";
+import { runRootContainment } from "./root-containment.mjs";
 import { runReviewCycle } from "../commands/review.mjs";
 import {
   deriveBatchId,
@@ -612,6 +613,30 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
         "review",
         `outcome=${reviewResult.outcome}${dropCount ? ` (dropped ${dropCount})` : ""}`,
       );
+    }
+
+    // Phase 4.6 — root-leaf containment (X.11). Invariant: the wiki
+    // root holds only `index.md` plus subdirectories — never a direct
+    // `.md` leaf. Any outlier leaf that survived convergence + balance
+    // (because its affinity to every other leaf fell below clustering
+    // thresholds) is moved into its own semantically-named
+    // subcategory derived from its own TF-IDF distinguishing tokens.
+    // Runs BEFORE Phase 5 so `rebuildAllIndices` sees the final tree
+    // shape (and the new `<slug>/index.md` stubs get their `entries[]`
+    // populated as part of the regular pass, not a separate write).
+    const containment = await runRootContainment(wikiRoot);
+    if (containment.moved > 0) {
+      record(
+        "root-containment",
+        `moved ${containment.moved} outlier leaf/leaves into per-slug subcategories`,
+      );
+      gitRunChecked(wikiRoot, ["add", "-A"]);
+      if (!gitWorkingTreeClean(wikiRoot)) {
+        gitCommit(
+          wikiRoot,
+          `phase root-containment: moved ${containment.moved} outlier(s) into subcategories`,
+        );
+      }
     }
 
     // Phase 5 — index-generation. `rebuildAllIndices` only visits

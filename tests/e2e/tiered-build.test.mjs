@@ -191,9 +191,22 @@ test("tiered build: per-iteration operator commits appear in git log", () => {
 });
 
 test("tiered build: build with one-leaf-per-subcategory triggers LIFT", () => {
-  // This one builds a wiki and then manually creates a LIFT-
-  // eligible state on top (moving a leaf into a subdirectory with
-  // just one child), then runs rebuild to let the operator fire.
+  // Build a wiki and then manually create a LIFT-eligible state that
+  // lifts to a NON-ROOT parent. The X.11 root-containment invariant
+  // forbids LIFT from landing a leaf at the wiki root, so this test
+  // exercises LIFT at depth 2 → depth 1 (well away from the root).
+  //
+  // Structure under test:
+  //   wiki/
+  //     outer/                   ← real subcategory (survives LIFT)
+  //       outer-leaf.md          ← sibling at outer/, prevents outer from collapsing
+  //       lonely-solo/           ← single-leaf passthrough (LIFT target)
+  //         lonely.md
+  //         index.md
+  //       index.md
+  //     index.md
+  //
+  // After LIFT: lonely.md sits at outer/lonely.md, lonely-solo/ gone.
   const parent = tmpParent("lift");
   try {
     const src = join(parent, "corpus");
@@ -210,27 +223,60 @@ test("tiered build: build with one-leaf-per-subcategory triggers LIFT", () => {
     assert.equal(build.status, 0, build.stderr);
     const wiki = join(parent, "corpus.wiki");
 
-    // Flat sources now land at the wiki root (no `general/` bucket).
-    // Manually move `lonely` into its own subdirectory to set up a
-    // LIFT-eligible state.
-    mkdirSync(join(wiki, "lonely-solo"));
-    const leafSrc = join(wiki, "lonely.md");
-    const leafDst = join(wiki, "lonely-solo", "lonely.md");
-    writeFileSync(leafDst, readFileSync(leafSrc, "utf8"));
-    rmSync(leafSrc);
-    // Install a minimal index for the new subcategory.
+    // X.11 has already contained `lonely.md` and `other.md` into
+    // per-outlier subcategories. We don't care where — we find
+    // `lonely.md` anywhere under wiki and stage the LIFT setup from
+    // its current location.
+    const findLeaf = (name) => {
+      const stack = [wiki];
+      while (stack.length) {
+        const d = stack.pop();
+        const entries = readdirSync(d, { withFileTypes: true });
+        for (const e of entries) {
+          if (e.name.startsWith(".")) continue;
+          const full = join(d, e.name);
+          if (e.isDirectory()) stack.push(full);
+          else if (e.isFile() && e.name === name) return full;
+        }
+      }
+      return null;
+    };
+    const lonelyCurrent = findLeaf("lonely.md");
+    assert.ok(lonelyCurrent, "lonely.md should exist somewhere in the wiki");
+
+    // Build the LIFT-eligible topology under a non-root `outer/`
+    // category. `outer/` has its own leaf so LIFT doesn't collapse
+    // `outer/` itself; `outer/lonely-solo/` is a single-leaf
+    // passthrough — that's what LIFT should carve out.
+    const outerDir = join(wiki, "outer");
+    mkdirSync(outerDir, { recursive: true });
     writeFileSync(
-      join(wiki, "lonely-solo", "index.md"),
+      join(outerDir, "index.md"),
+      "---\nid: outer\ntype: index\ndepth_role: subcategory\nfocus: outer container\ngenerator: skill-llm-wiki/v1\nparents:\n  - ../index.md\n---\n\n",
+    );
+    writeFileSync(
+      join(outerDir, "outer-leaf.md"),
+      "---\nid: outer-leaf\ntype: primary\ndepth_role: leaf\nfocus: sibling keeping outer alive\nparents:\n  - index.md\n---\n\n# Outer Leaf\n\noutersibling content unique-token aaa\n",
+    );
+    const soloDir = join(outerDir, "lonely-solo");
+    mkdirSync(soloDir);
+    writeFileSync(
+      join(soloDir, "lonely.md"),
+      readFileSync(lonelyCurrent, "utf8"),
+    );
+    rmSync(lonelyCurrent);
+    writeFileSync(
+      join(soloDir, "index.md"),
       "---\nid: lonely-solo\ntype: index\ndepth_role: subcategory\nfocus: solo\ngenerator: skill-llm-wiki/v1\nparents:\n  - ../index.md\n---\n\n",
     );
 
-    // rebuild should fire LIFT.
+    // rebuild should fire LIFT on outer/lonely-solo/ → outer/lonely.md.
     const rebuild = runCli(["rebuild", wiki]);
     assert.equal(rebuild.status, 0, rebuild.stderr);
     assert.match(rebuild.stdout, /operator-convergence: \d+ operator\(s\) applied/);
-    // After LIFT, the leaf is at wiki/lonely.md and the folder is gone.
-    assert.ok(existsSync(join(wiki, "lonely.md")));
-    assert.ok(!existsSync(join(wiki, "lonely-solo")));
+    // After LIFT: leaf at outer/lonely.md, passthrough dir gone.
+    assert.ok(existsSync(join(outerDir, "lonely.md")));
+    assert.ok(!existsSync(soloDir));
     // Git log for the private repo should contain a LIFT commit.
     const log = runCli(["log", wiki]);
     assert.match(

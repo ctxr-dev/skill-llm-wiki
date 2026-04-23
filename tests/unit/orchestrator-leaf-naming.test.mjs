@@ -2,11 +2,19 @@
 // skill-llm-wiki Opus-review sweep. Leaves under a subdirectory must
 // keep their plain filename on disk — no `operations-build.md`-style
 // flattened prefix. A flat source must NOT nest leaves under a
-// synthetic `general/` bucket (bug #5).
+// synthetic `general/` bucket (bug #5) — the X.11 root-containment
+// invariant replaces that with per-outlier semantically-named
+// subcategories (each leaf gets its OWN category, not a shared bucket).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,7 +45,7 @@ test("draftCategory: subdirectory source file returns top-level dir", () => {
   assert.equal(draftCategory({ source_path: "operations/build.md" }), "operations");
 });
 
-test("build: flat source lands at wiki root (no `general/` bucket)", () => {
+test("build: flat source gets per-outlier subcategories (no `general/` bucket)", () => {
   const parent = tmp();
   try {
     mkdirSync(parent, { recursive: true });
@@ -52,12 +60,38 @@ test("build: flat source lands at wiki root (no `general/` bucket)", () => {
     });
     assert.equal(r.status, 0, r.stderr);
     const wiki = join(parent, "src.wiki");
-    assert.ok(existsSync(join(wiki, "alpha.md")), "alpha.md should live at root");
-    assert.ok(existsSync(join(wiki, "beta.md")), "beta.md should live at root");
+    // X.11 invariant: no leaf .md at the wiki root. Each outlier lives
+    // in its own semantically-named subcategory, not at depth 0.
+    assert.ok(
+      !existsSync(join(wiki, "alpha.md")),
+      "alpha.md must NOT live at wiki root",
+    );
+    assert.ok(
+      !existsSync(join(wiki, "beta.md")),
+      "beta.md must NOT live at wiki root",
+    );
+    // Anti-pattern still forbidden: no shared `general/` bucket.
     assert.ok(
       !existsSync(join(wiki, "general")),
-      "there should be no `general/` bucket",
+      "there should be no shared `general/` bucket",
     );
+    // Each leaf lives SOMEWHERE under the wiki with its plain basename.
+    const findLeaf = (name) => {
+      const stack = [wiki];
+      while (stack.length) {
+        const d = stack.pop();
+        const entries = readdirSync(d, { withFileTypes: true });
+        for (const e of entries) {
+          if (e.name.startsWith(".")) continue;
+          const full = join(d, e.name);
+          if (e.isDirectory()) stack.push(full);
+          else if (e.isFile() && e.name === name) return full;
+        }
+      }
+      return null;
+    };
+    assert.ok(findLeaf("alpha.md"), "alpha.md reachable somewhere in tree");
+    assert.ok(findLeaf("beta.md"), "beta.md reachable somewhere in tree");
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }

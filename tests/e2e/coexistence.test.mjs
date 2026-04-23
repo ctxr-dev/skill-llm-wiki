@@ -226,10 +226,11 @@ test("hostile core.autocrlf=input in user repo does not normalise CRLF in wiki c
 
     const src = join(repo, "docs");
     mkdirSync(src);
-    // Seed multiple CRLF-terminated source files so LIFT does not
-    // hoist a single entry up to the wiki root; flat sources land
-    // directly at the wiki root (no `general/` bucket), so the path
-    // we assert on is simply `<entry>.md`.
+    // Seed multiple CRLF-terminated source files. Flat sources get
+    // contained into per-outlier subcategories by the X.11 invariant
+    // — the path we assert on is resolved at read-time by searching
+    // the tree for `crlf-alpha.md` rather than hard-coding a root
+    // path.
     writeFileSync(
       join(src, "crlf-alpha.md"),
       "# CRLF Alpha\r\n\r\nline one with CRLF\r\nline two with CRLF\r\n",
@@ -244,15 +245,38 @@ test("hostile core.autocrlf=input in user repo does not normalise CRLF in wiki c
     const r = runCli(["build", src], repo);
     assert.equal(r.status, 0, `build failed: ${r.stderr}`);
 
-    // The wiki leaves for crlf-* live at the wiki root (flat
-    // sources are not nested under a `general/` bucket any more).
-    // Read the first blob through the skill's isolated git so we
-    // bypass any filesystem-level transformations. The tracked
-    // content under HEAD must still contain CRLF byte sequences.
+    // The wiki leaves for crlf-* live inside per-outlier
+    // subcategories (X.11 containment). Read the blob through the
+    // skill's isolated git so we bypass any filesystem-level
+    // transformations. The tracked content under HEAD must still
+    // contain CRLF byte sequences — regardless of which subcategory
+    // X.11 assigned.
     const wiki = join(repo, "docs.wiki");
+    // Locate the containment-assigned path for crlf-alpha.md via
+    // `git ls-tree` on the private repo.
+    const lsTree = spawnSync(
+      "git",
+      ["ls-tree", "-r", "--name-only", "HEAD"],
+      {
+        cwd: wiki,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_DIR: join(wiki, ".llmwiki", "git"),
+          GIT_WORK_TREE: wiki,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+        },
+      },
+    );
+    assert.equal(lsTree.status, 0, `git ls-tree failed: ${lsTree.stderr}`);
+    const alphaPath = lsTree.stdout
+      .split("\n")
+      .find((line) => line.endsWith("/crlf-alpha.md") || line === "crlf-alpha.md");
+    assert.ok(alphaPath, `crlf-alpha.md not found in tree:\n${lsTree.stdout}`);
     const show = spawnSync(
       "git",
-      ["show", "HEAD:crlf-alpha.md"],
+      ["show", `HEAD:${alphaPath}`],
       {
         cwd: wiki,
         encoding: "buffer",
