@@ -21,10 +21,6 @@
 //     obvious decisions) but anything in the Tier 0 mid-band goes
 //     straight to Tier 2, skipping Tier 1.
 //
-//   tier0-only:
-//     Tier 0 decisions only. Mid-band becomes an explicit
-//     "undecidable" marker that the caller must resolve manually.
-//
 //   deterministic:
 //     Tier 0 + Tier 1 ladder, but the ladder terminates at Tier 1:
 //     mid-band Tier 0 escalates to Tier 1 (as in tiered-fast), but
@@ -75,7 +71,6 @@ import {
 export const QUALITY_MODES = Object.freeze([
   "tiered-fast",
   "claude-first",
-  "tier0-only",
   "deterministic",
 ]);
 
@@ -272,18 +267,6 @@ export async function decide(
   }
 
   // Mid-band Tier 0 → escalate. Behaviour depends on quality mode.
-  if (qualityMode === "tier0-only") {
-    const result = {
-      tier: 0,
-      similarity: t0.similarity,
-      decision: "undecidable",
-      confidence_band: t0.confidence_band,
-      reason: "tier0-only quality mode — mid-band left unresolved",
-    };
-    finaliseDecision(result, { a, b, hashA, hashB, wikiRoot, opId, operator, writeLog, writeCache });
-    return result;
-  }
-
   if (qualityMode === "claude-first") {
     // Skip Tier 1 entirely, go straight to Tier 2.
     return await escalateToTier2(

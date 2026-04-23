@@ -312,7 +312,6 @@ test("INT-13: known --quality-mode values are accepted", async () => {
     for (const mode of [
       "tiered-fast",
       "claude-first",
-      "tier0-only",
       "deterministic",
     ]) {
       const r = _resolveIntent({

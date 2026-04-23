@@ -857,7 +857,7 @@ The normative code list lives in the `intent.mjs` header; the one below mirrors 
 - **`INT-10` — unknown `--layout-mode` value.** Anything other than `sibling`, `in-place`, or `hosted`. The resolver refuses, lists the valid values, and exits.
 - **`INT-11` — unknown CLI flag.** `parseSubArgv` surfaces unknown flags as an `INT-11` error so every "did you mean…?" case funnels through the same structured-error code and can be caught uniformly by scripts and tests.
 - **`INT-12` — ambiguity reached non-TTY interactive resolution.** An earlier ambiguity would normally have been resolved by prompting the user, but stdin is not a TTY (or `LLM_WIKI_NO_PROMPT=1` / `--no-prompt` is set), so the skill refuses to guess. Emitted from `cli.mjs` when `NonInteractiveError` is caught. The resolving "flag" is to re-run the command in an interactive terminal, or to add the disambiguating flag directly.
-- **`INT-13` — unknown `--quality-mode` value.** Anything other than `tiered-fast`, `claude-first`, or `tier0-only`. The resolver refuses, lists the valid values, and exits.
+- **`INT-13` — unknown `--quality-mode` value.** Anything other than `tiered-fast`, `claude-first`, or `deterministic`. The resolver refuses, lists the valid values, and exits.
 
 ### Non-interactive fallback
 
@@ -1315,7 +1315,7 @@ The skill ships three modes, selected via `--quality-mode` or `LLM_WIKI_QUALITY_
 
 - **`tiered-fast` (default, recommended).** Full Tier 0 → 1 → 2 ladder. Tier 1 is now a REQUIRED dependency (`@xenova/transformers` in `dependencies`, not optional) — the overhaul discovered Tier 0 alone was too weak on terse technical frontmatter to leave every mid-band pair for Tier 2 to resolve. Tier 2 runs in a dedicated sub-agent per decision via the **exit-7 handshake**: the CLI writes a pending batch to `<wiki>/.work/tier2/` and exits 7; the wiki-runner spawns sub-agents, writes responses, and re-invokes the CLI. Zero Claude tokens for >90% of operator decisions on typical corpora once embeddings are warm.
 - **`claude-first`.** Tier 0 is still consulted for decisive cases (saves tokens on the obvious decisions), but anything in the Tier 0 mid-band goes straight to Tier 2 (exit-7 handshake), skipping Tier 1. Useful when the user values sub-agent judgment over speed/cost or when debugging a specific similarity call.
-- **`tier0-only`.** No embeddings, no Tier 2, no network. Tier 0 decisions only. Mid-band becomes an explicit "undecidable" marker the user resolves via the interactive review flow. Useful for air-gapped environments, hermetic CI jobs, and smoke tests. Note: Tier 1 is still a required install-time dependency even in this mode; `tier0-only` controls runtime behaviour, not dependency resolution.
+- **`deterministic`.** Tier 0 → Tier 1 ladder only; mid-band Tier 1 pairs are resolved by a static threshold (`TIER1_DETERMINISTIC_THRESHOLD`, the midpoint of Tier 1's decisive bounds) so the ladder terminates without Tier 2. No LLM/sub-agent is ever consulted; cluster naming is produced by `generateDeterministicSlug` + `deterministicPurpose` from member frontmatters. Repeated runs on the same inputs are byte-reproducible. Useful for air-gapped environments, hermetic CI, and large corpus builds where deterministic output matters more than Tier 2's naming nuance.
 
 ### Similarity cache and decision log
 

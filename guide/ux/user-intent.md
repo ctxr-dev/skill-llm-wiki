@@ -80,7 +80,7 @@ in the wrong place) is always higher than a one-sentence clarifying question.
 | INT-10 | Unknown `--layout-mode` value | use `sibling` / `in-place` / `hosted` |
 | INT-11 | Unknown flag / malformed flag value | correct the flag |
 | INT-12 | Prompt required in non-interactive mode | supply the flag the prompt was asking for, or re-run in a TTY |
-| INT-13 | Unknown `--quality-mode` value | use `tiered-fast` / `claude-first` / `tier0-only` |
+| INT-13 | Unknown `--quality-mode` value | use `tiered-fast` / `claude-first` / `deterministic` |
 
 ## `--json` for programmatic consumption
 

@@ -6,10 +6,10 @@
 // threshold, and propose NEST applications.
 //
 // Cluster naming depends on the active quality mode:
-//   - tiered-fast / claude-first / tier0-only: proposals are named
-//     by asking Tier 2 (the `cluster_name` request kind), because
-//     the point of Tier 2 is to let the sub-agent exercise judgment
-//     at naming time.
+//   - tiered-fast / claude-first: proposals are named by asking
+//     Tier 2 (the `cluster_name` request kind), because the point
+//     of Tier 2 is to let the sub-agent exercise judgment at
+//     naming time.
 //   - deterministic: naming is derived locally from member
 //     frontmatters via `generateDeterministicSlug` +
 //     `deterministicPurpose`, bypassing the `cluster_name` request

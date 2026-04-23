@@ -79,7 +79,6 @@ export const VALID_LAYOUT_MODES = Object.freeze(["sibling", "in-place", "hosted"
 export const VALID_QUALITY_MODES = Object.freeze([
   "tiered-fast",
   "claude-first",
-  "tier0-only",
   "deterministic",
 ]);
 

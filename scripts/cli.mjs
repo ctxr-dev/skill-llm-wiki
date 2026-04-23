@@ -326,7 +326,7 @@ Layout-mode flags (build/extend/rebuild/fix/join):
   --target <path>                  Explicit destination (required for hosted)
 
 Tiered-AI flags:
-  --quality-mode tiered-fast|claude-first|tier0-only|deterministic
+  --quality-mode tiered-fast|claude-first|deterministic
                                    Default: tiered-fast (TF-IDF → embeddings
                                    → Claude ladder). The 'deterministic' mode
                                    resolves every decision algorithmically

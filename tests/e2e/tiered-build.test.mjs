@@ -5,8 +5,9 @@
 //   - Build that includes similar and unrelated siblings produces
 //     a decisions.yaml with entries for every pair
 //   - Quality mode defaults to tiered-fast
-//   - `--quality-mode tier0-only` flag propagates through intent →
-//     orchestrator → convergence → tiered.decide
+//   - `--quality-mode deterministic` propagates through intent →
+//     orchestrator → convergence → tiered.decide and produces no
+//     Tier 2 escalations
 //   - LIFT fires on a single-leaf category and rearranges the tree
 //   - A build with LIFT-applicable structure shows LIFT in the
 //     operator-convergence phase summary
@@ -118,8 +119,8 @@ test("tiered build: decisions.yaml is populated after a multi-entry build", () =
   }
 });
 
-test("tiered build: --quality-mode tier0-only skips Tier 1 and Tier 2", () => {
-  const parent = tmpParent("tier0-only");
+test("tiered build: --quality-mode deterministic never escalates to Tier 2", () => {
+  const parent = tmpParent("deterministic");
   try {
     const src = join(parent, "corpus");
     mkdirSync(src);
@@ -131,23 +132,23 @@ test("tiered build: --quality-mode tier0-only skips Tier 1 and Tier 2", () => {
       join(src, "memcached.md"),
       "# Memcached\n\ncaching strategies memcached slab allocation stampede prefix\n",
     );
-    // These are mid-band in Tier 0 — with tier0-only they resolve
-    // as "undecidable" and the convergence loop does not MERGE.
+    // Deterministic mode resolves every mid-band decision via the
+    // static Tier 1 threshold — no Tier 2 queue, no exit-7.
     const r = runCli([
       "build",
       src,
       "--quality-mode",
-      "tier0-only",
+      "deterministic",
     ]);
     assert.equal(r.status, 0, r.stderr);
     const wiki = join(parent, "corpus.wiki");
     const decisions = readDecisions(wiki);
-    // Every decision must have tier_used === 0.
+    // Every decision must terminate at Tier 0 or Tier 1 — Tier 2 is
+    // never consulted in deterministic mode.
     for (const d of decisions) {
-      assert.equal(
-        d.tier_used,
-        0,
-        `tier0-only must not escalate, got tier ${d.tier_used} for ${d.sources.join(",")}`,
+      assert.ok(
+        d.tier_used === 0 || d.tier_used === 1,
+        `deterministic must not escalate to Tier 2, got tier ${d.tier_used} for ${d.sources.join(",")}`,
       );
     }
   } finally {
