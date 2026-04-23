@@ -146,6 +146,45 @@ export const MAX_CLUSTER_SIZE = 8;
 // usually a noise floor hit and is structurally useless.
 export const GIANT_BLOB_FRACTION = 0.75;
 
+// ── Coarse-partition pre-pass for flat large-diverse directories ──
+//
+// The HAC path above (`findComponents` + `partitionShapeScore`) is
+// tuned for FINE-GRAINED sub-clustering inside already-bounded
+// directories: it maximises the count of 3-8-size components at
+// some candidate threshold. On a flat 600-leaf root that's the
+// wrong optimisation — the best partition at any threshold is
+// dominated by one giant component plus many singletons, and the
+// handful of 3-8-size clusters that do emerge score poorly.
+// Practical symptom: a 596-leaf hand-authored corpus observed in
+// the field produced zero NEST proposals during convergence under
+// `--quality-mode deterministic`, which left the balance phase to
+// carve categories linearly and hit its 20-iter cap far short of
+// convergence.
+//
+// The coarse-partition pre-pass uses deterministic K-means (farthest-
+// first init + mean-member-similarity assignment) to force K top-
+// level clusters when the directory's leaf count exceeds
+// `COARSE_PARTITION_THRESHOLD`. K is chosen as
+// `ceil(N / COARSE_TARGET_CLUSTER_SIZE)` so the average cluster
+// lands around the `COARSE_TARGET_CLUSTER_SIZE` mark. Clusters
+// smaller than `MIN_CLUSTER_SIZE` or larger than
+// `MAX_COARSE_CLUSTER_SIZE` are rejected post-hoc — small ones
+// aren't worth nesting (the `MIN_CLUSTER_SIZE` floor) and giant
+// ones are usually noise-floor hits that would themselves need
+// sub-clustering (the `MAX_COARSE_CLUSTER_SIZE` ceiling, 30, is
+// ~4× the target so only egregiously-concentrated clusters get
+// pruned — the rest pass through and balance enforcement can
+// refine them in a second pass if `--fanout-target` is tight).
+//
+// Determinism: all ordering uses lex-first tie-breaking (first
+// seed is always index 0, subsequent seeds via farthest-first,
+// members iterate in leaf-array order). Two runs on the same
+// corpus produce byte-identical cluster membership.
+export const COARSE_PARTITION_THRESHOLD = 50;
+export const COARSE_TARGET_CLUSTER_SIZE = 8;
+export const MAX_COARSE_CLUSTER_SIZE = 30;
+export const COARSE_KMEANS_MAX_ITERS = 20;
+
 // Read the first ~1 KB of a leaf's body for the Tier 1 signal.
 // We skip the frontmatter (between the first two `---` lines)
 // and take a prefix of the remaining bytes. Short-body leaves
@@ -462,6 +501,161 @@ export function buildProposeStructureRequest(relativeDir, leaves) {
   });
 }
 
+// Coarse-partition K-means for flat large-diverse directories.
+// Called from `detectClusters` when `leaves.length` exceeds
+// `COARSE_PARTITION_THRESHOLD`. The HAC path used for ≤-threshold
+// directories can't produce usable 3-8-sized clusters on a flat
+// 600-leaf root (see the constant block at the top of the file);
+// this function forces K top-level clusters via deterministic
+// K-means with farthest-first seed init.
+//
+// Algorithm:
+//
+//   1. Compute the same NxN affinity matrix `detectClusters` uses
+//      (Tier 0 + Tier 1 blend via `computeAffinityMatrix`). Reused
+//      downstream — we do NOT recompute it in the HAC path when
+//      we dispatch here.
+//
+//   2. Pick K = ceil(N / COARSE_TARGET_CLUSTER_SIZE) seeds via
+//      farthest-first selection. First seed is leaves[0] (lex-first
+//      by the caller's ordering). Each subsequent seed maximises
+//      its minimum similarity-distance (1 - max(sim-to-existing))
+//      so seeds spread across the similarity space.
+//
+//   3. Iterate assignment: each leaf → cluster whose current
+//      members have the highest MEAN similarity to it. Using mean
+//      member similarity rather than vector-centroid distance lets
+//      us work with the existing `matrix` directly — no need to
+//      expose or recompute per-leaf vectors. Stops when assignments
+//      stop changing or the iteration cap fires.
+//
+//   4. Build proposals via `buildNestProposal`. Clusters smaller
+//      than `MIN_CLUSTER_SIZE` or larger than
+//      `MAX_COARSE_CLUSTER_SIZE` are rejected (small: not worth
+//      nesting; giant: noise-floor concentration, leave to a
+//      second pass or to balance enforcement).
+//
+// Returns an array of NEST proposals in
+// `(average_affinity desc, member-path asc)` order. Returns `[]`
+// if no cluster passed filters — the caller decides whether to
+// fall back to HAC or escalate.
+export async function detectCoarseClusters(wikiRoot, leaves, opts = {}) {
+  if (leaves.length < MIN_CLUSTER_SIZE) return [];
+  const matrix =
+    opts.precomputedMatrix ??
+    (await computeAffinityMatrix(wikiRoot, leaves, opts));
+  const N = leaves.length;
+  const K = Math.min(
+    Math.ceil(N / COARSE_TARGET_CLUSTER_SIZE),
+    // Guard: K cannot exceed N (degenerate) or produce clusters
+    // smaller than MIN on average. ceil(N / TARGET) hits both
+    // floors naturally, but pin the upper bound so a user tuning
+    // TARGET down to 1 doesn't blow up.
+    Math.floor(N / MIN_CLUSTER_SIZE),
+  );
+  if (K < 2) return []; // nothing meaningful to partition into
+
+  // Step 1: deterministic farthest-first seeds. First seed is the
+  // lex-first leaf (index 0). Each subsequent seed maximises its
+  // minimum similarity-distance (1 - max(sim-to-any-existing-seed))
+  // so seeds don't pile up in a dense region of the affinity graph.
+  // Ties broken by index-ascending, preserving determinism.
+  const seeds = [0];
+  while (seeds.length < K) {
+    let bestIdx = -1;
+    let bestMinDist = -1;
+    for (let i = 0; i < N; i++) {
+      if (seeds.includes(i)) continue;
+      let maxSimToSeed = -Infinity;
+      for (const s of seeds) {
+        if (matrix[i][s] > maxSimToSeed) maxSimToSeed = matrix[i][s];
+      }
+      const minDistToSeed = 1 - maxSimToSeed;
+      if (minDistToSeed > bestMinDist) {
+        bestMinDist = minDistToSeed;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx === -1) break;
+    seeds.push(bestIdx);
+  }
+
+  // Step 2: initial assignment = nearest-seed (max similarity).
+  const assignments = new Array(N);
+  for (let i = 0; i < N; i++) {
+    let bestK = 0;
+    let bestSim = -Infinity;
+    for (let k = 0; k < seeds.length; k++) {
+      const sim = matrix[i][seeds[k]];
+      if (sim > bestSim) {
+        bestSim = sim;
+        bestK = k;
+      }
+    }
+    assignments[i] = bestK;
+  }
+
+  // Step 3: iterate. Each leaf re-assigns to the cluster whose
+  // current members have the highest mean similarity to it.
+  // Converges in a handful of iterations on most corpora; the
+  // COARSE_KMEANS_MAX_ITERS cap is defensive against pathological
+  // oscillation.
+  for (let iter = 0; iter < COARSE_KMEANS_MAX_ITERS; iter++) {
+    const members = Array.from({ length: seeds.length }, () => []);
+    for (let i = 0; i < N; i++) members[assignments[i]].push(i);
+    let changed = false;
+    for (let i = 0; i < N; i++) {
+      let bestK = assignments[i];
+      let bestMean = -Infinity;
+      for (let k = 0; k < seeds.length; k++) {
+        const mem = members[k];
+        if (mem.length === 0) continue;
+        let sum = 0;
+        for (const m of mem) sum += matrix[i][m];
+        const mean = sum / mem.length;
+        if (mean > bestMean) {
+          bestMean = mean;
+          bestK = k;
+        }
+      }
+      if (bestK !== assignments[i]) {
+        assignments[i] = bestK;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  // Step 4: build proposals from each non-trivial cluster.
+  const proposals = [];
+  for (let k = 0; k < seeds.length; k++) {
+    const componentIndices = [];
+    for (let i = 0; i < N; i++) {
+      if (assignments[i] === k) componentIndices.push(i);
+    }
+    if (componentIndices.length < MIN_CLUSTER_SIZE) continue;
+    if (componentIndices.length > MAX_COARSE_CLUSTER_SIZE) continue;
+    if (componentIndices.length === N) continue; // single-cluster-everything
+    const componentLeaves = componentIndices.map((i) => leaves[i]);
+    const proposal = buildNestProposal(componentLeaves, matrix, componentIndices);
+    proposal.threshold = null; // n/a for K-means; left null to signal coarse-mode
+    proposal.source = "math-coarse";
+    proposals.push(proposal);
+  }
+  // Deterministic sort: highest-affinity clusters first, ties
+  // broken by the lex-first member path so the on-disk apply
+  // order is stable across runs.
+  proposals.sort((a, b) => {
+    if (b.average_affinity !== a.average_affinity) {
+      return b.average_affinity - a.average_affinity;
+    }
+    const aKey = a.leaves?.[0]?.path ?? "";
+    const bKey = b.leaves?.[0]?.path ?? "";
+    return aKey.localeCompare(bKey);
+  });
+  return proposals;
+}
+
 // Detect all NEST proposals for a single parent directory's
 // leaves. Tries each candidate threshold (aggressive range), picks
 // the best by shape score, and emits a proposal for each
@@ -474,9 +668,32 @@ export function buildProposeStructureRequest(relativeDir, leaves) {
 // marker and returns `[]` instead — used by tests and the
 // cluster_name unit tests that don't want the marker in their
 // output.
+//
+// Dispatch: for directories above `COARSE_PARTITION_THRESHOLD`
+// leaves, skip the HAC path entirely and run the coarse K-means
+// partitioner. The HAC path's shape-score optimiser is tuned for
+// fine-grained sub-clustering (3-8-size components), which can't
+// structure a flat large-diverse root — see the constant block.
+// Coarse clusters returned in the same shape the HAC path would
+// emit, so downstream (operators.mjs::tryClusterNestIteration,
+// balance.mjs::runBalance) is untouched.
 export async function detectClusters(wikiRoot, leaves, opts = {}) {
   const { returnEmptyMarker = true } = opts;
   if (leaves.length < MIN_CLUSTER_SIZE) return [];
+
+  // Coarse-partition dispatch for flat large-diverse roots. This
+  // path doesn't honour `returnEmptyMarker` (no empty-partition
+  // marker is emitted) because Tier 2's propose_structure is the
+  // wrong tool for these inputs anyway — the LLM would be asked
+  // to partition 500+ leaves in one shot, which is both a huge
+  // token cost and typically produces worse structure than the
+  // deterministic K-means. If coarse produces zero valid clusters,
+  // return empty; the caller (balance / operators) handles zero-
+  // proposal days gracefully.
+  if (leaves.length > COARSE_PARTITION_THRESHOLD) {
+    return detectCoarseClusters(wikiRoot, leaves, opts);
+  }
+
   const matrix = await computeAffinityMatrix(wikiRoot, leaves, opts);
   let bestPartition = null;
   let bestScore = -1;

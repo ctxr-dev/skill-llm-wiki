@@ -10,13 +10,18 @@ import { tmpdir } from "node:os";
 import { renderFrontmatter } from "../../scripts/lib/frontmatter.mjs";
 import {
   CANDIDATE_THRESHOLDS,
+  COARSE_KMEANS_MAX_ITERS,
+  COARSE_PARTITION_THRESHOLD,
+  COARSE_TARGET_CLUSTER_SIZE,
   GIANT_BLOB_FRACTION,
   MAX_CLUSTER_SIZE,
+  MAX_COARSE_CLUSTER_SIZE,
   MIN_CLUSTER_SIZE,
   buildProposeStructureRequest,
   buildSiblingIdfContext,
   computeAffinityMatrix,
   detectClusters,
+  detectCoarseClusters,
   deterministicPurpose,
   findComponents,
   generateDeterministicSlug,
@@ -511,4 +516,159 @@ test("deterministicPurpose: accepts plain frontmatter objects (no wrapper)", () 
   // same result, proving the normalisation is semantically lossless.
   const wrapped = plain.map((data) => ({ data }));
   assert.equal(deterministicPurpose(wrapped), "shared-topic");
+});
+
+// ── detectCoarseClusters (Phase X.10 — flat large-diverse root pre-pass) ─
+
+// Build a flat large-diverse root fixture: N leaves drawn from M
+// loosely-coherent themes, each theme with K members sharing a
+// focus/covers/tags token. N > COARSE_PARTITION_THRESHOLD so the
+// coarse pass fires. The themes are deliberately varied enough
+// that HAC's 3-8 shape score couldn't structure them — that's the
+// whole point.
+function buildFlatLargeDiverseLeaves(wikiRoot, themes, membersPerTheme) {
+  const leaves = [];
+  for (const theme of themes) {
+    for (let i = 0; i < membersPerTheme; i++) {
+      const id = `${theme.slug}-${i}`;
+      leaves.push(
+        leaf(wikiRoot, `${id}.md`, {
+          id,
+          type: "primary",
+          depth_role: "leaf",
+          focus: `${theme.focus} ${i}`,
+          covers: theme.covers.slice(),
+          tags: theme.tags.slice(),
+          activation: { keyword_matches: theme.keywords.slice() },
+        }),
+      );
+    }
+  }
+  return leaves;
+}
+
+test("COARSE constants are sane", () => {
+  assert.ok(COARSE_PARTITION_THRESHOLD >= 10, "threshold must leave room above MIN_CLUSTER_SIZE");
+  assert.ok(COARSE_TARGET_CLUSTER_SIZE >= MIN_CLUSTER_SIZE);
+  assert.ok(MAX_COARSE_CLUSTER_SIZE >= COARSE_TARGET_CLUSTER_SIZE);
+  assert.ok(COARSE_KMEANS_MAX_ITERS >= 5);
+});
+
+test("detectClusters: dispatches to coarse when leaves.length > COARSE_PARTITION_THRESHOLD", async () => {
+  const wiki = tmpWiki("coarse-dispatch");
+  try {
+    // 10 themes × 7 members = 70 leaves, above the threshold.
+    const themes = Array.from({ length: 10 }, (_, k) => ({
+      slug: `theme-${k}`,
+      focus: `theme ${k} distinctive tokens`,
+      covers: [`theme-${k}-cover-a`, `theme-${k}-cover-b`],
+      tags: [`theme-${k}`, "flat-root"],
+      keywords: [`theme-${k}`],
+    }));
+    const leaves = buildFlatLargeDiverseLeaves(wiki, themes, 7);
+    assert.ok(leaves.length > COARSE_PARTITION_THRESHOLD);
+    const proposals = await detectClusters(wiki, leaves);
+    // We expect several proposals. At K ≈ ceil(70/8) = 9 and 10
+    // well-separated themes, most clusters should recover
+    // near-theme-aligned membership.
+    assert.ok(
+      proposals.length >= 3,
+      `expected ≥3 coarse proposals, got ${proposals.length}`,
+    );
+    // Every proposal is a NEST of size in [MIN, MAX_COARSE].
+    for (const p of proposals) {
+      assert.equal(p.operator, "NEST");
+      assert.ok(p.leaves.length >= MIN_CLUSTER_SIZE);
+      assert.ok(p.leaves.length <= MAX_COARSE_CLUSTER_SIZE);
+      assert.equal(p.source, "math-coarse");
+    }
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("detectCoarseClusters: deterministic across runs (byte-identical membership)", async () => {
+  const wiki = tmpWiki("coarse-determ");
+  try {
+    const themes = Array.from({ length: 8 }, (_, k) => ({
+      slug: `t-${k}`,
+      focus: `focus ${k}`,
+      covers: [`cov-${k}-a`, `cov-${k}-b`],
+      tags: [`tag-${k}`],
+      keywords: [`kw-${k}`],
+    }));
+    const leaves = buildFlatLargeDiverseLeaves(wiki, themes, 8); // 64 leaves
+    const first = await detectCoarseClusters(wiki, leaves);
+    const second = await detectCoarseClusters(wiki, leaves);
+    assert.equal(first.length, second.length, "proposal count must match");
+    for (let i = 0; i < first.length; i++) {
+      const aIds = first[i].leaves.map((l) => l.data.id).sort();
+      const bIds = second[i].leaves.map((l) => l.data.id).sort();
+      assert.deepEqual(aIds, bIds, `proposal ${i} membership differs between runs`);
+    }
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("detectCoarseClusters: rejects trivial and oversized clusters", async () => {
+  const wiki = tmpWiki("coarse-reject");
+  try {
+    // 100 leaves all sharing the SAME theme — K-means will put
+    // them all in one cluster (or near-all). The MAX_COARSE_CLUSTER_SIZE
+    // filter must reject the giant component; the < MIN filter
+    // must reject any tiny outliers. Net: proposals may be empty
+    // or very few.
+    const themes = [
+      {
+        slug: "homogeneous",
+        focus: "shared core shared shared",
+        covers: ["shared-cover"],
+        tags: ["shared"],
+        keywords: ["shared"],
+      },
+    ];
+    const leaves = buildFlatLargeDiverseLeaves(wiki, themes, 100);
+    const proposals = await detectCoarseClusters(wiki, leaves);
+    // No cluster should exceed MAX_COARSE_CLUSTER_SIZE; every
+    // proposal must respect the size bounds.
+    for (const p of proposals) {
+      assert.ok(
+        p.leaves.length >= MIN_CLUSTER_SIZE,
+        `cluster of size ${p.leaves.length} is below MIN`,
+      );
+      assert.ok(
+        p.leaves.length <= MAX_COARSE_CLUSTER_SIZE,
+        `cluster of size ${p.leaves.length} exceeds MAX_COARSE`,
+      );
+    }
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("detectCoarseClusters: sorted by (average_affinity desc, leaf-path asc)", async () => {
+  const wiki = tmpWiki("coarse-sort");
+  try {
+    const themes = Array.from({ length: 9 }, (_, k) => ({
+      slug: `s-${k}`,
+      focus: `focus ${k} narrow`,
+      covers: [`cv-${k}`],
+      tags: [`tg-${k}`],
+      keywords: [`kw-${k}`],
+    }));
+    const leaves = buildFlatLargeDiverseLeaves(wiki, themes, 7);
+    const proposals = await detectCoarseClusters(wiki, leaves);
+    for (let i = 1; i < proposals.length; i++) {
+      const prev = proposals[i - 1];
+      const cur = proposals[i];
+      // Primary sort: average_affinity desc.
+      assert.ok(
+        prev.average_affinity >= cur.average_affinity - 1e-9,
+        `proposals must be affinity-desc; got ${prev.average_affinity} before ${cur.average_affinity}`,
+      );
+    }
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
 });
