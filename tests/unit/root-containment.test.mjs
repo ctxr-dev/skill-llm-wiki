@@ -249,6 +249,37 @@ test("runRootContainment: determinism across runs (byte-identical slug assignmen
   }
 });
 
+test("runRootContainment: already-'../'-prefixed parent is preserved byte-identical", async () => {
+  // A depth-1 leaf whose frontmatter carries an already-"../"-prefixed
+  // parent is a depth-contract violation on the input — there is no
+  // legitimate parent above wikiRoot to reference. Blindly prepending
+  // another "../" during containment would turn "../foo" into
+  // "../../foo", escaping the wiki root. X.11 preserves the malformed
+  // entry as-is and lets validation surface it post-containment.
+  const wiki = tmpWiki("escaping");
+  try {
+    writeIndex(wiki, "index.md", "root");
+    writeLeaf(wiki, "escapee.md", "escapee", {
+      focus: "escapee focus",
+      parents: ["index.md", "../above-root/index.md"],
+      tags: ["escapee"],
+      kw: ["escapee"],
+    });
+    const result = await runRootContainment(wiki);
+    assert.equal(result.moved, 1);
+    const op = result.operations[0];
+    const leafFm = readFm(op.to);
+    assert.equal(leafFm.parents[0], "index.md", "primary stays same-dir");
+    assert.equal(
+      leafFm.parents[1],
+      "../above-root/index.md",
+      "already-escaping entry preserved byte-identical (no double '../')",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("runRootContainment: parents[] rewrite — non-primary gains '../' prefix", async () => {
   const wiki = tmpWiki("parents");
   try {

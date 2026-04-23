@@ -1,6 +1,9 @@
 // root-containment.mjs — enforce "no leaves at wiki root" invariant.
 //
-// Runs as Phase 4.6 (between optional review and index-generation).
+// Runs as Phase 4.4.5 (between soft-DAG synthesis and review) so the
+// containment commit participates in the `--review` diff — users can
+// drop/abort individual containment moves exactly like they can drop
+// any other tree-mutating phase's commits.
 // Walks `wikiRoot`, collects every `.md` file at depth 1 that isn't
 // `index.md`, and moves each into its own semantically-named
 // subcategory derived from the leaf's own TF-IDF distinguishing
@@ -142,10 +145,13 @@ function collectRootSiblings(wikiRoot, excludePath) {
 // gains a "../" prefix because paths that were relative to the old
 // leaf-dir (wiki root) are now one level too shallow.
 //
-// Exception: a primary parent that is ALREADY "../index.md" (very
-// unusual at depth 1 but possible if the frontmatter was
-// hand-authored with the subcategory-index shape) gets "../" prepended
-// like any other non-primary entry.
+// Exception: a parent entry that already starts with "../" is a
+// depth-contract violation on the input — a root-level leaf has no
+// legitimate parent above wikiRoot to reference. Blindly prepending
+// "../" would turn the already-malformed "../foo" into "../../foo",
+// escaping the wiki root outright. Preserve the (already-malformed)
+// entry byte-identical instead, and let validation surface it
+// post-containment under its normal parent-path rules.
 function rewriteParentsAfterContainment(leafPath) {
   let raw;
   try {
@@ -165,9 +171,12 @@ function rewriteParentsAfterContainment(leafPath) {
   const rewritten = parents.map((p, i) => {
     if (typeof p !== "string") return p;
     // Primary stays "index.md" when it was "index.md" (same-dir
-    // reference that survives the move). Soft parents — and any
-    // primary that already had "../" — all need a "../" prepended.
+    // reference that survives the move).
     if (i === 0 && p === "index.md") return "index.md";
+    // Already-escaping paths are preserved byte-identical — adding
+    // another "../" to an already-"../"-prefixed entry only digs the
+    // depth-contract violation deeper. See module header.
+    if (p.startsWith("../")) return p;
     return "../" + p;
   });
   parsed.data.parents = rewritten;

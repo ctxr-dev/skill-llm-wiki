@@ -569,27 +569,61 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
       }
     }
 
+    // Phase 4.4.5 — root-leaf containment (X.11). Invariant: the wiki
+    // root holds only `index.md` plus subdirectories — never a direct
+    // `.md` leaf. Any outlier leaf that survived convergence + balance
+    // (because its affinity to every other leaf fell below clustering
+    // thresholds) is moved into its own semantically-named
+    // subcategory derived from its own TF-IDF distinguishing tokens.
+    // Runs BEFORE Phase 4.5 review so the containment commit is part
+    // of the reviewable diff — users can drop/abort it like any
+    // other tree-mutating phase. Runs BEFORE Phase 5 so
+    // `rebuildAllIndices` sees the final tree shape (and the new
+    // `<slug>/index.md` stubs get their `entries[]` populated as part
+    // of the regular pass, not a separate write).
+    let containmentDidCommit = false;
+    const containment = await runRootContainment(wikiRoot);
+    if (containment.moved > 0) {
+      record(
+        "root-containment",
+        `moved ${containment.moved} outlier leaf/leaves into per-slug subcategories`,
+      );
+      gitRunChecked(wikiRoot, ["add", "-A"]);
+      if (!gitWorkingTreeClean(wikiRoot)) {
+        gitCommit(
+          wikiRoot,
+          `phase root-containment: moved ${containment.moved} outlier(s) into subcategories`,
+        );
+        containmentDidCommit = true;
+      }
+    }
+
     // Phase 4.5 — optional interactive review. Fires only when the
     // user passed --review AND at least one tree-mutating phase
     // actually produced commits. That's ANY of convergence, the
-    // balance-enforcement phase, or the soft-DAG parent phase above —
-    // each commits separately via its own git callback. Pre-round-6
-    // the gate only checked convergence, which meant a no-op-
-    // convergence + active-balance op (e.g. a hand-authored corpus
-    // that's already operator-clean but violates the fanout/depth
-    // targets) would silently skip review. The review flow prints a
-    // diff + commit list and lets the user approve, abort, or drop
-    // specific iterations before validation runs. Abort throws so
-    // the orchestrator's catch block handles the rollback uniformly
-    // with any other failure path.
+    // balance-enforcement phase, the soft-DAG parent phase above, or
+    // the root-containment phase — each commits separately via its
+    // own git callback. Pre-round-6 the gate only checked
+    // convergence, which meant a no-op-convergence + active-balance
+    // op (e.g. a hand-authored corpus that's already operator-clean
+    // but violates the fanout/depth targets) would silently skip
+    // review. The review flow prints a diff + commit list and lets
+    // the user approve, abort, or drop specific iterations before
+    // validation runs. Abort throws so the orchestrator's catch
+    // block handles the rollback uniformly with any other failure
+    // path.
     const balanceApplied = balance?.applied?.length ?? 0;
-    // Use the commit-did-fire flag for soft-DAG, not the `softParentsAdded`
-    // counter: a rerun that removes previously-synthesised soft parents
-    // below threshold, or a canonical-order frontmatter rewrite that
-    // preserves logical content while altering bytes, produces
-    // `softParentsAdded === 0` but still dirties the tree and commits.
+    // Use the commit-did-fire flag for soft-DAG and root-containment,
+    // not their planned-work counters: a rerun that removes
+    // previously-synthesised soft parents below threshold, or a
+    // canonical-order frontmatter rewrite that preserves logical
+    // content while altering bytes, produces the planned-work
+    // counter = 0 but still dirties the tree and commits.
     const anyMutation =
-      convergence.applied.length > 0 || balanceApplied > 0 || softDagDidCommit;
+      convergence.applied.length > 0 ||
+      balanceApplied > 0 ||
+      softDagDidCommit ||
+      containmentDidCommit;
     if (plan.flags?.review && anyMutation) {
       const reviewResult = await runReviewCycle(wikiRoot, opId, {
         forceInteractive: plan.flags?.force_interactive === true,
@@ -613,30 +647,6 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
         "review",
         `outcome=${reviewResult.outcome}${dropCount ? ` (dropped ${dropCount})` : ""}`,
       );
-    }
-
-    // Phase 4.6 — root-leaf containment (X.11). Invariant: the wiki
-    // root holds only `index.md` plus subdirectories — never a direct
-    // `.md` leaf. Any outlier leaf that survived convergence + balance
-    // (because its affinity to every other leaf fell below clustering
-    // thresholds) is moved into its own semantically-named
-    // subcategory derived from its own TF-IDF distinguishing tokens.
-    // Runs BEFORE Phase 5 so `rebuildAllIndices` sees the final tree
-    // shape (and the new `<slug>/index.md` stubs get their `entries[]`
-    // populated as part of the regular pass, not a separate write).
-    const containment = await runRootContainment(wikiRoot);
-    if (containment.moved > 0) {
-      record(
-        "root-containment",
-        `moved ${containment.moved} outlier leaf/leaves into per-slug subcategories`,
-      );
-      gitRunChecked(wikiRoot, ["add", "-A"]);
-      if (!gitWorkingTreeClean(wikiRoot)) {
-        gitCommit(
-          wikiRoot,
-          `phase root-containment: moved ${containment.moved} outlier(s) into subcategories`,
-        );
-      }
     }
 
     // Phase 5 — index-generation. `rebuildAllIndices` only visits
