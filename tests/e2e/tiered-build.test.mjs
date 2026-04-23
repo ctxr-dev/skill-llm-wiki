@@ -255,12 +255,24 @@ test("tiered build: similarity cache gets populated during build", () => {
     assert.equal(r.status, 0, r.stderr);
     const wiki = join(parent, "corpus.wiki");
     // Three pairs × ? directories. Each pair gets cached once.
+    // Cache layout is sharded: `<cacheDir>/<2hex>/<rest>.json`, so
+    // walk every shard subdir to count.
     const cacheDir = join(wiki, ".llmwiki", "similarity-cache");
     assert.ok(existsSync(cacheDir));
-    const files = readdirSync(cacheDir).filter((f) => f.endsWith(".json"));
+    let total = 0;
+    for (const shard of readdirSync(cacheDir)) {
+      const shardPath = join(cacheDir, shard);
+      try {
+        for (const entry of readdirSync(shardPath)) {
+          if (entry.endsWith(".json")) total++;
+        }
+      } catch {
+        /* shard may be a stray file on pre-sharding layouts */
+      }
+    }
     assert.ok(
-      files.length >= 1,
-      `similarity cache should have at least one entry, got ${files.length}`,
+      total >= 1,
+      `similarity cache should have at least one entry, got ${total}`,
     );
   } finally {
     rmSync(parent, { recursive: true, force: true });

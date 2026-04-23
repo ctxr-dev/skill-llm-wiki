@@ -16,9 +16,14 @@
 // queryable even after the op is reset.
 
 import {
+  appendFileSync,
+  closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   renameSync,
   writeFileSync,
 } from "node:fs";
@@ -130,27 +135,112 @@ function emitEntry(entry) {
   return lines.join("\n");
 }
 
-// Append an entry atomically.
+// Append an entry.
+//
+// Hot path: at large-corpus scale (596 leaves → 189k pairwise
+// decisions observed) this is called once per decision. An earlier
+// implementation read the whole file, concatenated the new entry,
+// wrote to a temp, and renamed — O(file-size) per append. On a
+// 45 MB decisions.yaml that's ~22 MB of avg-read per call × 189k
+// calls ≈ 4 TB of I/O, which alone accounted for most of a 2h15m
+// build's wall-clock time.
+//
+// Durability guarantees:
+//
+//   - First call (file doesn't exist): writes header + first entry
+//     via temp+rename. The initial file materialises atomically —
+//     a crash during the first call leaves either no file or a
+//     well-formed single-entry file.
+//
+//   - Subsequent calls: best-effort `appendFileSync`. Each call is
+//     a single `write(2)` syscall of the serialised entry. In the
+//     common case the kernel writes the full buffer atomically,
+//     but this is NOT a formal durability contract for regular
+//     files the way temp+rename is:
+//
+//       * A crash mid-write can leave a torn trailing entry. On
+//         recovery the YAML parser will reject the truncated
+//         scalar; the audit log is recoverable by removing the
+//         last partial `- ...` block and re-running the op.
+//
+//       * Node's `writeSync`/`appendFileSync` MAY split a large
+//         buffer into multiple `write(2)` calls. Typical entry
+//         blocks here are ~200 bytes — well under typical
+//         single-write thresholds — but there is no portable
+//         small-write atomicity guarantee for regular files
+//         (POSIX's PIPE_BUF atomicity applies to pipes/FIFOs, not
+//         disk files).
+//
+//       * On Windows, `appendFileSync` has no equivalent of
+//         POSIX O_APPEND kernel serialisation under concurrent
+//         writers from multiple processes. This phase runs
+//         single-process though, so cross-process interleaving
+//         is not a concern in practice.
+//
+// The decision log is an audit trail, not a reproducibility
+// artefact — lost tail bytes on a crash are annoying but
+// recoverable, and the output tree's byte-reproducibility is
+// independent of this file's exact contents. If stronger
+// durability is needed for a specific use case, callers should
+// batch-flush to a temp file and rename on phase boundaries.
+//
+// Cost per append: O(entry-size), not O(file-size). ~200 µs vs
+// ~20 ms on a big log — a 100× speedup at scale.
 export function appendDecision(wikiRoot, entry) {
   validate(entry);
   const path = decisionLogPath(wikiRoot);
   mkdirSync(dirname(path), { recursive: true });
   const block = emitEntry(entry) + "\n";
-  let payload;
   if (!existsSync(path)) {
-    payload =
+    // First call: lay down the header atomically via temp+rename so
+    // a crash mid-creation doesn't leave an empty or orphan file.
+    const payload =
       "# skill-llm-wiki tiered-AI decision log (append-only)\n" +
       "version: 1\n" +
       "entries:\n" +
       block;
-  } else {
-    const existing = readFileSync(path, "utf8");
-    const prefix = existing.endsWith("\n") ? existing : existing + "\n";
-    payload = prefix + block;
+    const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
+    writeFileSync(tmp, payload, "utf8");
+    renameSync(tmp, path);
+    return;
   }
-  const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
-  writeFileSync(tmp, payload, "utf8");
-  renameSync(tmp, path);
+  // Subsequent appends: O(entry-size) via POSIX append. Peek at
+  // the last byte first: if the existing file doesn't end in a
+  // newline (manual edit, prior torn-tail truncation, or a
+  // creative crash), appending directly would concatenate the new
+  // entry onto the previous line and produce invalid YAML. Prefix
+  // a newline in that case — a leading blank line inside the
+  // entries[] list is harmless and parses fine.
+  const needsLeadingNewline = !endsWithNewline(path);
+  appendFileSync(path, needsLeadingNewline ? "\n" + block : block, "utf8");
+}
+
+// Check the last byte of the decision log without reading the
+// whole file. Uses a small anchored read rather than `readFileSync`
+// so the hot append path still pays O(1) regardless of log size.
+// An unreadable file (ENOENT, EACCES, race window) is treated as
+// "already newline-terminated" so the caller doesn't double up on
+// leading newlines on a transient read error.
+function endsWithNewline(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    const { size } = fstatSync(fd);
+    if (size === 0) return true; // empty file has no trailing content to collide
+    const buf = Buffer.alloc(1);
+    readSync(fd, buf, 0, 1, size - 1);
+    return buf[0] === 0x0a; // 0x0a == '\n'
+  } catch {
+    return true;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
 }
 
 // Convenience helper for cluster-NEST outcomes. The convergence

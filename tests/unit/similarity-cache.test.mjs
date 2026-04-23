@@ -19,9 +19,10 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  CACHE_SHARD_PREFIX_LEN,
   cacheDir,
   cacheEntryPath,
   cacheKey,
@@ -61,6 +62,71 @@ test("cacheKey: empty hash throws", () => {
 test("cacheKey: filename-safe (no slashes or special chars)", () => {
   const k = cacheKey("sha256:a/b\\c:d", "sha256:e f g");
   assert.match(k, /^[a-f0-9]{32}$/);
+});
+
+test("cacheEntryPath: entries are sharded by the CACHE_SHARD_PREFIX_LEN-char prefix", () => {
+  const wiki = tmpWiki("shard-layout");
+  try {
+    const path = cacheEntryPath(wiki, "sha256:a", "sha256:b");
+    const key = cacheKey("sha256:a", "sha256:b");
+    // Use the exported constant so the test self-updates when the
+    // shard width is tuned — hardcoding would silently stop
+    // enforcing the layout invariant if `CACHE_SHARD_PREFIX_LEN`
+    // ever changes.
+    const expectedShard = key.slice(0, CACHE_SHARD_PREFIX_LEN);
+    const expectedRest = key.slice(CACHE_SHARD_PREFIX_LEN);
+    // Path format: <cacheDir>/<shard>/<rest>.json
+    const expectedPath = join(cacheDir(wiki), expectedShard, expectedRest + ".json");
+    assert.equal(path, expectedPath);
+    // The filename's basename keeps the non-shard portion of the
+    // 32-char discriminant, so the full key is preserved across
+    // shard-dir + filename.
+    assert.equal(basename(path), expectedRest + ".json");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("writeCached + readCached across many pairs: shards distribute evenly", () => {
+  const wiki = tmpWiki("shard-distribute");
+  try {
+    // Write 200 distinct pairs; 2-hex sharding gives 256 buckets so
+    // the 200 entries should end up spread across many shards, not
+    // piled into one.
+    for (let i = 0; i < 200; i++) {
+      writeCached(wiki, `sha256:pair-${i}-a`, `sha256:pair-${i}-b`, {
+        tier: 0,
+        similarity: i / 200,
+        decision: "same",
+      });
+    }
+    const dir = cacheDir(wiki);
+    const shards = [];
+    for (const name of readdirSync(dir)) {
+      const shardPath = join(dir, name);
+      try {
+        const entries = readdirSync(shardPath).filter((f) => f.endsWith(".json"));
+        if (entries.length > 0) shards.push({ shard: name, count: entries.length });
+      } catch {
+        /* skip non-dir */
+      }
+    }
+    // At 200 entries into 256 shards under uniform hashing the
+    // average entries-per-used-shard is ~1.1-1.3 (collision count
+    // follows a Poisson-like distribution). Assert that we didn't
+    // collapse everything into one shard.
+    assert.ok(shards.length >= 50, `expected wide distribution across shards, got ${shards.length}`);
+    const maxCount = Math.max(...shards.map((s) => s.count));
+    assert.ok(maxCount <= 10, `one shard held ${maxCount} entries — distribution suspiciously lumpy`);
+    // Round-trip a sample: every written pair must still read back.
+    for (let i = 0; i < 200; i += 37) {
+      const got = readCached(wiki, `sha256:pair-${i}-a`, `sha256:pair-${i}-b`);
+      assert.ok(got, `pair ${i} must round-trip`);
+      assert.equal(got.similarity, i / 200);
+    }
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
 });
 
 test("readCached: miss on a fresh wiki returns null", () => {
@@ -113,9 +179,10 @@ test("readCached: symmetric lookup after asymmetric write", () => {
 test("readCached: corrupt JSON is treated as miss, not an exception", () => {
   const wiki = tmpWiki("corrupt");
   try {
-    const dir = cacheDir(wiki);
-    mkdirSync(dir, { recursive: true });
     const path = cacheEntryPath(wiki, "sha256:x", "sha256:y");
+    // Shard subdir is part of the path now — create it so the
+    // direct writeFileSync below doesn't fail ENOENT.
+    mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, "{not valid json");
     const got = readCached(wiki, "sha256:x", "sha256:y");
     assert.equal(got, null);
@@ -127,9 +194,8 @@ test("readCached: corrupt JSON is treated as miss, not an exception", () => {
 test("readCached: file missing required fields is treated as miss", () => {
   const wiki = tmpWiki("missing-fields");
   try {
-    const dir = cacheDir(wiki);
-    mkdirSync(dir, { recursive: true });
     const path = cacheEntryPath(wiki, "sha256:x", "sha256:y");
+    mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, JSON.stringify({ tier: 0 })); // missing similarity + decision
     const got = readCached(wiki, "sha256:x", "sha256:y");
     assert.equal(got, null);
@@ -146,12 +212,21 @@ test("writeCached: atomic — no leftover temp files after success", () => {
       similarity: 1,
       decision: "same",
     });
-    const files = readdirSync(cacheDir(wiki));
-    // Exactly one .json file, no .tmp.* residue.
-    const jsons = files.filter((f) => f.endsWith(".json"));
-    const tmps = files.filter((f) => f.includes(".tmp."));
-    assert.equal(jsons.length, 1);
-    assert.equal(tmps.length, 0);
+    // Sharded layout: one .json file lives under
+    // `<cacheDir>/<shard>/<rest>.json`. Walk every shard dir and
+    // collect all entries for the assertion.
+    const dir = cacheDir(wiki);
+    let jsons = 0;
+    let tmps = 0;
+    for (const name of readdirSync(dir)) {
+      const shardPath = join(dir, name);
+      for (const entry of readdirSync(shardPath)) {
+        if (entry.endsWith(".json")) jsons++;
+        if (entry.includes(".tmp.")) tmps++;
+      }
+    }
+    assert.equal(jsons, 1);
+    assert.equal(tmps, 0);
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }

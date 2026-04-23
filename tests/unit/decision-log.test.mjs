@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -31,6 +31,51 @@ const sample = {
   decision: "same",
   reason: "high covers overlap",
 };
+
+test("appendDecision: tolerates a log that doesn't end in a newline (no concat corruption)", () => {
+  // Simulate a tampered / torn log: header + one valid entry, but
+  // the final byte is a non-newline (a `:` from a half-written
+  // `confidence_band:` field, say). A naive appendFileSync would
+  // concatenate the next entry's `- op_id:` onto the previous
+  // line and produce invalid YAML. The guard pre-checks the last
+  // byte and prepends a newline if missing.
+  const wiki = tmpWiki("no-trailing-newline");
+  try {
+    const llmwikiDir = join(wiki, ".llmwiki");
+    mkdirSync(llmwikiDir, { recursive: true });
+    const path = join(llmwikiDir, "decisions.yaml");
+    // Plant a valid log that's been chopped off mid-entry.
+    writeFileSync(
+      path,
+      "# skill-llm-wiki tiered-AI decision log (append-only)\n" +
+        "version: 1\n" +
+        "entries:\n" +
+        "- op_id: old-op\n" +
+        "  operator: MERGE\n" +
+        "  sources:\n" +
+        "    - a\n" +
+        "    - b\n" +
+        "  tier_used: 0\n" +
+        "  similarity: 0.5\n" +
+        "  confidence_band:", // <-- truncated mid-line, no \n
+      "utf8",
+    );
+    // Append a normal entry and verify it lands on a fresh line.
+    appendDecision(wiki, sample);
+    const after = readFileSync(path, "utf8");
+    // Must NOT contain the concatenation `confidence_band:- op_id:`
+    assert.ok(
+      !after.includes("confidence_band:- op_id:"),
+      `appended entry must not concatenate onto the truncated line; got tail ${JSON.stringify(
+        after.slice(-200),
+      )}`,
+    );
+    // Sanity: the new entry shows up on its own line.
+    assert.match(after, /\n- op_id: rebuild-20260415-120000-abc\n/);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
 
 test("appendDecision + readDecisions: round-trip single entry", () => {
   const wiki = tmpWiki("round-trip");

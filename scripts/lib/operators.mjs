@@ -40,6 +40,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
+import pRetry, { AbortError } from "p-retry";
+import pTimeout, { TimeoutError } from "p-timeout";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
 import { collectFrontmatterOnly, readFrontmatterStreaming } from "./chunk.mjs";
 import { listChildren, rebuildAllIndices } from "./indices.mjs";
@@ -171,6 +173,48 @@ async function applyLift(wikiRoot, dir, leaf) {
 // says "same". Apply: produce a merged entry carrying the union
 // of covers[] (deduped), the more general focus, both source ids as
 // aliases, and delete the second source leaf.
+// Batch size for parallel pairwise `decide()` calls inside
+// `detectMerge`. Each pair is independent (no cross-pair state;
+// tiered.decide() reads/writes its own cache file + appends one
+// decision-log entry), so an O(N²) sequential loop can be turned
+// into ceil(N²/BATCH) sequential batches of concurrent awaits.
+// 32 is empirically chosen to saturate I/O without flooding the
+// kernel's open-file table on flat similarity-cache layouts.
+// Larger batches don't help because most of decide()'s latency is
+// filesystem-bound, and the bottleneck is dir-lookup contention
+// on the cache dir, not the number of in-flight readers.
+export const DETECT_MERGE_PAIR_BATCH_SIZE = 32;
+
+// Per-pair timeout for `decide()` calls wrapped with `pTimeout`.
+// A healthy pair resolves in <200 ms (cache hit) or <2 s (Tier 1
+// inference cold). 30 s is a 15× safety margin over the worst
+// realistic case — catches genuine hangs (stuck model load, NFS
+// mount stall, runaway fs write) without false-positiving on a
+// slow-but-progressing embed call. When the timeout fires the
+// inner `decide()` call is still running on the event loop; it
+// will eventually settle, but its result is discarded. For a
+// 178k-pair sweep that's negligible overhead.
+export const DETECT_MERGE_PAIR_TIMEOUT_MS = 30_000;
+
+// Retry budget per pair. Most "retryable" failures are transient
+// fs glitches (EAGAIN on a contested shard dir, a partial write
+// that parse rejected) — three attempts total (1 initial + 2
+// retries) with 500 ms → 5 s exponential backoff handles those
+// cleanly. Only timeouts (wrapped as AbortError) are explicitly
+// non-retryable; all other errors (including deterministic
+// validation errors from `decide()` — unknown qualityMode, missing
+// ctx fields, etc.) currently consume the full retry budget. That
+// wastes a few seconds on what would be a repeat failure, but
+// classifying decide()'s error surface would require pattern-
+// matching on error messages or a dedicated error-code layer, and
+// the waste in practice is small vs the correctness risk of
+// misclassifying a legitimate transient failure. Acceptable
+// trade-off for now; a targeted shouldRetry() refinement is
+// tracked as a follow-up.
+export const DETECT_MERGE_PAIR_RETRIES = 2;
+export const DETECT_MERGE_PAIR_RETRY_MIN_MS = 500;
+export const DETECT_MERGE_PAIR_RETRY_MAX_MS = 5_000;
+
 export async function detectMerge(wikiRoot, ctx) {
   const proposals = [];
   const dirs = walkDirs(wikiRoot);
@@ -184,19 +228,136 @@ export async function detectMerge(wikiRoot, ctx) {
     // between 10⁹ and 10⁶ operations.
     const corpus = leaves.map((l) => l.data);
     const model = buildComparisonModel(corpus);
-    for (let i = 0; i < leaves.length; i++) {
-      for (let j = i + 1; j < leaves.length; j++) {
-        const a = leaves[i];
-        const b = leaves[j];
-        const r = await decide(a.data, b.data, corpus, {
-          wikiRoot,
-          opId: ctx.opId,
-          operator: "MERGE",
-          qualityMode: ctx.qualityMode,
-          interactive: ctx.interactive,
-          tier2Handler: ctx.tier2Handler,
-          precomputedModel: model,
-        });
+    // Stream pairs in batches without ever materialising the full
+    // O(N²) pair list. The outer/inner (i, j) indices advance
+    // monotonically; once a batch of DETECT_MERGE_PAIR_BATCH_SIZE
+    // pairs is ready we run them concurrently, drain results in
+    // deterministic order, and continue. Memory stays O(batch
+    // size) instead of O(N²). For a flat 600-leaf directory the
+    // pre-allocation would have been ~180k pair objects at ~200
+    // bytes each ≈ 36 MB — not fatal but wasteful when all we need
+    // is a rolling 32-pair window.
+    //
+    // Reliability: each `decide()` call is wrapped with
+    // `pTimeout` (per-call deadline) + `pRetry` (transient retry
+    // with exponential backoff). The outer batch uses
+    // `Promise.allSettled` so a pair that exhausts retries logs
+    // and skips instead of aborting the whole batch — the previous
+    // `Promise.all` semantic would have discarded every
+    // successfully-completed pair alongside the one failure.
+    // Timeout is non-retryable: a `TimeoutError` is re-thrown as
+    // `AbortError` so pRetry gives up immediately on the first
+    // deadline hit. Rationale: the underlying `decide()` call is
+    // still running on the event loop when pTimeout fires and may
+    // still write its cache entry + decision log. A retry would
+    // run a second `decide()` for the same pair and duplicate
+    // those side effects. Fail-fast on timeout keeps the write
+    // footprint to one cache/log entry per pair, which matters for
+    // post-run auditability. Transient errors (EAGAIN, partial
+    // writes, parse rejects) still retry up to
+    // `DETECT_MERGE_PAIR_RETRIES` times with backoff.
+    //
+    // Determinism: each batch's pairs are processed in the order
+    // they were generated (pure i-ascending, j-ascending), and the
+    // within-batch allSettled[] preserves that order via positional
+    // result semantics. Cross-batch ordering is preserved by
+    // draining each batch before advancing.
+    const BATCH = DETECT_MERGE_PAIR_BATCH_SIZE;
+    const decideCtx = {
+      wikiRoot,
+      opId: ctx.opId,
+      operator: "MERGE",
+      qualityMode: ctx.qualityMode,
+      interactive: ctx.interactive,
+      tier2Handler: ctx.tier2Handler,
+      precomputedModel: model,
+    };
+    const pending = [];
+    let failureCount = 0;
+    const decideWithGuards = (a, b) =>
+      pRetry(
+        async () => {
+          try {
+            return await pTimeout(decide(a.data, b.data, corpus, decideCtx), {
+              milliseconds: DETECT_MERGE_PAIR_TIMEOUT_MS,
+              message:
+                `detectMerge: decide() timed out after ` +
+                `${DETECT_MERGE_PAIR_TIMEOUT_MS}ms for pair ` +
+                `(${a.data.id ?? "?"} ↔ ${b.data.id ?? "?"})`,
+            });
+          } catch (err) {
+            // Convert timeouts into non-retryable AbortErrors. The
+            // underlying `decide()` call is still running on the
+            // event loop when pTimeout rejects — it will eventually
+            // settle and may still write the similarity-cache entry
+            // AND append a decision-log entry for this pair. Running
+            // a retry attempt after that would trigger a SECOND
+            // `decide()` for the same pair, doubling the cache writes
+            // and decision-log entries (on the happy-if-slow path)
+            // or doubling the timeout cost (on the stuck path).
+            // Treating timeouts as fail-fast skips the pair cleanly
+            // so the only visible residue is whatever the dangling
+            // decide() eventually writes — one cache entry, one log
+            // entry, never amplified. True cancellation would
+            // require an AbortSignal plumbed through decide →
+            // similarity-cache → embeddings, which is a bigger
+            // refactor; the non-retry shortcut is the honest
+            // trade-off for this release.
+            if (err instanceof TimeoutError) throw new AbortError(err);
+            throw err;
+          }
+        },
+        {
+          retries: DETECT_MERGE_PAIR_RETRIES,
+          minTimeout: DETECT_MERGE_PAIR_RETRY_MIN_MS,
+          maxTimeout: DETECT_MERGE_PAIR_RETRY_MAX_MS,
+          onFailedAttempt: (err) => {
+            // Single-line breadcrumb per failure. Quiet-but-visible
+            // — an operator inspecting a slow run should SEE the
+            // retries happening rather than wonder why a batch
+            // ended up with a few skipped pairs.
+            process.stderr.write(
+              `[detectMerge] retry ${err.attemptNumber}/${err.retriesLeft + err.attemptNumber}` +
+                ` pair (${a.data.id ?? "?"} ↔ ${b.data.id ?? "?"}): ` +
+                `${err.message}\n`,
+            );
+          },
+        },
+      );
+    const flush = async () => {
+      if (pending.length === 0) return;
+      const settled = await Promise.allSettled(
+        pending.map(({ a, b }) => decideWithGuards(a, b)),
+      );
+      for (let k = 0; k < settled.length; k++) {
+        const outcome = settled[k];
+        const { a, b } = pending[k];
+        if (outcome.status === "rejected") {
+          failureCount++;
+          const reason = outcome.reason;
+          // Timeout path: decideWithGuards converts `TimeoutError`
+          // into `AbortError` so pRetry skips the pair
+          // immediately (see the note in decideWithGuards on why
+          // re-running decide() after a timeout would duplicate
+          // side effects). At this point `reason` is therefore an
+          // AbortError whose originalError is the TimeoutError —
+          // unwrap to distinguish "timed out and bailed" from
+          // "exhausted retries on a transient error". The phrasing
+          // in the breadcrumb matters for operators grepping logs
+          // after a slow run.
+          const original = reason?.originalError;
+          const isTimeout =
+            reason instanceof TimeoutError || original instanceof TimeoutError;
+          const kind = isTimeout ? "timeout" : "error";
+          const verb = isTimeout ? "aborted" : "exhausted retries";
+          const msg = (isTimeout ? original?.message : reason?.message) ?? reason;
+          process.stderr.write(
+            `[detectMerge] pair (${a.data.id ?? "?"} ↔ ${b.data.id ?? "?"}) ` +
+              `${verb} (${kind}): ${msg}\n`,
+          );
+          continue;
+        }
+        const r = outcome.value;
         if (r.decision === "same") {
           proposals.push({
             operator: "MERGE",
@@ -207,6 +368,19 @@ export async function detectMerge(wikiRoot, ctx) {
           });
         }
       }
+      pending.length = 0;
+    };
+    for (let i = 0; i < leaves.length; i++) {
+      for (let j = i + 1; j < leaves.length; j++) {
+        pending.push({ a: leaves[i], b: leaves[j] });
+        if (pending.length >= BATCH) await flush();
+      }
+    }
+    await flush(); // drain the tail
+    if (failureCount > 0) {
+      process.stderr.write(
+        `[detectMerge] finished ${dir}: ${failureCount} pair(s) skipped after exhausting retries (or on timeout)\n`,
+      );
     }
   }
   return proposals;
