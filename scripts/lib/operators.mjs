@@ -128,11 +128,24 @@ const PRIORITY = {
 // Detection: a non-root directory that contains exactly one leaf
 // file and no indexed subdirs. Apply: move the leaf up one level,
 // delete the now-empty folder.
+//
+// X.11 constraint: LIFT refuses to land a leaf at the wiki root
+// (`dirname(dir) === wikiRoot`). The root-containment invariant
+// forbids non-index leaves at depth 0, and without this guard LIFT +
+// X.11 root-containment (Phase 4.4.5) would oscillate forever on
+// single-member subcategories that X.11 itself creates for outliers.
+// Single-member subcategories
+// produced by X.11 are a valid transient end state — they stay until
+// future builds accrete topically-adjacent leaves that make the
+// cluster worth merging up. Flatten-to-root is the only direction
+// LIFT is forbidden; every deeper single-child passthrough is still
+// fair game.
 export function detectLift(wikiRoot) {
   const proposals = [];
   const dirs = walkDirs(wikiRoot);
   for (const dir of dirs) {
     if (dir === wikiRoot) continue;
+    if (dirname(dir) === wikiRoot) continue;
     const { leaves, subdirs } = listChildren(dir);
     if (leaves.length === 1 && subdirs.length === 0) {
       const leaf = leaves[0];

@@ -85,12 +85,17 @@ function writeIndex(dir, id, { authored = "", extras = {} } = {}) {
 // ── LIFT ─────────────────────────────────────────────────────────────
 
 test("detectLift: single-child folder yields a LIFT proposal", () => {
+  // Pathology lives at depth 2 so LIFT targets depth 1 (non-root) —
+  // X.11 forbids LIFT-to-root, so the LIFT candidate has to sit
+  // deeper than directly under wikiRoot for a proposal to emit.
   const wiki = tmpWiki("lift-basic");
   try {
     writeIndex(wiki, "root");
-    mkdirSync(join(wiki, "only-child"));
-    writeIndex(join(wiki, "only-child"), "only-child");
-    writeLeaf(join(wiki, "only-child", "lonely.md"), {
+    mkdirSync(join(wiki, "outer"));
+    writeIndex(join(wiki, "outer"), "outer");
+    mkdirSync(join(wiki, "outer", "only-child"));
+    writeIndex(join(wiki, "outer", "only-child"), "only-child");
+    writeLeaf(join(wiki, "outer", "only-child", "lonely.md"), {
       id: "lonely",
       type: "primary",
       depth_role: "leaf",
@@ -150,31 +155,28 @@ test("detectLift: root directory is never a LIFT target", () => {
   }
 });
 
-test("LIFT apply: leaf lifted to wiki root has parents: [index.md]", async () => {
-  // Regression for the depth-1 parent-path bug: lifting a leaf
-  // from `wiki/only-child/` up to `wiki/` should leave the leaf's
-  // `parents` as `[index.md]` (sibling form), not `[../index.md]`
-  // (escapes above the wiki root).
-  const wiki = tmpWiki("lift-parents-root");
+test("detectLift: depth-1 subcategory is never a LIFT target (X.11 invariant)", () => {
+  // The X.11 root-containment invariant forbids leaves at the wiki
+  // root, so LIFT must refuse to land a leaf at depth 0. A single-leaf
+  // subcategory directly under the wiki root stays put (it's the
+  // `<slug>/<leaf>.md` terminal shape X.11 produces for outliers).
+  const wiki = tmpWiki("lift-no-depth1");
   try {
     writeIndex(wiki, "root");
     mkdirSync(join(wiki, "only-child"));
     writeIndex(join(wiki, "only-child"), "only-child");
-    writeLeaf(join(wiki, "only-child", "up-to-root.md"), {
-      id: "up-to-root",
+    writeLeaf(join(wiki, "only-child", "leaf.md"), {
+      id: "leaf",
       type: "primary",
       depth_role: "leaf",
-      focus: "to be lifted",
-      parents: ["../index.md"],
+      focus: "would-be LIFT target blocked by X.11",
+      parents: ["index.md"],
     });
-    const [proposal] = detectLift(wiki);
-    await proposal.apply({ wikiRoot: wiki, opId: "op-1" });
-    const lifted = readFileSync(join(wiki, "up-to-root.md"), "utf8");
-    const { data } = parseFrontmatter(lifted);
-    assert.deepEqual(
-      data.parents,
-      ["index.md"],
-      `lifted leaf at wiki root should have parents [index.md], got ${JSON.stringify(data.parents)}`,
+    const proposals = detectLift(wiki);
+    assert.equal(
+      proposals.length,
+      0,
+      `no LIFT proposal for depth-1 subcategory (would violate X.11), got ${proposals.length}`,
     );
   } finally {
     rmSync(wiki, { recursive: true, force: true });
@@ -211,22 +213,34 @@ test("LIFT apply: leaf lifted from depth 2 to depth 1 has parents: [../index.md]
 });
 
 test("LIFT apply: moves the leaf up, removes the empty folder", async () => {
+  // LIFT target lives at depth 2 so the lift destination is depth 1
+  // (not the wiki root — the X.11 invariant forbids LIFT-to-root).
   const wiki = tmpWiki("lift-apply");
   try {
     writeIndex(wiki, "root");
-    mkdirSync(join(wiki, "only-child"));
-    writeIndex(join(wiki, "only-child"), "only-child");
-    writeLeaf(join(wiki, "only-child", "lonely.md"), {
+    mkdirSync(join(wiki, "outer"));
+    writeIndex(join(wiki, "outer"), "outer");
+    mkdirSync(join(wiki, "outer", "only-child"));
+    writeIndex(join(wiki, "outer", "only-child"), "only-child");
+    writeLeaf(join(wiki, "outer", "only-child", "lonely.md"), {
       id: "lonely",
       type: "primary",
       depth_role: "leaf",
       focus: "a lonely leaf",
       parents: ["../index.md"],
     });
-    const [proposal] = detectLift(wiki);
+    const proposals = detectLift(wiki);
+    const proposal = proposals.find((p) => p.sources[1].endsWith("only-child"));
+    assert.ok(proposal, "should find a LIFT proposal for outer/only-child");
     await proposal.apply({ wikiRoot: wiki, opId: "op-1" });
-    assert.ok(existsSync(join(wiki, "lonely.md")), "leaf moved to root");
-    assert.ok(!existsSync(join(wiki, "only-child")), "folder removed");
+    assert.ok(
+      existsSync(join(wiki, "outer", "lonely.md")),
+      "leaf moved up to outer/",
+    );
+    assert.ok(
+      !existsSync(join(wiki, "outer", "only-child")),
+      "passthrough folder removed",
+    );
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }
@@ -898,12 +912,16 @@ test("runConvergence: writes metric_trajectory to decisions.yaml even for 0 appl
 });
 
 test("runConvergence: applies LIFT then terminates", async () => {
+  // 2-level setup so LIFT fires at depth 2 → depth 1 (the X.11
+  // invariant forbids depth-1 → root).
   const wiki = tmpWiki("converge-lift");
   try {
     writeIndex(wiki, "root");
-    mkdirSync(join(wiki, "alone"));
-    writeIndex(join(wiki, "alone"), "alone");
-    writeLeaf(join(wiki, "alone", "child.md"), {
+    mkdirSync(join(wiki, "outer"));
+    writeIndex(join(wiki, "outer"), "outer");
+    mkdirSync(join(wiki, "outer", "alone"));
+    writeIndex(join(wiki, "outer", "alone"), "alone");
+    writeLeaf(join(wiki, "outer", "alone", "child.md"), {
       id: "child",
       type: "primary",
       depth_role: "leaf",
@@ -917,8 +935,8 @@ test("runConvergence: applies LIFT then terminates", async () => {
     assert.ok(r.applied.length >= 1);
     const liftApplied = r.applied.find((a) => a.operator === "LIFT");
     assert.ok(liftApplied);
-    assert.ok(existsSync(join(wiki, "child.md")));
-    assert.ok(!existsSync(join(wiki, "alone")));
+    assert.ok(existsSync(join(wiki, "outer", "child.md")));
+    assert.ok(!existsSync(join(wiki, "outer", "alone")));
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }
@@ -962,9 +980,11 @@ test("runConvergence: commitBetweenIterations is invoked for each applied op", a
   const wiki = tmpWiki("converge-commit");
   try {
     writeIndex(wiki, "root");
-    mkdirSync(join(wiki, "alone"));
-    writeIndex(join(wiki, "alone"), "alone");
-    writeLeaf(join(wiki, "alone", "child.md"), {
+    mkdirSync(join(wiki, "outer"));
+    writeIndex(join(wiki, "outer"), "outer");
+    mkdirSync(join(wiki, "outer", "alone"));
+    writeIndex(join(wiki, "outer", "alone"), "alone");
+    writeLeaf(join(wiki, "outer", "alone", "child.md"), {
       id: "child",
       type: "primary",
       depth_role: "leaf",

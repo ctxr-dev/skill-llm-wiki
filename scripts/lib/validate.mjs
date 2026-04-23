@@ -133,6 +133,28 @@ export function validateWiki(wikiRoot) {
         }
       }
     }
+
+    // LEAF-AT-WIKI-ROOT — the wiki root must hold only `index.md`
+    // plus subdirectories. Any `.md` file at the wiki root other
+    // than `index.md` itself violates the invariant, regardless of
+    // what its frontmatter `type:` claims. Keying off path rather
+    // than `data.type` catches the edge case of a hand-authored
+    // `foo.md` at root declared as `type: index` — it's still a
+    // loose root file the navigational model forbids. The rule is
+    // navigational: Claude reading `<root>/index.md` and following
+    // its `entries[]` should reach every leaf via a
+    // semantically-named category; loose root files bypass that
+    // mental model and bloat the top-level index.
+    const absDir = dirname(e.absolute);
+    const absName = basename(e.absolute);
+    if (absDir === wikiRoot && absName !== "index.md") {
+      push(
+        "error",
+        "LEAF-AT-WIKI-ROOT",
+        e.absolute,
+        `non-index markdown file at wiki root — must live in a subcategory (run 'fix' to contain)`,
+      );
+    }
   }
 
   return findings;
