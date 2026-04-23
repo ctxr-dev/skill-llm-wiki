@@ -78,7 +78,31 @@ import { appendMetricTrajectory, appendNestDecision } from "./decision-log.mjs";
 // termination. The methodology's convergence argument proves it
 // halts, but we still cap defensively in case two operators
 // interact pathologically.
-const MAX_CONVERGENCE_ITERATIONS = 20;
+//
+// Why 200, not 20: the architecture applies at most ONE PAIRWISE
+// operator (DESCEND/LIFT/MERGE) per outer iteration, and pairwise
+// ops always win priority over the cluster-NEST fallback
+// (`tryClusterNestIteration` runs only when no pairwise op fires
+// in a given iteration — see the while loop in `runConvergence`).
+// Note that once cluster-NEST IS reached, it can apply multiple
+// NEST commits in that single pass (multi-NEST selection inside
+// `tryClusterNestIteration`); the scarcity is at the outer
+// iteration level, not per-NEST. On a 596-leaf hand-authored
+// corpus observed in the field (skill-code-review/reviewers.src),
+// Tier 1 similarity produces ~20 viable MERGE pairs; the old cap
+// of 20 iterations burned entirely on those MERGEs and cluster
+// NEST — where the Phase X.10 coarse-partition emits ~75
+// top-level NESTs — never got a chance to run even once. Result:
+// the downstream balance phase saw a 576-leaf root, tried linear
+// carving, hit its own 20-iter cap, and the whole build rolled
+// back.
+//
+// 200 gives a typical large corpus (20 pairwise ops + ~75 cluster
+// NESTs + some follow-up MERGEs after NESTs reveal new overlaps)
+// plenty of headroom. Small wikis exit early via the "no ops
+// fired this iteration" break and never approach the cap — so the
+// raise is effectively free for them.
+const MAX_CONVERGENCE_ITERATIONS = 200;
 
 // Each operator returns an array of `Proposal` objects describing
 // a change to apply. The loop priority-orders proposals, applies
