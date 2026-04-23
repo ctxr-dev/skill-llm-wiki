@@ -8,16 +8,25 @@
 // search the tree for the leaf's current path.
 //
 // `findLeafByName(wikiRoot, name)` walks the wiki (skipping dotfiles)
-// and returns the absolute path of the first `.md` file whose basename
-// matches `name`, or `null` if no such file exists. Stack-based DFS
-// avoids recursion depth limits on deep trees. Dotfile skip matches
-// the blanket rule used by `listChildren`, `buildWikiForbiddenIndex`,
-// `collectEntryPaths`, and every other wiki-walker in this codebase.
+// and returns the absolute path of the first `.md` leaf file whose
+// basename matches `name`, or `null` if no such file exists. The
+// `.md` extension check is enforced so the helper can't accidentally
+// return a fixture asset or a build artefact that happens to share
+// a basename with a leaf (`foo.md` wanted, `foo.json` returned).
+// Stack-based DFS avoids recursion depth limits on deep trees.
+// Dotfile skip matches the blanket rule used by `listChildren`,
+// `buildWikiForbiddenIndex`, `collectEntryPaths`, and every other
+// wiki-walker in this codebase.
 
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 
 export function findLeafByName(wikiRoot, name) {
+  if (!name.endsWith(".md")) {
+    throw new Error(
+      `findLeafByName: expected a .md filename, got ${JSON.stringify(name)}`,
+    );
+  }
   const stack = [wikiRoot];
   while (stack.length) {
     const d = stack.pop();
@@ -31,7 +40,9 @@ export function findLeafByName(wikiRoot, name) {
       if (e.name.startsWith(".")) continue;
       const full = join(d, e.name);
       if (e.isDirectory()) stack.push(full);
-      else if (e.isFile() && e.name === name) return full;
+      else if (e.isFile() && e.name === name && e.name.endsWith(".md")) {
+        return full;
+      }
     }
   }
   return null;

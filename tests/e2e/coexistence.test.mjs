@@ -271,7 +271,8 @@ test("hostile core.autocrlf=input in user repo does not normalise CRLF in wiki c
     );
     assert.equal(lsTree.status, 0, `git ls-tree failed: ${lsTree.stderr}`);
     const alphaPath = lsTree.stdout
-      .split("\n")
+      .trim()
+      .split(/\r?\n/)
       .find((line) => line.endsWith("/crlf-alpha.md") || line === "crlf-alpha.md");
     assert.ok(alphaPath, `crlf-alpha.md not found in tree:\n${lsTree.stdout}`);
     const show = spawnSync(
