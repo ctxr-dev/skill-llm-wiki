@@ -19,6 +19,7 @@ import {
   parseFrontmatter,
   renderFrontmatter,
 } from "../../scripts/lib/frontmatter.mjs";
+import { generateDeterministicSlug } from "../../scripts/lib/cluster-detect.mjs";
 import { runRootContainment } from "../../scripts/lib/root-containment.mjs";
 
 function tmpWiki(tag) {
@@ -176,11 +177,16 @@ test("runRootContainment: slug collision with existing subcategory → fallback"
   const wiki = tmpWiki("collide");
   try {
     writeIndex(wiki, "index.md", "root");
-    // Pre-create a subcategory whose name is likely to collide with the
-    // generated slug. The outlier is about "locale" and nothing else, so
-    // the natural slug candidate is "locale" or similar. We plant an
-    // existing "locale" subcat to force collision-resolver to use a
-    // "-group" / "-group-N" fallback.
+    // Pre-create a subcategory whose basename WILL match the slug the
+    // outlier generates, forcing the collision-resolver's
+    // `-group` / `-group-N` fallback. The outlier's frontmatter is
+    // tightly scoped to a single token ("locale") across focus /
+    // covers / tags / keyword_matches, so `generateDeterministicSlug`
+    // has no other distinguishing token to rank higher. We verify
+    // that claim by calling the slug generator directly in the
+    // arrange step BEFORE containment runs — the pre-resolution
+    // slug MUST equal the colliding value, otherwise the fallback
+    // path isn't actually being exercised.
     writeIndex(wiki, "locale/index.md", "locale", {
       focus: "locale handling existing subcategory",
       tags: ["locale"],
@@ -188,19 +194,34 @@ test("runRootContainment: slug collision with existing subcategory → fallback"
     writeLeaf(wiki, "locale/existing-leaf.md", "existing-leaf", {
       tags: ["locale"],
     });
-    writeLeaf(wiki, "locale-rtl.md", "locale-rtl", {
-      focus: "locale rtl bidi",
-      covers: ["locale rtl"],
-      tags: ["locale", "rtl"],
-      kw: ["locale", "rtl"],
+    const outlier = writeLeaf(wiki, "outlier-locale.md", "outlier-locale", {
+      focus: "locale",
+      covers: ["locale"],
+      tags: ["locale"],
+      kw: ["locale"],
     });
+    // Arrange-phase assertion: the deterministic slug on the outlier
+    // alone (no siblings corpus yet) must be exactly "locale" — the
+    // only token its frontmatter carries. If this assertion ever
+    // starts failing (e.g., because `generateDeterministicSlug`
+    // changes its token-selection heuristics), the test needs to
+    // re-pick the collision fixture rather than silently
+    // passing-by-luck.
+    const preResolvedSlug = generateDeterministicSlug([outlier], []);
+    assert.equal(
+      preResolvedSlug,
+      "locale",
+      `fixture setup: generateDeterministicSlug must produce "locale" for the test to exercise collision resolution; got ${preResolvedSlug}`,
+    );
 
     const result = await runRootContainment(wiki);
     assert.equal(result.moved, 1);
     const op = result.operations[0];
-    // The resolver MUST NOT pick "locale" (already taken). Any non-colliding
-    // slug is acceptable — the key guarantee is that a new directory was
-    // created distinct from the existing one.
+    // The resolver MUST pick something OTHER than "locale" (collides
+    // with the pre-existing subcat). Any non-colliding slug is
+    // acceptable — `resolveNestSlug`'s fallback shape is `<slug>-group`
+    // or `<slug>-group-N`; we assert only on distinctness plus
+    // reachability of the new directory.
     assert.notEqual(op.slug, "locale");
     assert.ok(existsSync(join(wiki, op.slug, "index.md")));
     // Existing "locale" subcat untouched.
@@ -274,6 +295,67 @@ test("runRootContainment: already-'../'-prefixed parent is preserved byte-identi
       leafFm.parents[1],
       "../above-root/index.md",
       "already-escaping entry preserved byte-identical (no double '../')",
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("runRootContainment: CRLF-fenced root leaf — parents[] still rewritten", async () => {
+  // `collectRootLeaves` uses `readFrontmatterStreaming` which
+  // normalises CRLF → LF on the frontmatter payload, so CRLF-fenced
+  // root leaves ARE discovered as outliers. Before the round-8 fix,
+  // `rewriteParentsAfterContainment` called `parseFrontmatter` on
+  // the raw `readFileSync(..., "utf8")` buffer — and that parser
+  // only accepts LF fences. A CRLF-fenced outlier would be moved but
+  // the parents[] rewrite would silently fail (caught by the
+  // per-file try/catch), leaving soft-parent paths one level too
+  // shallow post-move. This test pins that contract.
+  const wiki = tmpWiki("crlf");
+  try {
+    writeIndex(wiki, "index.md", "root");
+    writeIndex(wiki, "beta/index.md", "beta");
+    writeLeaf(wiki, "beta/beta-leaf.md", "beta-leaf");
+    // Hand-assemble a CRLF-fenced outlier with a non-primary soft
+    // parent pointing at beta/index.md. If the rewrite silently
+    // skipped the CRLF case, parents[1] would stay as
+    // "beta/index.md" (broken from depth 1) instead of becoming
+    // "../beta/index.md".
+    const outlierPath = join(wiki, "crlf-outlier.md");
+    const fm = [
+      "---",
+      "id: crlf-outlier",
+      "type: primary",
+      "depth_role: leaf",
+      "focus: crlf outlier focus",
+      "parents:",
+      "  - index.md",
+      "  - beta/index.md",
+      "covers:",
+      "  - crlf outlier cover",
+      "tags:",
+      "  - crlf",
+      "activation:",
+      "  keyword_matches:",
+      "    - crlf",
+      "---",
+      "",
+      "# CRLF Outlier",
+      "",
+      "body content",
+      "",
+    ].join("\r\n");
+    writeFileSync(outlierPath, fm, "utf8");
+
+    const result = await runRootContainment(wiki);
+    assert.equal(result.moved, 1, "CRLF-fenced outlier must be detected + moved");
+    const op = result.operations[0];
+    const leafFm = readFm(op.to);
+    assert.equal(leafFm.parents[0], "index.md", "primary stays same-dir");
+    assert.equal(
+      leafFm.parents[1],
+      "../beta/index.md",
+      "CRLF-fenced outlier's soft parent rewritten with '../' prefix",
     );
   } finally {
     rmSync(wiki, { recursive: true, force: true });

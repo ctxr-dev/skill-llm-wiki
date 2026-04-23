@@ -152,7 +152,7 @@ export function validateWiki(wikiRoot) {
         "error",
         "LEAF-AT-WIKI-ROOT",
         e.absolute,
-        `leaf at wiki root — must live in a subcategory (run 'fix' to contain)`,
+        `non-index markdown file at wiki root — must live in a subcategory (run 'fix' to contain)`,
       );
     }
   }

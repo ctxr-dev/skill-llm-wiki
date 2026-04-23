@@ -163,15 +163,28 @@ function collectRootSiblings(wikiRoot, excludePath) {
 // entry byte-identical instead, and let validation surface it
 // post-containment under its normal parent-path rules.
 function rewriteParentsAfterContainment(leafPath) {
-  let raw;
+  // Use `readFrontmatterStreaming` (same pattern `soft-dag.mjs` uses
+  // in its `collectAllLeaves(withBody=true)` path) rather than
+  // `readFileSync` + `parseFrontmatter(raw)`. `parseFrontmatter`
+  // only recognises an LF opening fence, so a CRLF-fenced outlier
+  // — which `collectRootLeaves` DOES include, because
+  // `readFrontmatterStreaming` normalises CRLF→LF on the
+  // frontmatter payload — would silently fail to parse here and
+  // the parents[] rewrite would be skipped. The leaf would still
+  // move, but its non-primary parent paths would be left one level
+  // too shallow (relative to the old depth-0 dir, now invalid at
+  // depth 1). Reading through the streaming helper guarantees
+  // symmetry with the `collectRootLeaves` discovery pass.
+  let captured;
   try {
-    raw = readFileSync(leafPath, "utf8");
+    captured = readFrontmatterStreaming(leafPath);
   } catch {
     return;
   }
+  if (!captured) return;
   let parsed;
   try {
-    parsed = parseFrontmatter(raw, leafPath);
+    parsed = parseFrontmatter(captured.frontmatterText, leafPath);
   } catch {
     return;
   }
@@ -190,7 +203,19 @@ function rewriteParentsAfterContainment(leafPath) {
     return "../" + p;
   });
   parsed.data.parents = rewritten;
-  writeFileSync(leafPath, renderFrontmatter(parsed.data, parsed.body), "utf8");
+  // Slice the body via the streaming helper's bodyOffset so
+  // multi-byte characters at the fence boundary can't corrupt the
+  // body. For CRLF-fenced inputs the body buffer starts with "\r\n"
+  // — normalise to LF on rewrite (the wider codebase is LF-only for
+  // on-disk output, matching `renderFrontmatter`'s always-LF
+  // emission); mixing CRLF body into LF-emitted frontmatter would
+  // produce an "\n\r\n" boundary a downstream reader would trip on.
+  const raw = readFileSync(leafPath);
+  let body = raw.slice(captured.bodyOffset).toString("utf8");
+  if (captured.lineEnding === "crlf") {
+    body = body.replace(/\r\n/g, "\n");
+  }
+  writeFileSync(leafPath, renderFrontmatter(parsed.data, body), "utf8");
 }
 
 // Write the stub `<slug>/index.md` for a newly-minted single-member
