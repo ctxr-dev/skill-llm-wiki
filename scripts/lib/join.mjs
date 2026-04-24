@@ -34,10 +34,14 @@
 // `plan.is_new_wiki` is set).
 
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
@@ -111,8 +115,45 @@ export function ingestWiki(wikiRoot) {
         continue;
       }
       if (!parsed?.data?.id) continue;
-      const raw = readFileSync(full);
-      let body = raw.slice(captured.bodyOffset).toString("utf8");
+      // Read the body starting at `captured.bodyOffset` rather than
+      // re-reading the whole file via `readFileSync(full)` — the
+      // full-file read was a needless double-I/O that loaded the
+      // frontmatter bytes twice. Use an explicit open+read+close
+      // so memory stays proportional to body size, not total file
+      // size (matters on multi-kilobyte leaves).
+      let body;
+      try {
+        const fileSize = statSync(full).size;
+        const bodyLen = Math.max(0, fileSize - captured.bodyOffset);
+        if (bodyLen === 0) {
+          body = "";
+        } else {
+          const fd = openSync(full, "r");
+          try {
+            const buf = Buffer.alloc(bodyLen);
+            let read = 0;
+            while (read < bodyLen) {
+              const n = readSync(
+                fd,
+                buf,
+                read,
+                bodyLen - read,
+                captured.bodyOffset + read,
+              );
+              if (n === 0) break;
+              read += n;
+            }
+            body = buf.slice(0, read).toString("utf8");
+          } finally {
+            closeSync(fd);
+          }
+        }
+      } catch {
+        // Fall back to the full-file read on any low-level error
+        // (e.g., stat race between the streaming read and now).
+        const raw = readFileSync(full);
+        body = raw.slice(captured.bodyOffset).toString("utf8");
+      }
       if (captured.lineEnding === "crlf") {
         body = body.replace(/\r\n/g, "\n");
       }
@@ -415,15 +456,16 @@ export function resolveIdCollisions(plan, policy = DEFAULT_COLLISION_POLICY) {
 
 // ── Phase 5: merge-categories ────────────────────────────────────
 //
-// When two top-level categories share the same `focus`, fold them
-// into one. The first source's index wins; the second source's
-// entries[] are appended to the first's and the second's
-// subdirectory is merged into the first's.
-//
-// First-cut: category-level MERGE is recorded in a map but the
-// actual subtree move is deferred to phase 7 (apply-operators),
-// where runConvergence's MERGE operator handles the same shape
-// under a unified tree. So this phase just identifies candidates.
+// Detect top-level categories that share the same `focus` across
+// source wikis. DETECT-ONLY: this helper walks every source's
+// top-level indices, groups them by focus, and returns the
+// multi-source groups without mutating the plan or the filesystem.
+// No entries[] appends, no subdirectory moves — a category-level
+// directory-MERGE operator that would actually fold two same-focus
+// category subtrees is tracked as a follow-up; for now the joined
+// tree retains both categories side-by-side and downstream
+// convergence can decide whether to merge individual leaves across
+// them.
 export function mergeCategoriesWithSameFocus(ingestedSources) {
   const byFocus = new Map();
   for (const src of ingestedSources) {
