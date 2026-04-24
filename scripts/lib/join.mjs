@@ -46,16 +46,15 @@ import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
 import { rebuildAllIndices } from "./indices.mjs";
 import { runConvergence } from "./operators.mjs";
 import { summariseFindings, validateWiki } from "./validate.mjs";
-
-// Valid --id-collision policy values. Kept in sync with the CLI's
-// flag validation (scripts/cli.mjs) and the intent layer (intent.mjs).
-export const VALID_COLLISION_POLICIES = Object.freeze([
-  "namespace",
-  "merge",
-  "ask",
-]);
-
-export const DEFAULT_COLLISION_POLICY = "namespace";
+// Re-export the policy constants from `join-constants.mjs` so
+// existing callers that pull them from this module keep working.
+// The intent layer imports from `join-constants.mjs` directly to
+// avoid loading the full pipeline on non-join CLI paths.
+export {
+  DEFAULT_COLLISION_POLICY,
+  VALID_COLLISION_POLICIES,
+} from "./join-constants.mjs";
+import { DEFAULT_COLLISION_POLICY, VALID_COLLISION_POLICIES } from "./join-constants.mjs";
 
 // ── Phase 1: ingest-all ──────────────────────────────────────────
 //
@@ -359,6 +358,26 @@ export function resolveIdCollisions(plan, policy = DEFAULT_COLLISION_POLICY) {
           dup.sourceWiki,
         ]);
       } else {
+        // Namespace fallback. Index collisions are a hard fail
+        // under the current scope (full directory-rename is a
+        // follow-up), so short-circuit BEFORE mutating
+        // `dup.data.id` / renameMap / relPath. Leaving partial
+        // mutations on the in-memory plan would make the pre-
+        // throw state unsafe to reuse — a caller that caught
+        // JOIN-INDEX-COLLISION and wanted to inspect the plan
+        // would see a half-renamed dup mixed with un-renamed
+        // peers, producing confusing diagnostics.
+        if (dupEntry.kind === "index") {
+          const err = new Error(
+            `join: index id collision on "${id}" between ` +
+              `${keeper.sourceWiki} and ${dup.sourceWiki}. ` +
+              `Directory-rename for index collisions is not yet ` +
+              `supported; rename one of the conflicting directories ` +
+              `in its source wiki before joining.`,
+          );
+          err.code = "JOIN-INDEX-COLLISION";
+          throw err;
+        }
         // Namespace: prefix with the basename of the dup's source
         // wiki. `reviewers.wiki` → `reviewers`; the trailing
         // `.wiki` suffix is idiomatic and stripped for the prefix.
@@ -374,30 +393,10 @@ export function resolveIdCollisions(plan, policy = DEFAULT_COLLISION_POLICY) {
         // source carried on the dup are preserved byte-identical.
         addRename(dup.sourceWiki, dup.data.id, newId);
         dup.data.id = newId;
-        if (dupEntry.kind === "leaf") {
-          // Leaf rename: the filename must track the id (validator
-          // enforces `ID-MISMATCH-FILE`); rewrite relPath.
-          const dir = dirname(dup.relPath);
-          dup.relPath =
-            dir === "." ? `${newId}.md` : `${dir}/${newId}.md`;
-        }
-        // Index rename: full directory rename is deferred (see
-        // module header). Renaming just the `id` frontmatter would
-        // trip ID-MISMATCH-DIR on the rebuilt tree; rather than
-        // producing an invalid tree, short-circuit here and fail
-        // loud so the user knows joining these specific inputs
-        // needs manual disambiguation before re-running.
-        if (dupEntry.kind === "index") {
-          const err = new Error(
-            `join: index id collision on "${id}" between ` +
-              `${keeper.sourceWiki} and ${dup.sourceWiki}. ` +
-              `Directory-rename for index collisions is not yet ` +
-              `supported; rename one of the conflicting directories ` +
-              `in its source wiki before joining.`,
-          );
-          err.code = "JOIN-INDEX-COLLISION";
-          throw err;
-        }
+        // Leaf rename: the filename must track the id (validator
+        // enforces `ID-MISMATCH-FILE`); rewrite relPath.
+        const dir = dirname(dup.relPath);
+        dup.relPath = dir === "." ? `${newId}.md` : `${dir}/${newId}.md`;
       }
     }
   }
@@ -467,8 +466,9 @@ export function mergeCategoriesWithSameFocus(ingestedSources) {
 // so the user gets a single structured report at phase 9.
 //
 // `parents[]` entries are POSIX paths, not ids, and never resolve
-// via the id maps — they're rewritten at phase 11 by the same
-// path-relative rules the regular build pipeline uses.
+// via the id maps — they're re-derived at phase 8 by
+// `rebuildAllIndices` using the same path-relative rules the
+// regular build pipeline uses.
 export function rewireReferences(plan, renameMap, mergeMap) {
   const resolveId = (ref, sourceWiki) => {
     if (typeof ref !== "string") return ref;
@@ -498,13 +498,18 @@ export function rewireReferences(plan, renameMap, mergeMap) {
   return plan;
 }
 
-// ── Phase 11: materialise to target ──────────────────────────────
+// ── materialise-to-target ────────────────────────────────────────
 //
-// Write the unified plan into a prepared empty target directory.
-// Each leaf's file is written with the (possibly rewritten)
-// frontmatter + body. Subdirectories are created as needed.
-// Category indices are written last so directories exist before
-// any index tries to enumerate entries[] at rebuild time.
+// Intermediate step between phase 6 (rewire-references) and phase 7
+// (apply-operators / runConvergence). Writes the unified plan into
+// the prepared empty target directory so subsequent phases
+// (convergence, index-generation, validation) operate on a real
+// on-disk tree. Not one of the 11 methodology phases itself — it's
+// the materialise step that makes phases 7+ possible. Each leaf's
+// file is written with the (possibly rewritten) frontmatter + body;
+// subdirectories are created as needed. Category indices are
+// written last so directories exist before any index tries to
+// enumerate entries[] at rebuild time.
 //
 // Structural fields on indices (`id`, `depth_role`, `parents`,
 // `depth`, `entries`) are STRIPPED before writing. `rebuildAllIndices`
@@ -559,15 +564,23 @@ export function materialisePlan(plan, target) {
     const absPath = join(target, idx.relPath);
     mkdirSync(dirname(absPath), { recursive: true });
     const data = { ...idx.data };
-    // Structural fields — all re-derived by rebuildAllIndices from
-    // the materialised tree's actual shape. Source values would
-    // mismatch the target's position in the unified hierarchy.
+    // Location-dependent structural fields are re-derived by
+    // `rebuildAllIndices` from the materialised tree's actual
+    // shape. Source values would mismatch the target's position
+    // in the unified hierarchy (e.g. source root `id` is
+    // `basename(sourceWiki)`, not `basename(target)`).
     delete data.id;
-    delete data.type;
     delete data.depth_role;
     delete data.depth;
     delete data.parents;
     delete data.entries;
+    // `type: "index"` stays. Phase 7 (`runConvergence`) runs
+    // BEFORE Phase 8's rebuildAllIndices, and convergence
+    // classifies entries as indices vs leaves via the `type`
+    // field. Stripping type would leave the intermediate tree
+    // with typeless index.md files, making convergence read
+    // them as plain leaves and tripping operator-proposal bugs
+    // (e.g. LIFT detection's `listChildren` filter).
     writeFileSync(absPath, renderFrontmatter(data, idx.body), "utf8");
   }
 }
@@ -679,8 +692,8 @@ export async function runJoin(sources, target, ctx = {}) {
   rewireReferences(resolvedPlan, renameMap, mergeMap);
   record("rewire-references", `resolved via renameMap + mergeMap`);
 
-  // Phase 11a — materialise (intermediate commit point so
-  // phase 7 sees a real tree to operate on).
+  // Materialise the in-memory plan to the target directory before
+  // phase 7 (runConvergence operates on a real on-disk tree).
   materialisePlan(resolvedPlan, target);
   record(
     "materialise",

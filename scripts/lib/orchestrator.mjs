@@ -159,10 +159,14 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
       appendOpLog(wikiRoot, {
         op_id: opId,
         operation: "join",
-        started_at: startedIso ?? new Date().toISOString(),
-        sources: plan.sources,
-        target: plan.target,
-        final_sha: finalSha,
+        layout_mode: plan.layout_mode,
+        started: startedIso || new Date().toISOString(),
+        finished: new Date().toISOString(),
+        base_commit: snap.sha || "",
+        final_commit: finalSha || "",
+        summary:
+          `join target=${plan.target} sources=${plan.sources.length} ` +
+          `mode=${plan.layout_mode} phases=${phases.length}`,
       });
       record("commit-finalize", `tagged ${finalTag}`);
       return { op_id: opId, final_sha: finalSha, phases };

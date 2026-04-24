@@ -61,7 +61,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { VALID_COLLISION_POLICIES } from "./join.mjs";
+import { VALID_COLLISION_POLICIES } from "./join-constants.mjs";
 import {
   defaultSiblingPath,
   hasPrivateGit,
