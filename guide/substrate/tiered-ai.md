@@ -276,7 +276,7 @@ all of its Tier 2 cost on subsequent rebuilds.
 
 ## Quality modes
 
-Choose via `--quality-mode`.
+Choose via `--quality-mode` (flag) or `LLM_WIKI_QUALITY_MODE` (env var). The flag wins when both are set. Invalid flag values raise `INT-13` at the intent layer; invalid env values surface at `resolveQualityMode` time with a plain error.
 
 | Mode | Behaviour | Use when |
 |------|-----------|----------|

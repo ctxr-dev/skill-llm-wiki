@@ -1311,7 +1311,7 @@ For a typical corpus, >90% of operator applications resolve at Tier 0 or Tier 1.
 
 ### Quality modes
 
-The skill ships three modes, selected via `--quality-mode`:
+The skill ships three modes, selected via `--quality-mode` (flag) or `LLM_WIKI_QUALITY_MODE` (env var, resolved through `tiered.mjs::resolveQualityMode`; the flag wins when both are set):
 
 - **`tiered-fast` (default, recommended).** Full Tier 0 → 1 → 2 ladder. Tier 1 is now a REQUIRED dependency (`@xenova/transformers` in `dependencies`, not optional) — the overhaul discovered Tier 0 alone was too weak on terse technical frontmatter to leave every mid-band pair for Tier 2 to resolve. Tier 2 runs in a dedicated sub-agent per decision via the **exit-7 handshake**: the CLI writes a pending batch to `<wiki>/.work/tier2/` and exits 7; the wiki-runner spawns sub-agents, writes responses, and re-invokes the CLI. Zero Claude tokens for >90% of operator decisions on typical corpora once embeddings are warm.
 - **`claude-first`.** Tier 0 is still consulted for decisive cases (saves tokens on the obvious decisions), but anything in the Tier 0 mid-band goes straight to Tier 2 (exit-7 handshake), skipping Tier 1. Useful when the user values sub-agent judgment over speed/cost or when debugging a specific similarity call.

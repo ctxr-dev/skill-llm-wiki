@@ -9,8 +9,8 @@
 // the residual ambiguous cases. A similarity-cache hit short-
 // circuits the whole ladder.
 //
-// Four quality modes, selected via --quality-mode or the
-// LLM_WIKI_QUALITY_MODE env var:
+// Three quality modes, selected via --quality-mode or the
+// LLM_WIKI_QUALITY_MODE env var (see resolveQualityMode):
 //
 //   tiered-fast (default):
 //     Tier 0 → Tier 1 → Tier 2, the full ladder. Mid-band Tier 0

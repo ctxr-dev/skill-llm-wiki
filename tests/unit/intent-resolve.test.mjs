@@ -313,12 +313,16 @@ test("VALID_QUALITY_MODES is in sync with tiered.mjs::QUALITY_MODES", () => {
   // both lists stay in lockstep — a drift means the intent layer
   // either rejects a mode tiered accepts (hard break for users) or
   // accepts one tiered rejects (expensive rollback after plan
-  // resolution). Compare as sorted arrays so the assertion doesn't
-  // break on a reordering that preserves membership.
+  // resolution). Compare in exported order — intent.mjs's doc
+  // comment says the two lists share a canonical ordering and
+  // intent-layer error messages reuse the same ordering in their
+  // "valid values" list, so a reorder on one side that's invisible
+  // to a membership-only check would still surface inconsistent
+  // messaging in practice.
   assert.deepEqual(
-    [...VALID_QUALITY_MODES].sort(),
-    [...QUALITY_MODES].sort(),
-    `intent.mjs::VALID_QUALITY_MODES must contain the same modes as tiered.mjs::QUALITY_MODES`,
+    [...VALID_QUALITY_MODES],
+    [...QUALITY_MODES],
+    `intent.mjs::VALID_QUALITY_MODES must match tiered.mjs::QUALITY_MODES exactly, including canonical order`,
   );
 });
 
