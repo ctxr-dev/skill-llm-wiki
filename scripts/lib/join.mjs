@@ -7,9 +7,17 @@
 //   2  source-validate      — validate each source; halt on errors
 //   3  plan-union           — merge per-source leaf lists into one
 //   4  resolve-id-collisions — namespace (default) / merge / ask policies
-//   5  merge-categories     — fold categories with matching focus
-//   6  rewire-references    — resolve links[].id / parents[] /
-//                             overlay_targets via id→alias→rename map
+//   5  merge-categories     — detect matching-focus category folds
+//                             (actual directory-MERGE fold is
+//                             deferred — runConvergence's MERGE
+//                             operator only handles sibling leaves,
+//                             not entire category subtrees)
+//   6  rewire-references    — resolve links[].id / overlay_targets
+//                             via id→alias→rename map. parents[]
+//                             are POSIX paths, not ids; they're
+//                             re-derived at phase 8 by
+//                             `rebuildAllIndices` from the target's
+//                             actual tree shape, not rewritten here.
 //   7  apply-operators      — runConvergence on the unified tree
 //   8  generate-indices     — rebuildAllIndices on the joined tree
 //   9  validation           — validateWiki on the joined tree
@@ -200,8 +208,13 @@ export function planUnion(ingestedSources) {
 //   `namespace` (default): rename the colliding entry to
 //     `<source-prefix>.<original-id>` where the prefix is the
 //     colliding source-wiki's basename (e.g. `reviewers.wiki` →
-//     `reviewers`). The original id is preserved in `aliases[]` so
-//     inbound references still resolve. Never loses an entry.
+//     `reviewers`). Inbound references from that source resolve
+//     via source-scoped `renameMap` rewrites during the rewire
+//     phase. The original id is NOT added to `aliases[]` — the
+//     keeper record (from the first source) retains the
+//     un-prefixed id as its live id, so an alias entry with the
+//     same value would trip `ALIAS-COLLIDES-ID` at phase 9.
+//     Never loses an entry; never shadows the keeper.
 //
 //   `merge`: when frontmatter is compatible (same focus, same
 //     type, same depth_role), fold the duplicates into one entry
