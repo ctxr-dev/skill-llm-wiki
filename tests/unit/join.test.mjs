@@ -462,6 +462,56 @@ test("resolveIdCollisions: merge policy with 3 sources where one falls back to n
   }
 });
 
+test("resolveIdCollisions: index id collision throws JOIN-INDEX-COLLISION", () => {
+  // Two sources both carrying a top-level `auth/index.md` whose
+  // frontmatter id == "auth". resolveIdCollisions must throw the
+  // structured `JOIN-INDEX-COLLISION` with both source wiki paths
+  // named in the message, rather than letting the collision slip
+  // through to materialisation (where it would trip DUP-ID at
+  // phase 9 after a wasteful full-pipeline walk).
+  //
+  // Also covers the throw-before-mutate contract: even though the
+  // throw fires mid-loop over the collisions, in-memory
+  // `dup.data.id` and `renameMap` must be byte-identical to the
+  // pre-call state (the round-6 fix moved the throw BEFORE the
+  // namespace-rename mutations).
+  const a = buildTinyWiki("idx-a", {
+    subcats: { auth: [{ id: "auth-alpha" }] },
+  });
+  const b = buildTinyWiki("idx-b", {
+    subcats: { auth: [{ id: "auth-beta" }] },
+  });
+  try {
+    const plan = planUnion([ingestWiki(a), ingestWiki(b)]);
+    // Snapshot the indices' current ids + body so we can verify
+    // no mutation happened before the throw.
+    const pre = plan.indices.map((i) => ({ path: i.absolutePath, id: i.data.id }));
+    let caught;
+    try {
+      resolveIdCollisions(plan, "namespace");
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught, "expected JOIN-INDEX-COLLISION to throw");
+    assert.equal(caught.code, "JOIN-INDEX-COLLISION");
+    assert.match(caught.message, /index id collision on "auth"/);
+    assert.match(caught.message, new RegExp(a.replace(/\+/g, "\\+")));
+    assert.match(caught.message, new RegExp(b.replace(/\+/g, "\\+")));
+    // No partial mutation.
+    for (const rec of pre) {
+      const cur = plan.indices.find((i) => i.absolutePath === rec.path);
+      assert.equal(
+        cur.data.id,
+        rec.id,
+        `index id must not be mutated before JOIN-INDEX-COLLISION throws; ${rec.path} changed ${rec.id} → ${cur.data.id}`,
+      );
+    }
+  } finally {
+    rmSync(a, { recursive: true, force: true });
+    rmSync(b, { recursive: true, force: true });
+  }
+});
+
 test("resolveIdCollisions: ask policy throws JOIN-COLLISION-ASK", () => {
   const a = buildTinyWiki("ask-a", { leaves: [{ id: "dup" }] });
   const b = buildTinyWiki("ask-b", { leaves: [{ id: "dup" }] });

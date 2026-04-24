@@ -236,12 +236,18 @@ export function planUnion(ingestedSources) {
 // collision policy. Includes BOTH leaves and indices — `validateWiki`
 // enforces global id uniqueness across every entry type, so an
 // index-only collision (two sources both with `auth/index.md`) would
-// still trip `DUP-ID` at phase 9. Index collisions are detected but
-// first-cut only renames the ID on the collision (the directory
-// basename stays, producing `ID-MISMATCH-DIR` which the user will
-// need to resolve — full directory-rename for index collisions is
-// tracked as a follow-up; in the common case of joining topically-
-// distinct source wikis index collisions don't occur).
+// still trip `DUP-ID` at phase 9 if left alone.
+//
+// Index collisions: this first-cut throws a structured
+// `JOIN-INDEX-COLLISION` the moment the collision is detected —
+// safely renaming just the id frontmatter would immediately trip
+// `ID-MISMATCH-DIR` (id must match parent dir basename), and
+// directory-renaming an entire subtree to produce a unique id is
+// a full directory-MERGE operator tracked as a follow-up. The
+// throw asks the user to disambiguate one of the conflicting
+// subcategories in its source wiki before re-joining. In the
+// common case of joining topically-distinct source wikis, index
+// collisions don't occur at all.
 //
 // Collision policies:
 //
@@ -568,11 +574,19 @@ export function rewireReferences(plan, renameMap, mergeMap) {
 // Duplicate index relPaths (two sources with the same
 // `foo/index.md`) are resolved first-wins: the first source's
 // index contributes the authored-intent fields; subsequent writes
-// at the same relPath are dropped. If the two indices have
-// different focus values, phase 7's convergence-on-unified-tree
-// won't merge them (the subcats remain distinct by content);
-// phase 9's validation surfaces the near-duplicate via normal
-// focus/DUP-ID checks.
+// at the same relPath are dropped SILENTLY — phase 9's validator
+// doesn't see them (the second file never lands on disk), so no
+// DUP-ID warning surfaces. This is intentional for the common
+// case where two sources happen to share a top-level shape and
+// their category indices carry near-identical metadata; if the
+// focus values genuinely differ, the authored-intent divergence
+// is lost. The upshot: `resolveIdCollisions` already throws
+// `JOIN-INDEX-COLLISION` on same-id collisions, which catches
+// the meaningful case; a same-relPath-different-focus pair would
+// also mean same-id (the index id equals its directory basename),
+// so the resolveIdCollisions throw fires before we reach
+// materialisation. This silent-drop path is load-bearing only
+// for truly identical duplicate indices.
 //
 // Source immutability: writes happen ONLY under `target`, never
 // back to any source wiki.
