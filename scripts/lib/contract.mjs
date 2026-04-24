@@ -168,7 +168,13 @@ const SUBCOMMANDS = {
   fix: { positionals: ["wiki"], flags: ["--json"] },
   join: {
     positionals: ["wiki-a", "wiki-b"],
-    flags: ["--target", "--canonical", "--json"],
+    flags: [
+      "--target",
+      "--canonical",
+      "--id-collision",
+      "--quality-mode",
+      "--json",
+    ],
   },
   rollback: { positionals: ["wiki"], flags: ["--to", "--json"] },
   init: {

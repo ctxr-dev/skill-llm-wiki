@@ -520,6 +520,132 @@ export function resolveIntent(ctx) {
     });
   }
 
+  // ─── Join: N >= 2 existing wikis into a unified output ───────────
+  //
+  // Positional shape: `join <wiki-a> <wiki-b> [<wiki-c>...]`. The
+  // `--target` flag is REQUIRED (where to write the unified output)
+  // — join is inherently hosted-mode because the output belongs
+  // neither next to source A nor source B. Each source must exist
+  // and be a skill-managed wiki (have `.llmwiki/git`). Target must
+  // not already exist (or must be empty): the CLI materialises into
+  // a fresh tree so the source wikis stay strictly read-only.
+  //
+  // `--id-collision` selects the cross-source id-collision policy
+  // (`namespace` / `merge` / `ask`); defaults to `namespace`. The
+  // value is validated here against the same canonical list
+  // scripts/lib/join.mjs exports, so a typo fails at the intent
+  // layer with structured INT-17 rather than burning a pre-op
+  // snapshot and rolling back.
+  if (subcommand === "join") {
+    if (args.length < 2) {
+      return ambiguous(
+        "INT-06",
+        `join requires at least 2 <wiki-path> positionals (got ${args.length})`,
+        [
+          {
+            description: "specify two or more source wikis",
+            flag: "join <wiki-a> <wiki-b> [<wiki-c>...]",
+          },
+        ],
+        "positional wiki paths",
+      );
+    }
+    const sources = args.map((a) => absolute(cwd, a));
+    for (const s of sources) {
+      if (!existsSync(s)) {
+        return ambiguous(
+          "INT-06",
+          `join: source wiki ${s} does not exist`,
+          [
+            {
+              description: "point at an existing skill-managed wiki",
+              flag: `join <existing-wiki> <existing-wiki>`,
+            },
+          ],
+          "each positional must exist",
+        );
+      }
+      if (!hasPrivateGit(s)) {
+        return ambiguous(
+          "INT-06",
+          `join: ${s} is not a skill-managed wiki (no .llmwiki/git)`,
+          [
+            {
+              description: "build each source first",
+              flag: `build ${s} --layout-mode in-place`,
+            },
+          ],
+          "each source must be a managed wiki",
+        );
+      }
+    }
+    if (!f.target) {
+      return ambiguous(
+        "INT-09b",
+        `join requires --target <path> (join output is always hosted; see guide/operations/ingest/join.md)`,
+        [
+          {
+            description: "set an explicit output path",
+            flag: "--target <path/for/unified/wiki>",
+          },
+        ],
+        "--target",
+      );
+    }
+    const target = absolute(cwd, f.target);
+    if (existsSync(target)) {
+      // Allow an empty directory but nothing else — the target must
+      // be safe to materialise into without clobbering user data.
+      let entries;
+      try {
+        entries = readdirSync(target);
+      } catch {
+        entries = null;
+      }
+      if (!entries || entries.length > 0) {
+        return ambiguous(
+          "INT-01",
+          `join: --target path ${target} already exists and is not empty`,
+          [
+            {
+              description: "pick a fresh output path",
+              flag: "--target <new-path>",
+            },
+          ],
+          "--target must be empty or new",
+        );
+      }
+    }
+    const VALID_COLLISION = ["namespace", "merge", "ask"];
+    const policy = f.id_collision || "namespace";
+    if (!VALID_COLLISION.includes(policy)) {
+      return ambiguous(
+        "INT-17",
+        `unknown --id-collision value "${policy}"`,
+        VALID_COLLISION.map((p) => ({
+          description: `use ${p} policy`,
+          flag: `--id-collision ${p}`,
+        })),
+        "--id-collision",
+      );
+    }
+    return ok({
+      operation: "join",
+      layout_mode: "hosted",
+      source: null,
+      sources,
+      target,
+      is_new_wiki: true,
+      flags: {
+        accept_dirty: f.accept_dirty === true,
+        no_prompt: f.no_prompt === true,
+        json_errors: f.json_errors === true || f.json === true,
+        id_collision: policy,
+        quality_mode: f.quality_mode,
+      },
+    });
+  }
+
   // ─── Rebuild / fix: the positional IS the wiki, not a source ──────
   // These operations read frontmatter from an existing wiki and write
   // back in place. There is no separate source — the wiki is both.

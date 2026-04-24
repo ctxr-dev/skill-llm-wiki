@@ -59,6 +59,7 @@ import {
 } from "./intent.mjs";
 import { applySoftParentEntries, runSoftDagParents } from "./soft-dag.mjs";
 import { runConvergence } from "./operators.mjs";
+import { runJoin } from "./join.mjs";
 import { runRootContainment } from "./root-containment.mjs";
 import { runReviewCycle } from "../commands/review.mjs";
 import {
@@ -91,6 +92,68 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
 
   const phases = [];
   const record = (name, summary) => phases.push({ name, summary });
+
+  // `join` is the one top-level operation whose pipeline shape does
+  // not match the build/rebuild/fix family. Instead of threading
+  // an "ingest from N wikis" path through the build-shaped phase
+  // cascade, we delegate to `scripts/lib/join.mjs::runJoin` which
+  // implements all 11 phases from `guide/operations/ingest/join.md`
+  // end-to-end on an already-prepared empty target. The caller
+  // (intent → CLI) is responsible for ensuring `plan.target` is a
+  // fresh empty directory before runOperation fires; runJoin writes
+  // the unified tree there and then runs the same
+  // convergence / indices / validation tail the build path would.
+  // Per-phase commits are routed through runJoin's onPhaseCommit
+  // callback so the private git log shows join progression at the
+  // same granularity a build does.
+  if (plan.operation === "join") {
+    if (!Array.isArray(plan.sources) || plan.sources.length < 2) {
+      throw new Error("join requires at least 2 resolved source wiki paths");
+    }
+    const snap = preOpSnapshot(wikiRoot, opId);
+    record(
+      "snapshot",
+      `tag ${snap.tag} sha=${(snap.sha ?? "n/a").slice(0, 12)}`,
+    );
+    try {
+      const result = await runJoin(plan.sources, wikiRoot, {
+        opId,
+        qualityMode: resolveQualityMode(plan.flags || {}),
+        idCollisionPolicy: plan.flags?.id_collision,
+        onPhaseCommit: async ({ phase, summary }) => {
+          gitRunChecked(wikiRoot, ["add", "-A"]);
+          if (!gitWorkingTreeClean(wikiRoot)) {
+            gitCommit(wikiRoot, `phase ${phase}: ${summary}`);
+          }
+        },
+      });
+      for (const p of result.phases) record(p.name, p.summary);
+      // Finalise — tag the op and emit the op-log entry.
+      const finalTag = `op/${opId}`;
+      gitTag(wikiRoot, finalTag);
+      const finalSha = gitHeadSha(wikiRoot);
+      appendOpLog(wikiRoot, {
+        op_id: opId,
+        operation: "join",
+        started_at: startedIso ?? new Date().toISOString(),
+        sources: plan.sources,
+        target: plan.target,
+        final_sha: finalSha,
+      });
+      record("commit-finalize", `tagged ${finalTag}`);
+      return { op_id: opId, final_sha: finalSha, phases };
+    } catch (err) {
+      // Roll working tree back to the pre-op snapshot, matching the
+      // build path's failure semantics.
+      try {
+        gitResetHard(wikiRoot, snap.tag);
+        gitClean(wikiRoot);
+      } catch {
+        /* best-effort rollback */
+      }
+      throw err;
+    }
+  }
 
   // Map of authored index hints keyed by POSIX-relative directory
   // path from the wiki root. Populated in the ingest phase for Build
