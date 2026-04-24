@@ -332,7 +332,19 @@ export function resolveIdCollisions(plan, policy = DEFAULT_COLLISION_POLICY) {
         dup.data.type === keeper.data.type &&
         dup.data.depth_role === keeper.data.depth_role;
       if (canMerge) {
-        mergeMap.set(dup.data.id, keeper.data.id);
+        // Do NOT add an identity `{id → id}` entry to mergeMap:
+        // under collision the absorbed and keeper share the same
+        // id, so a self-mapping is a no-op semantically AND
+        // actively harmful — `rewireReferences` consults mergeMap
+        // before the source-scoped renameMap, so an identity
+        // entry would intercept a reference from a DIFFERENT
+        // source (which got namespace-renamed for the same
+        // collision id) and short-circuit before the renameMap
+        // rewrite fires. The absorbed record is dropped from the
+        // plan via `absorbedPaths` regardless.
+        if (dup.data.id !== keeper.data.id) {
+          mergeMap.set(dup.data.id, keeper.data.id);
+        }
         absorbedPaths.add(dup.absolutePath);
         // Inherit absorbed's aliases (NOT its id — the absorbed
         // id is already the keeper's id, so adding it to

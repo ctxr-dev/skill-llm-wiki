@@ -22,8 +22,6 @@
 //   - materialisePlan: leaves + indices land at expected paths;
 //     dangling-category indices for fully-merged-away directories
 //     are dropped
-//   - runJoin end-to-end: happy path produces a tree that passes
-//     validateWiki
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -364,7 +362,11 @@ test("resolveIdCollisions: merge policy folds without self-aliasing the keeper",
     assert.ok(Array.isArray(keeper.data.source_wikis));
     assert.equal(keeper.data.source_wikis.length, 2);
     assert.equal(renameMap.size, 0);
-    assert.equal(mergeMap.size, 1);
+    // mergeMap is 0: identity `{"dup" → "dup"}` entries are
+    // skipped so they can't intercept a namespace-rename rewrite
+    // on another source sharing the same collision id. The
+    // absorbed record is still dropped via absorbedPaths.
+    assert.equal(mergeMap.size, 0);
   } finally {
     rmSync(a, { recursive: true, force: true });
     rmSync(b, { recursive: true, force: true });
@@ -391,6 +393,72 @@ test("resolveIdCollisions: merge falls back to namespace when focus differs", ()
   } finally {
     rmSync(a, { recursive: true, force: true });
     rmSync(b, { recursive: true, force: true });
+  }
+});
+
+test("resolveIdCollisions: merge policy with 3 sources where one falls back to namespace rewrites references correctly", () => {
+  // Covers the mergeMap ↔ renameMap precedence interaction.
+  // Three sources all share id "dup". Source A + B have matching
+  // focus → merge-fold (B absorbed into A). Source C has a
+  // different focus → falls back to namespace ("c.dup"). A link
+  // in source C's frontmatter pointing at "dup" MUST resolve to
+  // "c.dup" (C's own namespaced id), not to A's keeper id "dup"
+  // — an identity mapping in mergeMap would intercept the
+  // rewrite and send the reference to A's keeper.
+  const a = buildTinyWiki("mix-a", {
+    leaves: [{ id: "dup", focus: "shared focus", tags: ["t"] }],
+  });
+  const b = buildTinyWiki("mix-b", {
+    leaves: [{ id: "dup", focus: "shared focus", tags: ["t"] }],
+  });
+  const c = buildTinyWiki("mix-c", {
+    leaves: [{ id: "dup", focus: "DIFFERENT focus", tags: ["t"] }],
+  });
+  try {
+    // Decorate C's dup with a link pointing at "dup" (its own
+    // renamed-away id). After rewireReferences this must become
+    // "c.dup" — the source-scoped rename for source C.
+    const cLeafPath = join(c, "section-mix-c", "dup.md");
+    const parsed = parseFrontmatter(readFileSync(cLeafPath, "utf8"), cLeafPath);
+    parsed.data.links = [{ id: "dup" }];
+    writeFileSync(cLeafPath, renderFrontmatter(parsed.data, parsed.body), "utf8");
+
+    const plan = planUnion([ingestWiki(a), ingestWiki(b), ingestWiki(c)]);
+    const { plan: resolved, renameMap, mergeMap } = resolveIdCollisions(
+      plan,
+      "merge",
+    );
+    // Plan shape: A's keeper + C's namespaced record (B absorbed).
+    assert.equal(resolved.leaves.length, 2, JSON.stringify(resolved.leaves.map((l) => l.data.id)));
+    const keeper = resolved.leaves.find((l) => l.data.id === "dup");
+    const cRenamed = resolved.leaves.find((l) => l.data.id !== "dup");
+    assert.ok(keeper, "A's keeper record still has id 'dup'");
+    assert.ok(cRenamed, "C's dup record renamed away");
+    assert.match(cRenamed.data.id, /\.dup$/);
+    // Under merge-fold with identity, mergeMap should NOT contain
+    // {"dup": "dup"} — that would intercept C's rename.
+    assert.equal(
+      mergeMap.get("dup"),
+      undefined,
+      `mergeMap must not contain an identity "dup"→"dup" entry that would short-circuit source C's namespace rewrite`,
+    );
+    // renameMap has C's entry.
+    assert.ok(renameMap.has(c));
+    assert.equal(renameMap.get(c).get("dup"), cRenamed.data.id);
+
+    // The critical test: rewire C's link and confirm it points at
+    // C's namespaced id, not the keeper's "dup".
+    rewireReferences(resolved, renameMap, mergeMap);
+    const cLeafAfter = resolved.leaves.find((l) => l.sourceWiki === c);
+    assert.equal(
+      cLeafAfter.data.links[0].id,
+      cRenamed.data.id,
+      `C's self-link must resolve to C's namespaced id, got ${cLeafAfter.data.links[0].id}`,
+    );
+  } finally {
+    rmSync(a, { recursive: true, force: true });
+    rmSync(b, { recursive: true, force: true });
+    rmSync(c, { recursive: true, force: true });
   }
 });
 
