@@ -43,14 +43,6 @@ import {
   readdirSync,
   writeFileSync,
 } from "node:fs";
-
-// Body-read streaming chunk size. Matches the 64 KiB page-aligned
-// buffer used across the rest of the codebase (chunk.mjs,
-// similarity-cache.mjs) — big enough that the per-read syscall
-// overhead is amortised over a meaningful byte count, small
-// enough that peak memory during `ingestWiki` stays bounded
-// regardless of the largest leaf body size.
-const BODY_READ_CHUNK_SIZE = 64 * 1024;
 import { basename, dirname, join, relative } from "node:path";
 import { readFrontmatterStreaming } from "./chunk.mjs";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
@@ -66,6 +58,19 @@ export {
   VALID_COLLISION_POLICIES,
 } from "./join-constants.mjs";
 import { DEFAULT_COLLISION_POLICY, VALID_COLLISION_POLICIES } from "./join-constants.mjs";
+
+// Body-read streaming chunk size. Matches the 64 KiB page-aligned
+// buffer used across the rest of the codebase (chunk.mjs,
+// similarity-cache.mjs) — big enough that the per-read syscall
+// overhead is amortised over a meaningful byte count, small enough
+// that each individual `readSync` allocation inside `ingestWiki`
+// stays predictably small. Note this is the PER-READ ceiling, not
+// a total-memory ceiling: each leaf's body is still fully held in
+// memory after the `Buffer.concat` that assembles the chunks into
+// the final UTF-8 string. A future optimisation could switch to
+// lazy body loading if the holding-every-body-in-memory shape
+// becomes the bottleneck on very large corpora.
+const BODY_READ_CHUNK_SIZE = 64 * 1024;
 
 // ── Phase 1: ingest-all ──────────────────────────────────────────
 //
@@ -125,14 +130,16 @@ export function ingestWiki(wikiRoot) {
       // Read the body starting at `captured.bodyOffset` rather than
       // re-reading the whole file via `readFileSync(full)` — the
       // full-file read was a needless double-I/O that loaded the
-      // frontmatter bytes twice. Stream the body in BOUNDED
-      // chunks rather than pre-allocating `Buffer.alloc(bodyLen)`
-      // — the prior cut allocated a buffer the full size of the
-      // body up front, which would OOM the process on a
-      // multi-megabyte leaf. Chunked read keeps peak allocation
-      // to `BODY_READ_CHUNK_SIZE` regardless of body size, and we
-      // concat the chunks into the final utf8 string only at the
-      // end.
+      // frontmatter bytes twice. Stream the body in bounded
+      // `BODY_READ_CHUNK_SIZE` chunks (per-read allocation stays
+      // small and predictable) rather than a single
+      // `Buffer.alloc(bodyLen)` up front. Chunks accumulate in an
+      // array and assemble into the final UTF-8 string via
+      // `Buffer.concat` at the end; peak memory during the concat
+      // is ~2× the body size momentarily, but the per-read
+      // allocation is always the small chunk buffer regardless of
+      // how large the body turns out to be (which matters because
+      // we don't know the body size before reading).
       let body;
       try {
         const chunks = [];
