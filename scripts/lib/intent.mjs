@@ -61,6 +61,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { VALID_COLLISION_POLICIES } from "./join.mjs";
 import {
   defaultSiblingPath,
   hasPrivateGit,
@@ -616,13 +617,16 @@ export function resolveIntent(ctx) {
         );
       }
     }
-    const VALID_COLLISION = ["namespace", "merge", "ask"];
+    // Share VALID_COLLISION_POLICIES with `join.mjs` — the single
+    // canonical list. A local copy here risked silent drift if the
+    // set gained or lost a policy; importing keeps the intent
+    // validator and the runtime in lockstep.
     const policy = f.id_collision || "namespace";
-    if (!VALID_COLLISION.includes(policy)) {
+    if (!VALID_COLLISION_POLICIES.includes(policy)) {
       return ambiguous(
         "INT-17",
         `unknown --id-collision value "${policy}"`,
-        VALID_COLLISION.map((p) => ({
+        VALID_COLLISION_POLICIES.map((p) => ({
           description: `use ${p} policy`,
           flag: `--id-collision ${p}`,
         })),

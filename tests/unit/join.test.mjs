@@ -324,7 +324,14 @@ test("rewireReferences: source-scoped renameMap resolves per-referrer", () => {
   }
 });
 
-test("resolveIdCollisions: merge policy folds when frontmatter compatible", () => {
+test("resolveIdCollisions: merge policy folds without self-aliasing the keeper", () => {
+  // Regression: a prior cut added the absorbed record's id into
+  // keeper.aliases[] — but the absorbed id IS the keeper's id
+  // under a merge-policy fold (that's what "collision" means),
+  // so the aliases entry would be a self-alias the validator
+  // rejects under ALIAS-COLLIDES-ID. Keeper now only inherits
+  // the absorbed's pre-existing aliases[] (if any) plus the
+  // source_wikis[] provenance.
   const a = buildTinyWiki("mg-a", {
     leaves: [{ id: "dup", focus: "shared focus", tags: ["t"] }],
   });
@@ -341,8 +348,13 @@ test("resolveIdCollisions: merge policy folds when frontmatter compatible", () =
     assert.equal(resolved.leaves.length, 1);
     const keeper = resolved.leaves[0];
     assert.equal(keeper.data.id, "dup");
-    assert.ok(Array.isArray(keeper.data.aliases));
-    assert.ok(keeper.data.aliases.includes("dup"));
+    // Self-alias on keeper would trip ALIAS-COLLIDES-ID at phase 9.
+    if (keeper.data.aliases) {
+      assert.ok(
+        !keeper.data.aliases.includes("dup"),
+        `keeper.aliases must not contain its own id ("dup")`,
+      );
+    }
     assert.ok(Array.isArray(keeper.data.source_wikis));
     assert.equal(keeper.data.source_wikis.length, 2);
     assert.equal(renameMap.size, 0);

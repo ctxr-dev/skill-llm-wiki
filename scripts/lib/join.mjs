@@ -273,6 +273,33 @@ export function resolveIdCollisions(plan, policy = DEFAULT_COLLISION_POLICY) {
   };
   const mergeMap = new Map();
   const absorbedPaths = new Set();
+  // Running set of every "live" id we've already assigned — both
+  // un-renamed keepers AND namespace-prefixed renames. Used to
+  // detect secondary collisions: two source wikis with the same
+  // basename (e.g. both `/a/reviewers.wiki` and `/b/reviewers.wiki`)
+  // would produce identical `reviewers.<id>` prefixed ids without
+  // this guard. Seeded with every plan record's current id so
+  // namespace renames don't silently collide with non-duplicated
+  // ids elsewhere in the plan either.
+  const liveIds = new Set();
+  for (const leaf of plan.leaves) liveIds.add(leaf.data.id);
+  for (const idx of plan.indices) liveIds.add(idx.data.id);
+  const reserveId = (baseId) => {
+    if (!liveIds.has(baseId)) {
+      liveIds.add(baseId);
+      return baseId;
+    }
+    for (let n = 2; n < 1000; n++) {
+      const candidate = `${baseId}-${n}`;
+      if (!liveIds.has(candidate)) {
+        liveIds.add(candidate);
+        return candidate;
+      }
+    }
+    throw new Error(
+      `join: could not disambiguate namespace-prefixed id "${baseId}" within 1000 attempts`,
+    );
+  };
   for (const [id, dupes] of collisions) {
     // Keeper is the first source's entry; subsequent entries either
     // merge (merge policy + compatible) or rename (namespace policy,
@@ -290,9 +317,13 @@ export function resolveIdCollisions(plan, policy = DEFAULT_COLLISION_POLICY) {
       if (canMerge) {
         mergeMap.set(dup.data.id, keeper.data.id);
         absorbedPaths.add(dup.absolutePath);
+        // Inherit absorbed's aliases (NOT its id — the absorbed
+        // id is already the keeper's id, so adding it to
+        // aliases[] would create a self-alias the validator
+        // rejects under ALIAS-COLLIDES-ID).
         keeper.data.aliases = dedupe([
           ...(keeper.data.aliases || []),
-          dup.data.id,
+          ...(dup.data.aliases || []),
         ]);
         keeper.data.source_wikis = dedupe([
           ...(keeper.data.source_wikis || [keeper.sourceWiki]),
@@ -302,9 +333,16 @@ export function resolveIdCollisions(plan, policy = DEFAULT_COLLISION_POLICY) {
         // Namespace: prefix with the basename of the dup's source
         // wiki. `reviewers.wiki` → `reviewers`; the trailing
         // `.wiki` suffix is idiomatic and stripped for the prefix.
+        // `reserveId` guards against secondary collisions when two
+        // sources share the same basename or when the generated
+        // prefix happens to clash with an existing unrelated id.
         const prefix = namespacePrefix(dup.sourceWiki);
-        const newId = `${prefix}.${id}`;
-        dup.data.aliases = dedupe([...(dup.data.aliases || []), dup.data.id]);
+        const newId = reserveId(`${prefix}.${id}`);
+        // DON'T add the old id to aliases[]: the keeper from the
+        // first source still owns the un-prefixed "dup" as its
+        // live id. A dup.aliases = ["dup"] would trip
+        // ALIAS-COLLIDES-ID at phase 9. Existing aliases the
+        // source carried on the dup are preserved byte-identical.
         addRename(dup.sourceWiki, dup.data.id, newId);
         dup.data.id = newId;
         if (dupEntry.kind === "leaf") {
@@ -581,16 +619,31 @@ export async function runJoin(sources, target, ctx = {}) {
     unionPlan,
     idCollisionPolicy,
   );
+  const totalRenames = [...renameMap.values()].reduce(
+    (sum, perSource) => sum + perSource.size,
+    0,
+  );
   record(
     "resolve-id-collisions",
-    `policy=${idCollisionPolicy}; ${renameMap.size} rename(s), ${mergeMap.size} merge(s)`,
+    `policy=${idCollisionPolicy}; ${totalRenames} rename(s), ${mergeMap.size} merge(s)`,
   );
 
-  // Phase 5 — merge-categories.
+  // Phase 5 — merge-categories. First-cut is DETECT-ONLY: the
+  // helper identifies same-focus top-level categories but does not
+  // fold them. runConvergence's MERGE operator only merges sibling
+  // leaves (listChildren + leaf-pair scoring), not entire category
+  // subtrees — applying category merges requires a separate
+  // directory-MERGE operator that's tracked as a follow-up. In
+  // the common case (topically-distinct source wikis) there are
+  // zero same-focus categories so the phase is a no-op anyway; in
+  // the corner case where two sources both have `auth/` with
+  // matching focus, the joined tree ends up with two adjacent
+  // top-level categories that downstream rebalance can still
+  // consolidate if the user chooses.
   const categoryMerges = mergeCategoriesWithSameFocus(ingested);
   record(
     "merge-categories",
-    `${categoryMerges.length} same-focus category group(s) identified (applied via convergence)`,
+    `${categoryMerges.length} same-focus category group(s) detected (fold deferred to a future directory-MERGE operator)`,
   );
 
   // Phase 6 — rewire-references.
