@@ -110,10 +110,25 @@ export async function runOperation(plan, {
     const phase = { name, summary };
     phases.push(phase);
     if (onProgress) {
+      // Two failure modes to cover: a synchronous throw, and a
+      // returned Promise that rejects (an `async` hook never
+      // throws synchronously — the rejection escapes as an
+      // unhandledRejection and would terminate the process under
+      // Node's default policy, violating the "progress-hook
+      // failures must never halt the op" contract). The try/catch
+      // handles the sync throw; `Promise.resolve(...).catch()`
+      // handles the async rejection. Both swallow silently — a
+      // user with a broken progress reporter should still get a
+      // successful op completion.
       try {
-        onProgress({ name, summary, index: phases.length });
+        const ret = onProgress({ name, summary, index: phases.length });
+        if (ret && typeof ret.then === "function") {
+          Promise.resolve(ret).catch(() => {
+            /* async progress-hook rejection silently swallowed */
+          });
+        }
       } catch {
-        // Progress hook failures must never halt the op.
+        /* sync progress-hook throw silently swallowed */
       }
     }
   };
