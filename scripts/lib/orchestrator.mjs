@@ -59,6 +59,7 @@ import {
 } from "./intent.mjs";
 import { applySoftParentEntries, runSoftDagParents } from "./soft-dag.mjs";
 import { runConvergence } from "./operators.mjs";
+import { runJoin } from "./join.mjs";
 import { runRootContainment } from "./root-containment.mjs";
 import { runReviewCycle } from "../commands/review.mjs";
 import {
@@ -91,6 +92,102 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
 
   const phases = [];
   const record = (name, summary) => phases.push({ name, summary });
+
+  // `join` is the one top-level operation whose pipeline shape does
+  // not match the build/rebuild/fix family. Instead of threading
+  // an "ingest from N wikis" path through the build-shaped phase
+  // cascade, we delegate to `scripts/lib/join.mjs::runJoin` which
+  // implements all 11 phases from `guide/operations/ingest/join.md`
+  // end-to-end on an already-prepared empty target. The caller
+  // (intent → CLI) is responsible for ensuring `plan.target` is a
+  // fresh empty directory before runOperation fires; runJoin writes
+  // the unified tree there and then runs the same
+  // convergence / indices / validation tail the build path would.
+  // Per-phase commits are routed through runJoin's onPhaseCommit
+  // callback so the private git log shows join progression at the
+  // same granularity a build does.
+  if (plan.operation === "join") {
+    if (!Array.isArray(plan.sources) || plan.sources.length < 2) {
+      throw new Error("join requires at least 2 resolved source wiki paths");
+    }
+    const snap = preOpSnapshot(wikiRoot, opId);
+    record(
+      "snapshot",
+      `tag ${snap.tag} sha=${(snap.sha ?? "n/a").slice(0, 12)}`,
+    );
+    try {
+      const result = await runJoin(plan.sources, wikiRoot, {
+        opId,
+        qualityMode: resolveQualityMode(plan.flags || {}),
+        idCollisionPolicy: plan.flags?.id_collision,
+        onPhaseCommit: async ({ phase, summary }) => {
+          gitRunChecked(wikiRoot, ["add", "-A"]);
+          if (!gitWorkingTreeClean(wikiRoot)) {
+            gitCommit(wikiRoot, `phase ${phase}: ${summary}`);
+          }
+        },
+      });
+      for (const p of result.phases) record(p.name, p.summary);
+      // Tier 2 suspend: convergence parked decisions that can't be
+      // resolved without a sub-agent. Drain the pending queue,
+      // write the batch, and throw NeedsTier2Error — the caller
+      // catches it via the same path the build/rebuild uses, exits
+      // 7, and the wiki-runner spawns sub-agents, writes responses,
+      // and re-invokes the CLI. Must happen BEFORE the op tag so a
+      // resume picks up at the same pre-op/... anchor.
+      if (result.needs_tier2) {
+        const requests = takePendingRequests(wikiRoot);
+        if (requests.length > 0) {
+          const batchId = deriveBatchId(
+            opId,
+            "join-convergence",
+            result.convergence.iterations,
+          );
+          const path = writePending(wikiRoot, batchId, requests);
+          throw new NeedsTier2Error(
+            `join: operator-convergence parked ${requests.length} Tier 2 request(s) ` +
+              `(batch ${batchId}); wiki-runner must resolve and re-invoke`,
+            opId,
+            path,
+          );
+        }
+      }
+      // Finalise — tag the op and emit the op-log entry.
+      const finalTag = `op/${opId}`;
+      gitTag(wikiRoot, finalTag);
+      const finalSha = gitHeadSha(wikiRoot);
+      appendOpLog(wikiRoot, {
+        op_id: opId,
+        operation: "join",
+        layout_mode: plan.layout_mode,
+        started: startedIso || new Date().toISOString(),
+        finished: new Date().toISOString(),
+        base_commit: snap.sha || "",
+        final_commit: finalSha || "",
+        summary:
+          `join target=${plan.target} sources=${plan.sources.length} ` +
+          `mode=${plan.layout_mode} phases=${phases.length}`,
+      });
+      record("commit-finalize", `tagged ${finalTag}`);
+      return { op_id: opId, final_sha: finalSha, phases };
+    } catch (err) {
+      // NeedsTier2Error is NOT a failure — it's a suspend signal.
+      // Don't roll back the working tree; the wiki-runner will
+      // resume on re-invoke. Matches the build-path semantics.
+      if (err instanceof NeedsTier2Error) {
+        throw err;
+      }
+      // Roll working tree back to the pre-op snapshot, matching the
+      // build path's failure semantics.
+      try {
+        gitResetHard(wikiRoot, snap.tag);
+        gitClean(wikiRoot);
+      } catch {
+        /* best-effort rollback */
+      }
+      throw err;
+    }
+  }
 
   // Map of authored index hints keyed by POSIX-relative directory
   // path from the wiki root. Populated in the ingest phase for Build

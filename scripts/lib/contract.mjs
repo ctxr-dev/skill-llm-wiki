@@ -167,8 +167,21 @@ const SUBCOMMANDS = {
   },
   fix: { positionals: ["wiki"], flags: ["--json"] },
   join: {
+    // Variadic positionals — the CLI accepts
+    // `join <wiki-a> <wiki-b> [<wiki-c>...]`. `positionals` lists
+    // the minimum shape; `min_positionals` / `variadic` describe
+    // the full contract so consumers generating invocations or
+    // validating argument counts don't assume exactly two sources.
     positionals: ["wiki-a", "wiki-b"],
-    flags: ["--target", "--canonical", "--json"],
+    min_positionals: 2,
+    variadic: true,
+    flags: [
+      "--target",
+      "--canonical",
+      "--id-collision",
+      "--quality-mode",
+      "--json",
+    ],
   },
   rollback: { positionals: ["wiki"], flags: ["--to", "--json"] },
   init: {

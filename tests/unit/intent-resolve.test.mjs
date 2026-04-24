@@ -44,6 +44,100 @@ function plantManagedWiki(dir) {
   );
 }
 
+test("INT-18: join refuses a target nested inside a source wiki", () => {
+  const parent = freshDir("int18-nested");
+  try {
+    const wikiA = join(parent, "src-a");
+    const wikiB = join(parent, "src-b");
+    mkdirSync(wikiA);
+    mkdirSync(wikiB);
+    plantManagedWiki(wikiA);
+    plantManagedWiki(wikiB);
+    // Target inside wikiA.
+    const insideA = join(wikiA, "nested-out");
+    const r = resolveIntent({
+      subcommand: "join",
+      args: [wikiA, wikiB],
+      flags: { target: insideA },
+      cwd: parent,
+    });
+    assert.equal(r.status, "ambiguous");
+    assert.equal(r.error.code, "INT-18");
+    assert.match(r.error.message, /must not equal, nest under, or contain/);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("INT-18: join refuses a target that equals a source wiki", () => {
+  const parent = freshDir("int18-equal");
+  try {
+    const wikiA = join(parent, "src-a");
+    const wikiB = join(parent, "src-b");
+    mkdirSync(wikiA);
+    mkdirSync(wikiB);
+    plantManagedWiki(wikiA);
+    plantManagedWiki(wikiB);
+    const r = resolveIntent({
+      subcommand: "join",
+      args: [wikiA, wikiB],
+      flags: { target: wikiA },
+      cwd: parent,
+    });
+    assert.equal(r.status, "ambiguous");
+    assert.equal(r.error.code, "INT-18");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("INT-18: join refuses a target that contains a source wiki", () => {
+  const parent = freshDir("int18-contains");
+  try {
+    const wikiA = join(parent, "inner", "src-a");
+    const wikiB = join(parent, "src-b");
+    mkdirSync(wikiA, { recursive: true });
+    mkdirSync(wikiB);
+    plantManagedWiki(wikiA);
+    plantManagedWiki(wikiB);
+    // Target is `parent/inner` — a parent of wikiA. Must also be
+    // rejected because writing into it would mutate wikiA's tree.
+    const outer = join(parent, "inner");
+    const r = resolveIntent({
+      subcommand: "join",
+      args: [wikiA, wikiB],
+      flags: { target: outer },
+      cwd: parent,
+    });
+    assert.equal(r.status, "ambiguous");
+    assert.equal(r.error.code, "INT-18");
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("INT-18: join accepts a sibling target", () => {
+  const parent = freshDir("int18-ok");
+  try {
+    const wikiA = join(parent, "src-a");
+    const wikiB = join(parent, "src-b");
+    const target = join(parent, "out.wiki");
+    mkdirSync(wikiA);
+    mkdirSync(wikiB);
+    plantManagedWiki(wikiA);
+    plantManagedWiki(wikiB);
+    const r = resolveIntent({
+      subcommand: "join",
+      args: [wikiA, wikiB],
+      flags: { target },
+      cwd: parent,
+    });
+    assert.equal(r.status, "ok", JSON.stringify(r));
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("VALID_LAYOUT_MODES is the canonical allow-list", () => {
   assert.deepEqual([...VALID_LAYOUT_MODES], ["sibling", "in-place", "hosted"]);
 });
