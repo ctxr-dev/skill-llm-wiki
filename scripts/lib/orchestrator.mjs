@@ -166,8 +166,21 @@ export async function runOperation(plan, {
             gitCommit(wikiRoot, `phase ${phase}: ${summary}`);
           }
         },
+        // Stream join's phases through the orchestrator's own
+        // `record()` the moment each one fires — that routes the
+        // phase into the outer `phases[]` AND invokes the CLI's
+        // `onProgress` breadcrumb callback in real time. Without
+        // this hook we'd only see join's phases relayed AFTER
+        // `runJoin` returns (the pre-X.9-followup post-call
+        // `for (const p of result.phases)` loop), which made the
+        // whole join look like one silent block in the breadcrumb
+        // stream. runJoin's `phaseLog` still accumulates for the
+        // returned-result shape, but the outer `phases[]` now
+        // gets populated live.
+        onPhase: ({ phase, summary }) => {
+          record(phase, summary);
+        },
       });
-      for (const p of result.phases) record(p.name, p.summary);
       // Tier 2 suspend: convergence parked decisions that can't be
       // resolved without a sub-agent. Drain the pending queue,
       // write the batch, and throw NeedsTier2Error — the caller

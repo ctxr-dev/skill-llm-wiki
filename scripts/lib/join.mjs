@@ -695,6 +695,17 @@ export async function runJoin(sources, target, ctx = {}) {
     // runs end-to-end without intermediate commits — the shape tests
     // in `tests/unit/join.test.mjs` use that path.
     onPhaseCommit = null,
+    // Optional per-phase progress hook, invoked synchronously the
+    // moment each phase records its summary (i.e. BEFORE the op
+    // awaits the next phase's I/O). This is what makes CLI-level
+    // progress streaming work for join — without it the
+    // orchestrator only sees join's phases AFTER `runJoin`
+    // returns, so the `[<op-id> N] phase: summary` breadcrumbs
+    // batch-print at the end of the join instead of streaming
+    // during execution. Shape: ({ phase, summary }) => void.
+    // Errors are swallowed — a misbehaving progress hook must
+    // never halt the op.
+    onPhase = null,
   } = ctx;
   const commitPhase = async (phase, summary) => {
     if (onPhaseCommit) await onPhaseCommit({ phase, summary });
@@ -703,7 +714,16 @@ export async function runJoin(sources, target, ctx = {}) {
     throw new Error(`join: at least 2 source wikis required, got ${sources?.length ?? 0}`);
   }
   const phaseLog = [];
-  const record = (name, summary) => phaseLog.push({ name, summary });
+  const record = (name, summary) => {
+    phaseLog.push({ name, summary });
+    if (onPhase) {
+      try {
+        onPhase({ phase: name, summary });
+      } catch {
+        /* progress hook throws never halt the op */
+      }
+    }
+  };
 
   // Phase 1 — ingest-all.
   const ingested = sources.map((s) => ingestWiki(s));
