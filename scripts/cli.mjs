@@ -848,12 +848,36 @@ async function main() {
     }
     const opId = newOpId(cmd);
     const startedIso = new Date().toISOString();
+    // X.9 progress: stream each orchestrator phase's `record()`
+    // output to stderr as it fires. On by default for interactive
+    // use; suppressed in JSON mode (the `skill-llm-wiki/v1`
+    // envelope is the only permitted stdout/stderr shape then —
+    // injecting human-readable breadcrumbs would make the stderr
+    // channel non-parseable) and suppressed via
+    // `LLM_WIKI_NO_PROGRESS=1` for CI / hermetic runs that want
+    // the pre-X.9 silent shape. Progress goes to stderr (never
+    // stdout) so consumers piping the command's stdout don't
+    // conflate phase chatter with the final op-summary payload.
+    const suppressProgress =
+      jsonMode || process.env.LLM_WIKI_NO_PROGRESS === "1";
+    const onProgress = suppressProgress
+      ? null
+      : (phase) => {
+          try {
+            process.stderr.write(
+              `[${opId} ${phase.index}] ${phase.name}: ${phase.summary}\n`,
+            );
+          } catch {
+            // Best-effort — a closed stderr shouldn't halt the op.
+          }
+        };
     let result;
     try {
       result = await runOperation(plan, {
         opId,
         source: plan.source,
         startedIso,
+        onProgress,
       });
     } catch (err) {
       if (err instanceof NonInteractiveError) {
