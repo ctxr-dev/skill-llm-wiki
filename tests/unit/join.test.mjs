@@ -80,17 +80,23 @@ function buildTinyWiki(tag, { leaves = [], subcats = {} } = {}) {
     },
     "",
   );
-  // `leaves` in the simple form are placed under `leaves/` so the
-  // fixture respects the X.11 LEAF-AT-WIKI-ROOT invariant. For
-  // richer shapes use the `subcats` key directly.
+  // `leaves` in the simple form are placed under a tag-derived
+  // subcategory so the fixture respects the X.11 LEAF-AT-WIKI-ROOT
+  // invariant. Using `section-<tag>` rather than a hardcoded
+  // `leaves/` avoids cross-fixture index collisions — two sources
+  // built with `buildTinyWiki("a", ...)` and `buildTinyWiki("b", ...)`
+  // would otherwise both land a `leaves/index.md` with `id:
+  // "leaves"`, tripping `JOIN-INDEX-COLLISION`. Each tag's
+  // subcategory id is distinct.
+  const subName = `section-${tag}`;
   if (leaves.length > 0) {
     writeFm(
-      join(wiki, "leaves", "index.md"),
+      join(wiki, subName, "index.md"),
       {
-        id: "leaves",
+        id: subName,
         type: "index",
         depth_role: "subcategory",
-        focus: "leaves subcategory",
+        focus: `${subName} subcategory`,
         parents: ["../index.md"],
       },
       "",
@@ -98,7 +104,7 @@ function buildTinyWiki(tag, { leaves = [], subcats = {} } = {}) {
   }
   for (const leaf of leaves) {
     writeFm(
-      join(wiki, "leaves", `${leaf.id}.md`),
+      join(wiki, subName, `${leaf.id}.md`),
       {
         id: leaf.id,
         type: "primary",
@@ -235,11 +241,86 @@ test("resolveIdCollisions: namespace policy prefixes second-source id", () => {
     assert.equal(ids.filter((i) => i === "dup").length, 1);
     const renamed = ids.find((i) => i !== "dup");
     assert.match(renamed, /\.dup$/);
-    assert.ok(renameMap.has("dup"));
-    assert.equal(renameMap.get("dup"), renamed);
+    // renameMap is source-scoped: the second source's rename is
+    // keyed by its wikiRoot so 3+ colliding sources each get their
+    // own slot without clobbering.
+    assert.ok(renameMap.has(b));
+    assert.equal(renameMap.get(b).get("dup"), renamed);
   } finally {
     rmSync(a, { recursive: true, force: true });
     rmSync(b, { recursive: true, force: true });
+  }
+});
+
+test("resolveIdCollisions: namespace policy handles 3+ colliding sources without clobbering", () => {
+  // Regression for the N>2 collision case: before the source-scoped
+  // renameMap refactor, three sources all sharing id "dup" would
+  // overwrite each other's rename entry in a flat Map<oldId,newId>,
+  // so phase 6 would rewrite all references to the last-renamed
+  // value. With source-scoped scope each source gets its own slot.
+  const a = buildTinyWiki("ns3-a", { leaves: [{ id: "dup" }] });
+  const b = buildTinyWiki("ns3-b", { leaves: [{ id: "dup" }] });
+  const c = buildTinyWiki("ns3-c", { leaves: [{ id: "dup" }] });
+  try {
+    const plan = planUnion([ingestWiki(a), ingestWiki(b), ingestWiki(c)]);
+    const { plan: resolved, renameMap } = resolveIdCollisions(
+      plan,
+      "namespace",
+    );
+    const ids = resolved.leaves.map((l) => l.data.id).sort();
+    assert.equal(ids.length, 3);
+    // One record still "dup" (source A keeper); the other two have
+    // distinct namespaced ids.
+    const keepers = ids.filter((i) => i === "dup");
+    const namespaced = ids.filter((i) => i !== "dup");
+    assert.equal(keepers.length, 1);
+    assert.equal(namespaced.length, 2);
+    assert.equal(new Set(namespaced).size, 2, "namespaced ids must be distinct");
+    // renameMap carries per-source entries for B and C.
+    assert.ok(renameMap.has(b));
+    assert.ok(renameMap.has(c));
+    assert.notEqual(
+      renameMap.get(b).get("dup"),
+      renameMap.get(c).get("dup"),
+      "each source's namespaced id must be distinct",
+    );
+  } finally {
+    rmSync(a, { recursive: true, force: true });
+    rmSync(b, { recursive: true, force: true });
+    rmSync(c, { recursive: true, force: true });
+  }
+});
+
+test("rewireReferences: source-scoped renameMap resolves per-referrer", () => {
+  // Given two sources B and C both renamed "dup" → "b.dup" and
+  // "c.dup" respectively, a link in B's frontmatter pointing at
+  // "dup" must resolve to "b.dup", and a link in C's frontmatter
+  // pointing at "dup" must resolve to "c.dup". The flat-renameMap
+  // regression would rewrite both to the same value.
+  const b = buildTinyWiki("rwn-b", { leaves: [{ id: "dup" }] });
+  const c = buildTinyWiki("rwn-c", { leaves: [{ id: "dup" }] });
+  try {
+    // Add a link to each source's leaf pointing at "dup". Subcat
+    // name is `section-<tag>` per buildTinyWiki convention.
+    for (const [src, tag] of [[b, "rwn-b"], [c, "rwn-c"]]) {
+      const p = join(src, `section-${tag}`, "dup.md");
+      const parsed = parseFrontmatter(readFileSync(p, "utf8"), p);
+      parsed.data.links = [{ id: "dup" }];
+      writeFileSync(p, renderFrontmatter(parsed.data, parsed.body), "utf8");
+    }
+    const renameMap = new Map([
+      [b, new Map([["dup", "b.dup"]])],
+      [c, new Map([["dup", "c.dup"]])],
+    ]);
+    const plan = planUnion([ingestWiki(b), ingestWiki(c)]);
+    rewireReferences(plan, renameMap, new Map());
+    const bLeaf = plan.leaves.find((l) => l.sourceWiki === b);
+    const cLeaf = plan.leaves.find((l) => l.sourceWiki === c);
+    assert.equal(bLeaf.data.links[0].id, "b.dup");
+    assert.equal(cLeaf.data.links[0].id, "c.dup");
+  } finally {
+    rmSync(b, { recursive: true, force: true });
+    rmSync(c, { recursive: true, force: true });
   }
 });
 
@@ -362,17 +443,17 @@ test("mergeCategoriesWithSameFocus: detects shared-focus top-level categories", 
 
 // ── rewireReferences ────────────────────────────────────────────
 
-test("rewireReferences: rewrites links[].id via renameMap", () => {
+test("rewireReferences: rewrites links[].id via source-scoped renameMap", () => {
   const a = buildTinyWiki("rw-a", { leaves: [{ id: "alpha" }] });
   try {
     // Decorate alpha with a links[] pointing at "beta".
-    const aPath = join(a, "leaves", "alpha.md");
+    const aPath = join(a, "section-rw-a", "alpha.md");
     const parsed = parseFrontmatter(readFileSync(aPath, "utf8"), aPath);
     parsed.data.links = [{ id: "beta" }];
     writeFileSync(aPath, renderFrontmatter(parsed.data, parsed.body), "utf8");
     const ingested = ingestWiki(a);
     const plan = planUnion([ingested]);
-    const renameMap = new Map([["beta", "other.beta"]]);
+    const renameMap = new Map([[a, new Map([["beta", "other.beta"]])]]);
     rewireReferences(plan, renameMap, new Map());
     const rewritten = plan.leaves[0].data.links[0].id;
     assert.equal(rewritten, "other.beta");
@@ -389,13 +470,13 @@ test("materialisePlan: writes leaves + indices under target", () => {
   try {
     const plan = planUnion([ingestWiki(a)]);
     materialisePlan(plan, out);
-    // buildTinyWiki nests its `leaves[]` under `leaves/` so the
-    // fixture respects the X.11 root-containment invariant.
-    assert.ok(existsSync(join(out, "leaves", "alpha.md")));
+    // buildTinyWiki nests `leaves[]` under `section-<tag>/` so
+    // the fixture respects the X.11 root-containment invariant.
+    assert.ok(existsSync(join(out, "section-mat-a", "alpha.md")));
     assert.ok(existsSync(join(out, "index.md")));
     const alphaParsed = parseFrontmatter(
-      readFileSync(join(out, "leaves", "alpha.md"), "utf8"),
-      join(out, "leaves", "alpha.md"),
+      readFileSync(join(out, "section-mat-a", "alpha.md"), "utf8"),
+      join(out, "section-mat-a", "alpha.md"),
     );
     assert.equal(alphaParsed.data.id, "alpha");
     assert.equal(alphaParsed.data.type, "primary");

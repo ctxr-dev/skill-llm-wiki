@@ -19,17 +19,17 @@
 // Source immutability: every source wiki is treated as strictly
 // read-only. The pipeline materialises the unified output at the
 // target path (created empty by the orchestrator before runJoin is
-// called); sources are never touched on disk. A consumer who passes
-// the same path for `target` and one of the sources will fail at
-// `prepareTarget` because the target must be a fresh empty directory.
+// called); sources are never touched on disk. This module assumes
+// that precondition has already been enforced by the caller
+// (intent.mjs's join branch refuses a non-empty target via INT-01
+// and the CLI creates the target empty via mkdirSync when
+// `plan.is_new_wiki` is set).
 
 import {
-  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
@@ -185,42 +185,66 @@ export function planUnion(ingestedSources) {
 // ── Phase 4: resolve-id-collisions ───────────────────────────────
 //
 // Detect duplicate ids across sources and apply the configured
-// collision policy:
+// collision policy. Includes BOTH leaves and indices — `validateWiki`
+// enforces global id uniqueness across every entry type, so an
+// index-only collision (two sources both with `auth/index.md`) would
+// still trip `DUP-ID` at phase 9. Index collisions are detected but
+// first-cut only renames the ID on the collision (the directory
+// basename stays, producing `ID-MISMATCH-DIR` which the user will
+// need to resolve — full directory-rename for index collisions is
+// tracked as a follow-up; in the common case of joining topically-
+// distinct source wikis index collisions don't occur).
+//
+// Collision policies:
 //
 //   `namespace` (default): rename the colliding entry to
 //     `<source-prefix>.<original-id>` where the prefix is the
-//     first source-wiki's basename (e.g. `reviewers.wiki` → `reviewers`).
-//     The original id is preserved in `aliases[]` so inbound
-//     references still resolve. Never loses an entry; the
-//     namespace prefix guarantees uniqueness without a merge.
+//     colliding source-wiki's basename (e.g. `reviewers.wiki` →
+//     `reviewers`). The original id is preserved in `aliases[]` so
+//     inbound references still resolve. Never loses an entry.
 //
 //   `merge`: when frontmatter is compatible (same focus, same
 //     type, same depth_role), fold the duplicates into one entry
 //     inheriting both ids via `aliases[]` and both source wikis
 //     via `source_wikis[]`. When frontmatter is INcompatible,
-//     fall through to `namespace` with a warning — we never lose
-//     content on a "merge" fallback.
+//     fall through to `namespace` — we never lose content on a
+//     merge fallback.
 //
-//   `ask`: halt and write the collision set to a HUMAN decisions
-//     file at `<target>/.work/join-collisions.yaml`. The caller
-//     surfaces the exit code and file path so the operator can
-//     resolve manually and re-invoke. NOT IMPLEMENTED in the
-//     first cut — raises instead of wiring the full ask flow.
+//   `ask`: halt and throw `JOIN-COLLISION-ASK` with the collision
+//     set for the caller to surface. The interactive resolution
+//     flow is deferred; first-cut just fails loud.
 //
 // Returns `{ plan, renameMap, mergeMap }`:
 //   - plan:       the mutated plan (leaves/indices with renamed ids)
-//   - renameMap:  Map<oldId, newId> so phase 6 can rewire references
-//   - mergeMap:   Map<absorbedId, keeperId> for merge policy
+//   - renameMap:  `Map<sourceWiki, Map<oldId, newId>>` — source-
+//                 scoped so 3+ sources sharing an id each get their
+//                 own entry without overwriting. `rewireReferences`
+//                 uses the referring entry's `sourceWiki` to pick
+//                 the right rename.
+//   - mergeMap:   `Map<absorbedId, keeperId>` — a flat map because
+//                 every absorbed id collapses to the keeper's id
+//                 regardless of the referring source's identity.
 export function resolveIdCollisions(plan, policy = DEFAULT_COLLISION_POLICY) {
   if (!VALID_COLLISION_POLICIES.includes(policy)) {
     throw new Error(
       `join: unknown id-collision policy "${policy}" (valid: ${VALID_COLLISION_POLICIES.join(", ")})`,
     );
   }
-  const byId = new Map(); // id → [records]
+  // Include both leaves and indices in collision detection. Each
+  // entry is tagged with `kind` so we can apply slightly different
+  // rename shapes (a leaf rename also updates relPath's filename;
+  // an index rename only updates the id frontmatter — renaming the
+  // whole subdirectory is deferred).
+  const byId = new Map();
   for (const leaf of plan.leaves) {
-    if (!byId.has(leaf.data.id)) byId.set(leaf.data.id, []);
-    byId.get(leaf.data.id).push(leaf);
+    const id = leaf.data.id;
+    if (!byId.has(id)) byId.set(id, []);
+    byId.get(id).push({ kind: "leaf", record: leaf });
+  }
+  for (const idx of plan.indices) {
+    const id = idx.data.id;
+    if (!byId.has(id)) byId.set(id, []);
+    byId.get(id).push({ kind: "index", record: idx });
   }
   const collisions = [...byId.entries()].filter(([, arr]) => arr.length > 1);
   if (collisions.length === 0) {
@@ -234,27 +258,32 @@ export function resolveIdCollisions(plan, policy = DEFAULT_COLLISION_POLICY) {
     err.code = "JOIN-COLLISION-ASK";
     err.collisions = collisions.map(([id, arr]) => ({
       id,
-      sources: arr.map((r) => r.sourceWiki),
+      sources: arr.map((entry) => entry.record.sourceWiki),
     }));
     throw err;
   }
+  // Source-scoped rename map: Map<sourceWiki, Map<oldId, newId>>.
+  // When three sources all contain id "dup", each gets its own
+  // namespace-prefixed id; `rewireReferences` picks the right
+  // rename by looking up `renameMap.get(referrer.sourceWiki)`.
   const renameMap = new Map();
+  const addRename = (sourceWiki, oldId, newId) => {
+    if (!renameMap.has(sourceWiki)) renameMap.set(sourceWiki, new Map());
+    renameMap.get(sourceWiki).set(oldId, newId);
+  };
   const mergeMap = new Map();
-  // Track the absolute paths of records that were absorbed into a
-  // keeper (merge policy). Those records must not appear in the
-  // output plan. We track by absolute path rather than id because
-  // both keeper and absorbed start out with the same id (that's
-  // what "collision" means); the id-based filter wouldn't
-  // distinguish them.
   const absorbedPaths = new Set();
   for (const [id, dupes] of collisions) {
-    // Keeper is the first source's record; subsequent records
-    // either get merged (merge policy + compatible) or renamed
-    // (namespace policy, or merge-fallback on incompatible fm).
-    const [keeper, ...rest] = dupes;
-    for (const dup of rest) {
+    // Keeper is the first source's entry; subsequent entries either
+    // merge (merge policy + compatible) or rename (namespace policy,
+    // or merge-fallback on incompatible frontmatter).
+    const [keeperEntry, ...rest] = dupes;
+    const keeper = keeperEntry.record;
+    for (const dupEntry of rest) {
+      const dup = dupEntry.record;
       const canMerge =
         policy === "merge" &&
+        dupEntry.kind === keeperEntry.kind &&
         dup.data.focus === keeper.data.focus &&
         dup.data.type === keeper.data.type &&
         dup.data.depth_role === keeper.data.depth_role;
@@ -273,25 +302,46 @@ export function resolveIdCollisions(plan, policy = DEFAULT_COLLISION_POLICY) {
         // Namespace: prefix with the basename of the dup's source
         // wiki. `reviewers.wiki` → `reviewers`; the trailing
         // `.wiki` suffix is idiomatic and stripped for the prefix.
-        // The leaf's filename must track the id (validator enforces
-        // `ID-MISMATCH-FILE`), so we rewrite relPath too: the
-        // dirname stays, only the basename changes from `<old-id>.md`
-        // to `<new-id>.md`. `absolutePath` is left as-is because the
-        // record hasn't been materialised yet — materialisePlan
-        // writes at the new relPath under the target.
         const prefix = namespacePrefix(dup.sourceWiki);
         const newId = `${prefix}.${id}`;
         dup.data.aliases = dedupe([...(dup.data.aliases || []), dup.data.id]);
-        renameMap.set(dup.data.id, newId);
+        addRename(dup.sourceWiki, dup.data.id, newId);
         dup.data.id = newId;
-        const dir = dirname(dup.relPath);
-        dup.relPath = dir === "." ? `${newId}.md` : `${dir}/${newId}.md`;
+        if (dupEntry.kind === "leaf") {
+          // Leaf rename: the filename must track the id (validator
+          // enforces `ID-MISMATCH-FILE`); rewrite relPath.
+          const dir = dirname(dup.relPath);
+          dup.relPath =
+            dir === "." ? `${newId}.md` : `${dir}/${newId}.md`;
+        }
+        // Index rename: full directory rename is deferred (see
+        // module header). Renaming just the `id` frontmatter would
+        // trip ID-MISMATCH-DIR on the rebuilt tree; rather than
+        // producing an invalid tree, short-circuit here and fail
+        // loud so the user knows joining these specific inputs
+        // needs manual disambiguation before re-running.
+        if (dupEntry.kind === "index") {
+          const err = new Error(
+            `join: index id collision on "${id}" between ` +
+              `${keeper.sourceWiki} and ${dup.sourceWiki}. ` +
+              `Directory-rename for index collisions is not yet ` +
+              `supported; rename one of the conflicting directories ` +
+              `in its source wiki before joining.`,
+          );
+          err.code = "JOIN-INDEX-COLLISION";
+          throw err;
+        }
       }
     }
   }
-  const rebuilt = plan.leaves.filter((l) => !absorbedPaths.has(l.absolutePath));
+  const rebuiltLeaves = plan.leaves.filter(
+    (l) => !absorbedPaths.has(l.absolutePath),
+  );
+  const rebuiltIndices = plan.indices.filter(
+    (i) => !absorbedPaths.has(i.absolutePath),
+  );
   return {
-    plan: { leaves: rebuilt, indices: plan.indices },
+    plan: { leaves: rebuiltLeaves, indices: rebuiltIndices },
     renameMap,
     mergeMap,
   };
@@ -332,37 +382,49 @@ export function mergeCategoriesWithSameFocus(ingestedSources) {
 
 // ── Phase 6: rewire-references ───────────────────────────────────
 //
-// Walk every leaf + index in the plan and rewrite any `links[].id`,
-// `overlay_targets[]`, or `parents[]` entry that points at a
-// renamed or merged id. The resolution order is:
-//   1. renameMap: oldId → newId (namespace policy prefix)
-//   2. mergeMap:  absorbedId → keeperId (merge policy fold)
-//   3. alias lookup across the unified entry set
+// Walk every leaf + index in the plan and rewrite any `links[].id`
+// or `overlay_targets[]` entry that points at a renamed or merged
+// id. Resolution order for each reference:
+//   1. `mergeMap` — absorbed → keeper is source-agnostic (every
+//      source's reference to the absorbed id collapses to the
+//      same keeper id), so it's consulted first and applies flat.
+//   2. `renameMap.get(referrerSourceWiki)` — source-scoped, so a
+//      link in source B's frontmatter pointing at "dup" resolves
+//      to B's renamed id (e.g. "b.dup"), not A's preserved "dup".
+//      This is the fix for the N>2 collision case: before the
+//      scope-by-source change, 3+ sources sharing "dup" all
+//      clobbered renameMap entries and left references pointing
+//      at the last-renamed value.
 // Unresolvable references are left as-is; the downstream
-// `validateWiki` will flag them as `DANGLING-LINK` /
-// `DANGLING-OVERLAY` so the user sees a single structured report.
+// `validateWiki` flags them as `DANGLING-LINK` / `DANGLING-OVERLAY`
+// so the user gets a single structured report at phase 9.
+//
+// `parents[]` entries are POSIX paths, not ids, and never resolve
+// via the id maps — they're rewritten at phase 11 by the same
+// path-relative rules the regular build pipeline uses.
 export function rewireReferences(plan, renameMap, mergeMap) {
-  const resolveId = (ref) => {
+  const resolveId = (ref, sourceWiki) => {
     if (typeof ref !== "string") return ref;
-    if (renameMap.has(ref)) return renameMap.get(ref);
     if (mergeMap.has(ref)) return mergeMap.get(ref);
+    const sourceRenames = renameMap.get(sourceWiki);
+    if (sourceRenames && sourceRenames.has(ref)) return sourceRenames.get(ref);
     return ref;
   };
   const rewriteLinks = (entry) => {
+    const src = entry.sourceWiki;
     if (Array.isArray(entry.data.links)) {
       entry.data.links = entry.data.links.map((link) => {
         if (link && typeof link === "object" && typeof link.id === "string") {
-          return { ...link, id: resolveId(link.id) };
+          return { ...link, id: resolveId(link.id, src) };
         }
         return link;
       });
     }
     if (Array.isArray(entry.data.overlay_targets)) {
-      entry.data.overlay_targets = entry.data.overlay_targets.map(resolveId);
+      entry.data.overlay_targets = entry.data.overlay_targets.map((id) =>
+        resolveId(id, src),
+      );
     }
-    // parents[] entries are POSIX paths, not ids — they don't
-    // resolve via the id maps. They get rewritten in phase 11 by
-    // the same path-relative rules the regular build pipeline uses.
   };
   for (const leaf of plan.leaves) rewriteLinks(leaf);
   for (const idx of plan.indices) rewriteLinks(idx);
@@ -377,6 +439,27 @@ export function rewireReferences(plan, renameMap, mergeMap) {
 // Category indices are written last so directories exist before
 // any index tries to enumerate entries[] at rebuild time.
 //
+// Structural fields on indices (`id`, `depth_role`, `parents`,
+// `depth`, `entries`) are STRIPPED before writing. `rebuildAllIndices`
+// in phase 8 re-derives every one of them from the target tree's
+// actual shape — the source's stale values would trip
+// `ID-MISMATCH-DIR` (source root id == `basename(sourceWiki)` which
+// is not `basename(target)`) and `PARENTS-REQUIRED` (source subcat
+// parents are relative to the source root, not the unified target).
+// Authored-intent fields (`focus`, `shared_covers`, `orientation`,
+// etc.) ARE preserved from the first source whose index lands at
+// a given relPath — that's the closest we get to "category merge"
+// without running the convergence MERGE operator here.
+//
+// Duplicate index relPaths (two sources with the same
+// `foo/index.md`) are resolved first-wins: the first source's
+// index contributes the authored-intent fields; subsequent writes
+// at the same relPath are dropped. If the two indices have
+// different focus values, phase 7's convergence-on-unified-tree
+// won't merge them (the subcats remain distinct by content);
+// phase 9's validation surfaces the near-duplicate via normal
+// focus/DUP-ID checks.
+//
 // Source immutability: writes happen ONLY under `target`, never
 // back to any source wiki.
 export function materialisePlan(plan, target) {
@@ -385,17 +468,12 @@ export function materialisePlan(plan, target) {
   for (const leaf of plan.leaves) {
     const absPath = join(target, leaf.relPath);
     mkdirSync(dirname(absPath), { recursive: true });
-    // Strip fields that are either provenance-only (sourceWiki,
-    // absolutePath) or derived at rebuild time (entries on indices,
-    // but we're writing leaves here so not applicable). Everything
-    // else from the leaf's frontmatter is preserved.
     const data = { ...leaf.data };
     writeFileSync(absPath, renderFrontmatter(data, leaf.body), "utf8");
   }
-  // Write category indices — but only for directories that actually
-  // ended up with at least one leaf. A merged-out category's
-  // subdirectory becomes empty after phase 4, and writing its
-  // index.md would leave a dangling stub with no entries[].
+  // Category indices: write only for directories that actually hold
+  // at least one leaf; strip structural fields so `rebuildAllIndices`
+  // re-derives them; first-wins on duplicate relPath.
   const liveDirs = new Set();
   for (const leaf of plan.leaves) {
     const parts = leaf.relPath.split("/");
@@ -404,14 +482,24 @@ export function materialisePlan(plan, target) {
     }
   }
   liveDirs.add(""); // wiki root always gets an index
+  const writtenIndexPaths = new Set();
   for (const idx of plan.indices) {
     const parts = idx.relPath.split("/");
     const dirRel = parts.slice(0, -1).join("/");
     if (!liveDirs.has(dirRel)) continue;
+    if (writtenIndexPaths.has(idx.relPath)) continue;
+    writtenIndexPaths.add(idx.relPath);
     const absPath = join(target, idx.relPath);
     mkdirSync(dirname(absPath), { recursive: true });
     const data = { ...idx.data };
-    // entries[] will be re-derived by rebuildAllIndices in phase 8.
+    // Structural fields — all re-derived by rebuildAllIndices from
+    // the materialised tree's actual shape. Source values would
+    // mismatch the target's position in the unified hierarchy.
+    delete data.id;
+    delete data.type;
+    delete data.depth_role;
+    delete data.depth;
+    delete data.parents;
     delete data.entries;
     writeFileSync(absPath, renderFrontmatter(data, idx.body), "utf8");
   }
