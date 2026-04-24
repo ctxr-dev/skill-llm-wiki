@@ -495,8 +495,21 @@ test("resolveIdCollisions: index id collision throws JOIN-INDEX-COLLISION", () =
     assert.ok(caught, "expected JOIN-INDEX-COLLISION to throw");
     assert.equal(caught.code, "JOIN-INDEX-COLLISION");
     assert.match(caught.message, /index id collision on "auth"/);
-    assert.match(caught.message, new RegExp(a.replace(/\+/g, "\\+")));
-    assert.match(caught.message, new RegExp(b.replace(/\+/g, "\\+")));
+    // Substring-match the source paths rather than building regexes
+    // from them: Windows tmp paths contain backslashes (and other
+    // regex metacharacters on both OSes), so a naive
+    // `new RegExp(path)` both trips CodeQL's "incomplete string
+    // escaping" detector AND fails to match on Windows because the
+    // backslash-separated path isn't escaped. `includes()` sidesteps
+    // regex semantics entirely.
+    assert.ok(
+      caught.message.includes(a),
+      `error message must name source A path ${a}; got: ${caught.message}`,
+    );
+    assert.ok(
+      caught.message.includes(b),
+      `error message must name source B path ${b}; got: ${caught.message}`,
+    );
     // No partial mutation.
     for (const rec of pre) {
       const cur = plan.indices.find((i) => i.absolutePath === rec.path);
