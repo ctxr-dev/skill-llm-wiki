@@ -62,7 +62,7 @@ Every phase is a git commit in the wiki's private history, so you can inspect, d
 - **Stable sibling layout.** `<source>.wiki/` is the one folder a wiki ever lives in. No more `.llmwiki.v1`/`.v2`/`.v3` directory proliferation — prior states are reachable as git tags (`pre-op/<id>`, `op/<id>`) in the private repo.
 - **Three layout modes, never guessed.** `sibling` (default), `in-place` (source IS the wiki), and `hosted` (user-chosen path with a `.llmwiki.layout.yaml` contract). Ambiguous invocations refuse and prompt — see the "Ask, don't guess" rule.
 - **User-repo coexistence.** An auto-generated `.gitignore` hides the private metadata from any ancestor user git. The skill's isolation env block (`GIT_DIR`, `GIT_CONFIG_NOSYSTEM`, `core.hooksPath=/dev/null`, …) keeps the two gits from leaking into each other.
-- **Tiered AI strategy.** TF-IDF (free) → local MiniLM embeddings (required, ~23 MB one-time model download, zero-API) → Claude (only for mid-band ambiguity and decisions requiring natural-language judgment). `--quality-mode tiered-fast|claude-first|tier0-only` selects the escalation policy.
+- **Tiered AI strategy.** TF-IDF (free) → local MiniLM embeddings (required, ~23 MB one-time model download, zero-API) → Claude (only for mid-band ambiguity and decisions requiring natural-language judgment). `--quality-mode tiered-fast|claude-first|deterministic` selects the escalation policy.
 - **Deterministic slug collisions.** NEST operator auto-resolves slug-vs-member-id collisions with a deterministic `-group` suffix before apply. Your convergence loop never needs manual retries for DUP-ID.
 - **Optional interactive review.** `skill-llm-wiki rebuild <wiki> --review` prints the post-convergence diff and commit list, lets the user approve / abort / `drop:<sha>` specific iterations, and re-runs validation + index regen on the reverted tree.
 - **Windows parity.** The CI matrix runs the smoke suite on both `ubuntu-latest` and `windows-latest`; the isolation env switches `/dev/null` to `NUL` and enables `core.longpaths=true` on Windows.
@@ -463,7 +463,7 @@ Quality modes select the escalation policy:
 
 - `tiered-fast` (default) — full Tier 0 → 1 → 2 ladder.
 - `claude-first` — skip Tier 1; mid-band Tier 0 escalates straight to Claude.
-- `tier0-only` — air-gapped mode; mid-band becomes an "undecidable" marker resolved via the interactive review flow.
+- `deterministic` — no LLM in the loop; Tier 1 mid-band resolved by a static threshold, cluster naming produced from member frontmatter. Byte-reproducible builds for air-gapped / hermetic CI use.
 
 Tier 1 uses `@xenova/transformers` running `Xenova/all-MiniLM-L6-v2` locally via ONNX (~23 MB one-time model download, ~50 ms per text on CPU, zero API cost). It is a **required** runtime dependency since v0.4.0 — the dependency preflight at CLI startup verifies it is resolvable, and will offer to `npm install` it on a fresh checkout if it is missing.
 

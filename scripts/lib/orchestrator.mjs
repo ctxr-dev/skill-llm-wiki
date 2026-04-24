@@ -69,6 +69,7 @@ import {
 } from "./tier2-protocol.mjs";
 import {
   clearTier2Responses,
+  resolveQualityMode,
   seedTier2Responses,
   takePendingRequests,
 } from "./tiered.mjs";
@@ -363,7 +364,14 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     }
     const convergence = await runConvergence(wikiRoot, {
       opId,
-      qualityMode: plan.flags?.quality_mode || "tiered-fast",
+      // Resolve through tiered.mjs::resolveQualityMode so the
+      // `LLM_WIKI_QUALITY_MODE` env var is actually consulted (the
+      // prior `plan.flags?.quality_mode || "tiered-fast"` shortcut
+      // silently dropped the env-var path documented in
+      // methodology.md). Intent-layer INT-13 already catches an
+      // invalid flag value before we reach here; an invalid env
+      // var surfaces from `resolveQualityMode` as a plain throw.
+      qualityMode: resolveQualityMode(plan.flags || {}),
       interactive: false, // orchestrator runs non-interactive
       commitBetweenIterations: async ({ iteration, operator, summary }) => {
         gitRunChecked(wikiRoot, ["add", "-A"]);
@@ -468,7 +476,10 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
     if (fanoutTarget != null || maxDepth != null) {
       balance = await runBalance(wikiRoot, {
         opId,
-        qualityMode: plan.flags?.quality_mode || "tiered-fast",
+        // Same resolveQualityMode indirection as the convergence
+        // phase above — keeps the env-var path working on builds
+        // that use the balance-enforcement flags.
+        qualityMode: resolveQualityMode(plan.flags || {}),
         fanoutTarget,
         maxDepth,
         commitBetweenIterations: async ({ iteration, operator, summary }) => {

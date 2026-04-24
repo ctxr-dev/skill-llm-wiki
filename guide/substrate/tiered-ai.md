@@ -9,7 +9,7 @@ covers:
   - "Tier 0 is TF-IDF over frontmatter (focus + covers + tags) with fixed thresholds"
   - "Tier 1 is local embeddings via @xenova/transformers (MiniLM, REQUIRED dep)"
   - "Tier 2 is a sub-agent, executed via the CLI exit-7 handshake (never inline)"
-  - default quality mode is tiered-fast; claude-first and tier0-only are opt-in
+  - default quality mode is tiered-fast; claude-first and deterministic are opt-in
   - "similarity-cache at <wiki>/.llmwiki/similarity-cache/ memoises pairwise results"
   - "decision-log at <wiki>/.llmwiki/decisions.yaml records every non-trivial decision"
   - operator-convergence routes every MERGE similarity check through tiered.decide
@@ -85,8 +85,9 @@ well-structured corpora — pairs of near-duplicate entries
 should collapse as SAME, obviously unrelated pairs as DIFFERENT
 — leaving only genuinely ambiguous pairs to escalate. The actual
 Tier 0 hit rate on a given wiki depends on how informative the
-frontmatter is; run with `--quality-mode tier0-only` and inspect
-`decisions.yaml` to measure the tier distribution for your corpus.
+frontmatter is; inspect `decisions.yaml` after a build to measure
+the tier distribution for your corpus (grep the `tier:` field on
+every decision entry).
 
 ## Tier 1 — local embeddings (scripts/lib/embeddings.mjs)
 
@@ -275,13 +276,13 @@ all of its Tier 2 cost on subsequent rebuilds.
 
 ## Quality modes
 
-Choose via `--quality-mode` or the `LLM_WIKI_QUALITY_MODE` env var.
+Choose via `--quality-mode` (flag) or `LLM_WIKI_QUALITY_MODE` (env var). The flag wins when both are set. Invalid values on EITHER path raise `INT-13` at the intent layer with the same valid-values suggestions — a stale env value from an obsolete shell profile fails loud on the next `skill-llm-wiki` invocation rather than silently falling through to a plain throw at convergence time. Env-var validation is gated to subcommands that consume quality mode (build / extend / rebuild / fix / join); recovery paths like `rollback` are unaffected.
 
 | Mode | Behaviour | Use when |
 |------|-----------|----------|
 | **`tiered-fast`** (default) | Full ladder. Tier 0 → Tier 1 → Tier 2 on mid-band escalations. | General-purpose builds. |
 | `claude-first` | Tier 0 is still consulted for decisive cases. Mid-band Tier 0 skips Tier 1 and goes directly to Tier 2. | When the user values Claude's judgment over speed/cost. |
-| `tier0-only` | Tier 0 only. Mid-band decisions become "undecidable" and the caller must resolve manually. | Air-gapped, hermetic CI, and smoke tests that must not reach out to Claude. |
+| `deterministic` | Tier 0 → Tier 1 ladder with a static threshold resolving mid-band Tier 1 pairs. No LLM/sub-agent is ever consulted. Cluster naming comes from `generateDeterministicSlug` + `deterministicPurpose`; Tier 2 escalations are skipped entirely. Repeated runs on the same inputs produce byte-reproducible output. | Hermetic CI; large deterministic corpus builds where reproducibility matters more than Tier 2's naming nuance. For air-gapped use, pre-warm the Tier 1 MiniLM model cache on a networked host — `@xenova/transformers` downloads the model on first use otherwise. |
 
 ## Similarity cache
 

@@ -74,12 +74,14 @@ export const VALID_LAYOUT_MODES = Object.freeze(["sibling", "in-place", "hosted"
 // rejects typos BEFORE the orchestrator runs, avoiding expensive
 // rollbacks on a trivial flag error. Must stay in sync with
 // tiered.mjs:QUALITY_MODES — the unit test
-// tests/unit/intent-resolve.test.mjs:valid-quality-modes verifies
-// this.
+// tests/unit/intent-resolve.test.mjs::"VALID_QUALITY_MODES is in
+// sync with tiered.mjs::QUALITY_MODES" pins that both lists contain
+// the same modes in the same order so a future drift fails loud
+// instead of silently letting one layer accept a mode the other
+// rejects.
 export const VALID_QUALITY_MODES = Object.freeze([
   "tiered-fast",
   "claude-first",
-  "tier0-only",
   "deterministic",
 ]);
 
@@ -310,6 +312,44 @@ export function resolveIntent(ctx) {
         flag: `--quality-mode ${m}`,
       })),
       "--quality-mode",
+    );
+  }
+  // Validate `LLM_WIKI_QUALITY_MODE` here too, but only for
+  // subcommands that actually consult runtime quality-mode
+  // resolution (build / extend / rebuild / fix / join all call
+  // through `resolveQualityMode` in the orchestrator). Commands
+  // like `rollback`, `validate`, `init`, `heal` never touch
+  // tiered.mjs, so blocking them on a stale env var — especially
+  // `rollback`, which is a recovery path — would make a trivial
+  // shell-config typo catastrophic. Without this gate, a stale
+  // `LLM_WIKI_QUALITY_MODE=tier0-only` would lock the user out of
+  // recovering the wiki they were trying to rollback.
+  //
+  // Symmetric with the flag path — same code, same suggestions,
+  // same exit-2 ambiguous shape — for the subcommands where the
+  // env var is actually consumed.
+  const QUALITY_MODE_CONSUMERS = new Set([
+    "build",
+    "extend",
+    "rebuild",
+    "fix",
+    "join",
+  ]);
+  const envQualityMode = process.env.LLM_WIKI_QUALITY_MODE;
+  if (
+    QUALITY_MODE_CONSUMERS.has(subcommand) &&
+    !f.quality_mode &&
+    envQualityMode &&
+    !VALID_QUALITY_MODES.includes(envQualityMode)
+  ) {
+    return ambiguous(
+      "INT-13",
+      `unknown LLM_WIKI_QUALITY_MODE value "${envQualityMode}"`,
+      VALID_QUALITY_MODES.map((m) => ({
+        description: `use ${m} quality mode`,
+        flag: `--quality-mode ${m}`,
+      })),
+      "LLM_WIKI_QUALITY_MODE",
     );
   }
   // Balance-enforcement flags are build/rebuild-only. The CLI parser

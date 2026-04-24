@@ -8,7 +8,6 @@
 //   - Tier 0 decisive DIFFERENT resolves at tier=0
 //   - Tier 0 mid-band + tiered-fast escalates to Tier 1
 //   - Tier 0 mid-band + claude-first skips Tier 1, goes to Tier 2
-//   - Tier 0 mid-band + tier0-only returns "undecidable"
 //   - Tier 1 decisive resolves at tier=1
 //   - Tier 1 mid-band escalates to Tier 2
 //   - Tier 1 unavailable → Tier 2 fallthrough
@@ -65,8 +64,8 @@ test("resolveQualityMode: flag wins over env", () => {
   process.env.LLM_WIKI_QUALITY_MODE = "claude-first";
   try {
     assert.equal(
-      resolveQualityMode({ quality_mode: "tier0-only" }),
-      "tier0-only",
+      resolveQualityMode({ quality_mode: "deterministic" }),
+      "deterministic",
     );
   } finally {
     if (prev === undefined) delete process.env.LLM_WIKI_QUALITY_MODE;
@@ -103,7 +102,7 @@ test("resolveQualityMode: unknown mode throws", () => {
 test("QUALITY_MODES is the canonical allow-list", () => {
   assert.deepEqual(
     [...QUALITY_MODES],
-    ["tiered-fast", "claude-first", "tier0-only", "deterministic"],
+    ["tiered-fast", "claude-first", "deterministic"],
   );
 });
 
@@ -240,25 +239,6 @@ test("decide: claude-first mid-band skips Tier 1 and uses Tier 2", async () => {
     assert.equal(r.decision, "same");
     assert.equal(calls.length, 1);
     assert.equal(calls[0].reason, "claude-first mode");
-  } finally {
-    rmSync(wiki, { recursive: true, force: true });
-  }
-});
-
-test("decide: tier0-only returns undecidable for mid-band pairs", async () => {
-  const wiki = tmpWiki("tier0-only");
-  try {
-    const a = midBandA();
-    const b = midBandB();
-    const r = await decide(a, b, midBandContext(), {
-      wikiRoot: wiki,
-      opId: "op-1",
-      operator: "MERGE",
-      qualityMode: "tier0-only",
-    });
-    assert.equal(r.tier, 0);
-    assert.equal(r.decision, "undecidable");
-    assert.match(r.reason, /tier0-only/);
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }

@@ -11,7 +11,7 @@ covers:
   - "hidden-git plumbing: log (+ --op), show, diff (+ --op), blame, reflog, history"
   - "remote mirroring: remote add/list/remove, sync with tag-only default refspec"
   - "layout mode flags (--layout-mode sibling|in-place|hosted, --target)"
-  - "tiered-AI flags (--quality-mode tiered-fast|claude-first|tier0-only)"
+  - "tiered-AI flags (--quality-mode tiered-fast|claude-first|deterministic)"
   - "UX flags (--no-prompt, --json, --json-errors (legacy alias), --accept-dirty, --accept-foreign-target, --review)"
   - "internal helpers: ingest, draft-leaf, draft-category, index-rebuild, index-rebuild-one, shape-check"
   - "exit code summary (0 ok, 1 usage, 2 validation/ambiguity/review-abort, 3 resolve miss, 4 node too old, 5 git missing/too old, 6 wiki corrupt, 7 NEEDS_TIER2 suspend-and-resume, 8 DEPS_MISSING runtime dependency missing)"
@@ -230,7 +230,7 @@ All top-level operations accept:
 
 ## Tiered-AI flags
 
-- `--quality-mode tiered-fast|claude-first|tier0-only` — select the escalation policy. Default `tiered-fast` (TF-IDF → MiniLM embeddings → Claude). `tier0-only` never calls Claude, never loads Tier 1; mid-band pairs become "undecidable" markers the user resolves interactively. Unknown values raise `INT-13`.
+- `--quality-mode tiered-fast|claude-first|deterministic` — select the escalation policy. Default `tiered-fast` (TF-IDF → MiniLM embeddings → Claude). `deterministic` never calls Claude; Tier 1 mid-band pairs are resolved by a static threshold so repeated runs on the same inputs are byte-reproducible. Unknown values raise `INT-13`.
 
 ## UX flags
 

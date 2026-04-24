@@ -10,7 +10,12 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { resolveIntent, VALID_LAYOUT_MODES } from "../../scripts/lib/intent.mjs";
+import {
+  resolveIntent,
+  VALID_LAYOUT_MODES,
+  VALID_QUALITY_MODES,
+} from "../../scripts/lib/intent.mjs";
+import { QUALITY_MODES } from "../../scripts/lib/tiered.mjs";
 
 function freshDir(tag) {
   const dir = join(
@@ -301,6 +306,26 @@ test("INT-16a: --soft-dag-parents accepted on build + rebuild", async () => {
   }
 });
 
+test("VALID_QUALITY_MODES is in sync with tiered.mjs::QUALITY_MODES", () => {
+  // `intent.mjs` duplicates the mode list (rather than importing
+  // from tiered.mjs) so the intent layer can reject invalid values
+  // BEFORE the orchestrator starts. The duplication is only safe if
+  // both lists stay in lockstep — a drift means the intent layer
+  // either rejects a mode tiered accepts (hard break for users) or
+  // accepts one tiered rejects (expensive rollback after plan
+  // resolution). Compare in exported order — intent.mjs's doc
+  // comment says the two lists share a canonical ordering and
+  // intent-layer error messages reuse the same ordering in their
+  // "valid values" list, so a reorder on one side that's invisible
+  // to a membership-only check would still surface inconsistent
+  // messaging in practice.
+  assert.deepEqual(
+    [...VALID_QUALITY_MODES],
+    [...QUALITY_MODES],
+    `intent.mjs::VALID_QUALITY_MODES must match tiered.mjs::QUALITY_MODES exactly, including canonical order`,
+  );
+});
+
 test("INT-13: known --quality-mode values are accepted", async () => {
   const parent = freshDir("int13-ok");
   try {
@@ -312,7 +337,6 @@ test("INT-13: known --quality-mode values are accepted", async () => {
     for (const mode of [
       "tiered-fast",
       "claude-first",
-      "tier0-only",
       "deterministic",
     ]) {
       const r = _resolveIntent({
@@ -325,6 +349,107 @@ test("INT-13: known --quality-mode values are accepted", async () => {
     }
   } finally {
     rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("INT-13: unknown LLM_WIKI_QUALITY_MODE env var value", () => {
+  // Symmetry with --quality-mode: a typo in the env var should
+  // raise the same structured error + same valid-values
+  // suggestions, not fall through to a plain throw from
+  // resolveQualityMode at convergence time.
+  const prev = process.env.LLM_WIKI_QUALITY_MODE;
+  process.env.LLM_WIKI_QUALITY_MODE = "tier0-only";
+  try {
+    const parent = freshDir("int13-env");
+    try {
+      const src = join(parent, "docs");
+      mkdirSync(src);
+      const r = resolveIntent({
+        subcommand: "build",
+        args: [src],
+        flags: {},
+        cwd: parent,
+      });
+      assert.equal(r.status, "ambiguous");
+      assert.equal(r.error.code, "INT-13");
+      assert.match(r.error.message, /LLM_WIKI_QUALITY_MODE/);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  } finally {
+    if (prev === undefined) delete process.env.LLM_WIKI_QUALITY_MODE;
+    else process.env.LLM_WIKI_QUALITY_MODE = prev;
+  }
+});
+
+test("INT-13: env-var validation is gated to quality-mode consumers (rollback not blocked)", () => {
+  // A stale `LLM_WIKI_QUALITY_MODE=tier0-only` must not block
+  // rollback — it's a recovery path that doesn't consult quality
+  // mode at all. The env-var validation only fires for subcommands
+  // that actually call into tiered.mjs via the orchestrator
+  // (build / extend / rebuild / fix / join).
+  const prev = process.env.LLM_WIKI_QUALITY_MODE;
+  process.env.LLM_WIKI_QUALITY_MODE = "tier0-only";
+  try {
+    // Rollback on a wiki directory — just needs to survive intent
+    // resolution without tripping INT-13.
+    const wiki = freshDir("int13-env-rollback");
+    writeFileSync(
+      join(wiki, "index.md"),
+      "---\nid: x\ntype: index\ndepth_role: category\nfocus: t\n---\n",
+      "utf8",
+    );
+    mkdirSync(join(wiki, ".llmwiki"), { recursive: true });
+    try {
+      const r = resolveIntent({
+        subcommand: "rollback",
+        args: [wiki],
+        flags: {},
+        cwd: wiki,
+      });
+      // Rollback intent may return ok or a different INT-NN code
+      // for missing targets, but it must NOT be INT-13 from the
+      // env-var check.
+      if (r.status === "ambiguous") {
+        assert.notEqual(
+          r.error.code,
+          "INT-13",
+          `rollback must not trip INT-13 on env var; got ${JSON.stringify(r.error)}`,
+        );
+      }
+    } finally {
+      rmSync(wiki, { recursive: true, force: true });
+    }
+  } finally {
+    if (prev === undefined) delete process.env.LLM_WIKI_QUALITY_MODE;
+    else process.env.LLM_WIKI_QUALITY_MODE = prev;
+  }
+});
+
+test("INT-13: flag wins over env — valid flag + invalid env is accepted", () => {
+  // The flag takes precedence per resolveQualityMode's contract, so
+  // a valid flag should let the resolve succeed even when the env
+  // carries a junk value — the env isn't consulted.
+  const prev = process.env.LLM_WIKI_QUALITY_MODE;
+  process.env.LLM_WIKI_QUALITY_MODE = "tier0-only";
+  try {
+    const parent = freshDir("int13-env-flag");
+    try {
+      const src = join(parent, "docs");
+      mkdirSync(src);
+      const r = resolveIntent({
+        subcommand: "build",
+        args: [src],
+        flags: { quality_mode: "deterministic" },
+        cwd: parent,
+      });
+      assert.equal(r.status, "ok", JSON.stringify(r));
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  } finally {
+    if (prev === undefined) delete process.env.LLM_WIKI_QUALITY_MODE;
+    else process.env.LLM_WIKI_QUALITY_MODE = prev;
   }
 });
 
