@@ -382,6 +382,50 @@ test("INT-13: unknown LLM_WIKI_QUALITY_MODE env var value", () => {
   }
 });
 
+test("INT-13: env-var validation is gated to quality-mode consumers (rollback not blocked)", () => {
+  // A stale `LLM_WIKI_QUALITY_MODE=tier0-only` must not block
+  // rollback — it's a recovery path that doesn't consult quality
+  // mode at all. The env-var validation only fires for subcommands
+  // that actually call into tiered.mjs via the orchestrator
+  // (build / extend / rebuild / fix / join).
+  const prev = process.env.LLM_WIKI_QUALITY_MODE;
+  process.env.LLM_WIKI_QUALITY_MODE = "tier0-only";
+  try {
+    // Rollback on a wiki directory — just needs to survive intent
+    // resolution without tripping INT-13.
+    const wiki = freshDir("int13-env-rollback");
+    writeFileSync(
+      join(wiki, "index.md"),
+      "---\nid: x\ntype: index\ndepth_role: category\nfocus: t\n---\n",
+      "utf8",
+    );
+    mkdirSync(join(wiki, ".llmwiki"), { recursive: true });
+    try {
+      const r = resolveIntent({
+        subcommand: "rollback",
+        args: [wiki],
+        flags: {},
+        cwd: wiki,
+      });
+      // Rollback intent may return ok or a different INT-NN code
+      // for missing targets, but it must NOT be INT-13 from the
+      // env-var check.
+      if (r.status === "ambiguous") {
+        assert.notEqual(
+          r.error.code,
+          "INT-13",
+          `rollback must not trip INT-13 on env var; got ${JSON.stringify(r.error)}`,
+        );
+      }
+    } finally {
+      rmSync(wiki, { recursive: true, force: true });
+    }
+  } finally {
+    if (prev === undefined) delete process.env.LLM_WIKI_QUALITY_MODE;
+    else process.env.LLM_WIKI_QUALITY_MODE = prev;
+  }
+});
+
 test("INT-13: flag wins over env — valid flag + invalid env is accepted", () => {
   // The flag takes precedence per resolveQualityMode's contract, so
   // a valid flag should let the resolve succeed even when the env

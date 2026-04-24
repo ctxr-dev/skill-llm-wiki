@@ -276,7 +276,7 @@ all of its Tier 2 cost on subsequent rebuilds.
 
 ## Quality modes
 
-Choose via `--quality-mode` (flag) or `LLM_WIKI_QUALITY_MODE` (env var). The flag wins when both are set. Invalid values on EITHER path raise `INT-13` at the intent layer with the same valid-values suggestions — a stale `LLM_WIKI_QUALITY_MODE=tier0-only` in a shell profile fails loud on the next `skill-llm-wiki` invocation.
+Choose via `--quality-mode` (flag) or `LLM_WIKI_QUALITY_MODE` (env var). The flag wins when both are set. Invalid values on EITHER path raise `INT-13` at the intent layer with the same valid-values suggestions — a stale env value from an obsolete shell profile fails loud on the next `skill-llm-wiki` invocation rather than silently falling through to a plain throw at convergence time. Env-var validation is gated to subcommands that consume quality mode (build / extend / rebuild / fix / join); recovery paths like `rollback` are unaffected.
 
 | Mode | Behaviour | Use when |
 |------|-----------|----------|

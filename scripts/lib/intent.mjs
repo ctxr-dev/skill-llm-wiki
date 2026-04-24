@@ -314,14 +314,34 @@ export function resolveIntent(ctx) {
       "--quality-mode",
     );
   }
-  // Validate `LLM_WIKI_QUALITY_MODE` here too. `resolveQualityMode`
-  // at runtime would otherwise throw a plain Error on a typo (e.g.
-  // `tier0-only` from a stale shell config), which surfaces as a
-  // generic exit-1 with no structured code for automation. Keep
-  // this validation symmetric with the flag path — same code, same
-  // suggestions, same exit-2 ambiguous shape.
+  // Validate `LLM_WIKI_QUALITY_MODE` here too, but only for
+  // subcommands that actually consult runtime quality-mode
+  // resolution (build / extend / rebuild / fix / join all call
+  // through `resolveQualityMode` in the orchestrator). Commands
+  // like `rollback`, `validate`, `init`, `heal` never touch
+  // tiered.mjs, so blocking them on a stale env var — especially
+  // `rollback`, which is a recovery path — would make a trivial
+  // shell-config typo catastrophic. Without this gate, a stale
+  // `LLM_WIKI_QUALITY_MODE=tier0-only` would lock the user out of
+  // recovering the wiki they were trying to rollback.
+  //
+  // Symmetric with the flag path — same code, same suggestions,
+  // same exit-2 ambiguous shape — for the subcommands where the
+  // env var is actually consumed.
+  const QUALITY_MODE_CONSUMERS = new Set([
+    "build",
+    "extend",
+    "rebuild",
+    "fix",
+    "join",
+  ]);
   const envQualityMode = process.env.LLM_WIKI_QUALITY_MODE;
-  if (!f.quality_mode && envQualityMode && !VALID_QUALITY_MODES.includes(envQualityMode)) {
+  if (
+    QUALITY_MODE_CONSUMERS.has(subcommand) &&
+    !f.quality_mode &&
+    envQualityMode &&
+    !VALID_QUALITY_MODES.includes(envQualityMode)
+  ) {
     return ambiguous(
       "INT-13",
       `unknown LLM_WIKI_QUALITY_MODE value "${envQualityMode}"`,
