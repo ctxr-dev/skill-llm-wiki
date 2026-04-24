@@ -41,9 +41,16 @@ import {
   readFileSync,
   readSync,
   readdirSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
+
+// Body-read streaming chunk size. Matches the 64 KiB page-aligned
+// buffer used across the rest of the codebase (chunk.mjs,
+// similarity-cache.mjs) — big enough that the per-read syscall
+// overhead is amortised over a meaningful byte count, small
+// enough that peak memory during `ingestWiki` stays bounded
+// regardless of the largest leaf body size.
+const BODY_READ_CHUNK_SIZE = 64 * 1024;
 import { basename, dirname, join, relative } from "node:path";
 import { readFrontmatterStreaming } from "./chunk.mjs";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
@@ -118,36 +125,34 @@ export function ingestWiki(wikiRoot) {
       // Read the body starting at `captured.bodyOffset` rather than
       // re-reading the whole file via `readFileSync(full)` — the
       // full-file read was a needless double-I/O that loaded the
-      // frontmatter bytes twice. Use an explicit open+read+close
-      // so memory stays proportional to body size, not total file
-      // size (matters on multi-kilobyte leaves).
+      // frontmatter bytes twice. Stream the body in BOUNDED
+      // chunks rather than pre-allocating `Buffer.alloc(bodyLen)`
+      // — the prior cut allocated a buffer the full size of the
+      // body up front, which would OOM the process on a
+      // multi-megabyte leaf. Chunked read keeps peak allocation
+      // to `BODY_READ_CHUNK_SIZE` regardless of body size, and we
+      // concat the chunks into the final utf8 string only at the
+      // end.
       let body;
       try {
-        const fileSize = statSync(full).size;
-        const bodyLen = Math.max(0, fileSize - captured.bodyOffset);
-        if (bodyLen === 0) {
-          body = "";
-        } else {
-          const fd = openSync(full, "r");
-          try {
-            const buf = Buffer.alloc(bodyLen);
-            let read = 0;
-            while (read < bodyLen) {
-              const n = readSync(
-                fd,
-                buf,
-                read,
-                bodyLen - read,
-                captured.bodyOffset + read,
-              );
-              if (n === 0) break;
-              read += n;
-            }
-            body = buf.slice(0, read).toString("utf8");
-          } finally {
-            closeSync(fd);
+        const chunks = [];
+        const fd = openSync(full, "r");
+        try {
+          const buf = Buffer.alloc(BODY_READ_CHUNK_SIZE);
+          let pos = captured.bodyOffset;
+          while (true) {
+            const n = readSync(fd, buf, 0, buf.length, pos);
+            if (n === 0) break;
+            // Copy the populated slice — `buf` is reused on the
+            // next iteration, so retaining a view would corrupt
+            // previously-accumulated chunks.
+            chunks.push(Buffer.from(buf.subarray(0, n)));
+            pos += n;
           }
+        } finally {
+          closeSync(fd);
         }
+        body = Buffer.concat(chunks).toString("utf8");
       } catch {
         // Fall back to the full-file read on any low-level error
         // (e.g., stat race between the streaming read and now).
@@ -180,17 +185,29 @@ export function ingestWiki(wikiRoot) {
 // a broken joined wiki. Warnings are surfaced but don't block.
 // Malformed files collected by `ingestWiki` are folded in as
 // synthetic PARSE findings so the caller sees a single unified
-// list rather than two separate error channels.
+// list rather than two separate error channels — deduped by
+// (code, target) against `validateWiki`'s own PARSE findings so
+// the same file doesn't get reported twice when both channels
+// detect the same parse failure.
 export function validateSources(ingested) {
   const report = { errors: [], warnings: [] };
   for (const src of ingested) {
     const findings = validateWiki(src.wikiRoot);
+    const seenErrorKeys = new Set();
     for (const f of findings) {
       const entry = { wikiRoot: src.wikiRoot, ...f };
-      if (f.severity === "error") report.errors.push(entry);
-      else if (f.severity === "warning") report.warnings.push(entry);
+      if (f.severity === "error") {
+        seenErrorKeys.add(`${f.code}:${f.target}`);
+        report.errors.push(entry);
+      } else if (f.severity === "warning") {
+        report.warnings.push(entry);
+      }
     }
     for (const m of src.malformed) {
+      // Skip synthetic PARSE entries that `validateWiki` already
+      // reported — duplicating would make the
+      // JOIN-SOURCE-INVALID summary noisy without adding signal.
+      if (seenErrorKeys.has(`PARSE:${m.path}`)) continue;
       report.errors.push({
         wikiRoot: src.wikiRoot,
         severity: "error",
