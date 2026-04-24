@@ -88,12 +88,10 @@ test("cli progress: stderr carries phase breadcrumbs on a build", () => {
     const indices = [...r.stderr.matchAll(/\[build-\S+ (\d+)\]/g)].map((m) =>
       Number(m[1]),
     );
-    // Strictly increasing: the "one callback per phase" contract
-    // would be undermined by duplicates (two callbacks for the
-    // same phase index), so `>` rather than `>=` is the right
-    // gate to pin it. Also assert the sequence starts at 1 and
-    // has no gaps — together this rules out skipped-phase
-    // regressions as well.
+    // Assert the exact "one callback per phase, in order" contract:
+    // indices must form the consecutive sequence 1, 2, 3, … with
+    // no duplicates and no gaps. That also rules out
+    // skipped-phase regressions.
     assert.ok(indices.length > 0, "expected at least one phase breadcrumb");
     for (let i = 0; i < indices.length; i++) {
       assert.equal(

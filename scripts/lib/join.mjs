@@ -717,10 +717,21 @@ export async function runJoin(sources, target, ctx = {}) {
   const record = (name, summary) => {
     phaseLog.push({ name, summary });
     if (onPhase) {
+      // Cover BOTH sync throws and async rejections from the hook
+      // (mirrors `orchestrator.mjs::record()`). An `async` onPhase
+      // that rejects would otherwise escape as unhandledRejection
+      // and could terminate the process under Node's default
+      // policy, violating the "progress hook failures never halt
+      // the op" contract.
       try {
-        onPhase({ phase: name, summary });
+        const ret = onPhase({ phase: name, summary });
+        if (ret && typeof ret.then === "function") {
+          Promise.resolve(ret).catch(() => {
+            /* async onPhase rejection silently swallowed */
+          });
+        }
       } catch {
-        /* progress hook throws never halt the op */
+        /* sync onPhase throw silently swallowed */
       }
     }
   };
