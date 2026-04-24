@@ -352,6 +352,63 @@ test("INT-13: known --quality-mode values are accepted", async () => {
   }
 });
 
+test("INT-13: unknown LLM_WIKI_QUALITY_MODE env var value", () => {
+  // Symmetry with --quality-mode: a typo in the env var should
+  // raise the same structured error + same valid-values
+  // suggestions, not fall through to a plain throw from
+  // resolveQualityMode at convergence time.
+  const prev = process.env.LLM_WIKI_QUALITY_MODE;
+  process.env.LLM_WIKI_QUALITY_MODE = "tier0-only";
+  try {
+    const parent = freshDir("int13-env");
+    try {
+      const src = join(parent, "docs");
+      mkdirSync(src);
+      const r = resolveIntent({
+        subcommand: "build",
+        args: [src],
+        flags: {},
+        cwd: parent,
+      });
+      assert.equal(r.status, "ambiguous");
+      assert.equal(r.error.code, "INT-13");
+      assert.match(r.error.message, /LLM_WIKI_QUALITY_MODE/);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  } finally {
+    if (prev === undefined) delete process.env.LLM_WIKI_QUALITY_MODE;
+    else process.env.LLM_WIKI_QUALITY_MODE = prev;
+  }
+});
+
+test("INT-13: flag wins over env — valid flag + invalid env is accepted", () => {
+  // The flag takes precedence per resolveQualityMode's contract, so
+  // a valid flag should let the resolve succeed even when the env
+  // carries a junk value — the env isn't consulted.
+  const prev = process.env.LLM_WIKI_QUALITY_MODE;
+  process.env.LLM_WIKI_QUALITY_MODE = "tier0-only";
+  try {
+    const parent = freshDir("int13-env-flag");
+    try {
+      const src = join(parent, "docs");
+      mkdirSync(src);
+      const r = resolveIntent({
+        subcommand: "build",
+        args: [src],
+        flags: { quality_mode: "deterministic" },
+        cwd: parent,
+      });
+      assert.equal(r.status, "ok", JSON.stringify(r));
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  } finally {
+    if (prev === undefined) delete process.env.LLM_WIKI_QUALITY_MODE;
+    else process.env.LLM_WIKI_QUALITY_MODE = prev;
+  }
+});
+
 test("INT-10: unknown --layout-mode value", () => {
   const r = resolveIntent({
     subcommand: "build",

@@ -857,7 +857,7 @@ The normative code list lives in the `intent.mjs` header; the one below mirrors 
 - **`INT-10` — unknown `--layout-mode` value.** Anything other than `sibling`, `in-place`, or `hosted`. The resolver refuses, lists the valid values, and exits.
 - **`INT-11` — unknown CLI flag.** `parseSubArgv` surfaces unknown flags as an `INT-11` error so every "did you mean…?" case funnels through the same structured-error code and can be caught uniformly by scripts and tests.
 - **`INT-12` — ambiguity reached non-TTY interactive resolution.** An earlier ambiguity would normally have been resolved by prompting the user, but stdin is not a TTY (or `LLM_WIKI_NO_PROMPT=1` / `--no-prompt` is set), so the skill refuses to guess. Emitted from `cli.mjs` when `NonInteractiveError` is caught. The resolving "flag" is to re-run the command in an interactive terminal, or to add the disambiguating flag directly.
-- **`INT-13` — unknown `--quality-mode` value.** Anything other than `tiered-fast`, `claude-first`, or `deterministic`. The resolver refuses, lists the valid values, and exits.
+- **`INT-13` — unknown `--quality-mode` value.** Anything other than `tiered-fast`, `claude-first`, or `deterministic`. The resolver refuses, lists the valid values, and exits. Symmetric with the env-var path: an invalid `LLM_WIKI_QUALITY_MODE` value raises the same INT-13 when the flag is absent (the flag still wins when both are set).
 
 ### Non-interactive fallback
 

@@ -314,6 +314,24 @@ export function resolveIntent(ctx) {
       "--quality-mode",
     );
   }
+  // Validate `LLM_WIKI_QUALITY_MODE` here too. `resolveQualityMode`
+  // at runtime would otherwise throw a plain Error on a typo (e.g.
+  // `tier0-only` from a stale shell config), which surfaces as a
+  // generic exit-1 with no structured code for automation. Keep
+  // this validation symmetric with the flag path — same code, same
+  // suggestions, same exit-2 ambiguous shape.
+  const envQualityMode = process.env.LLM_WIKI_QUALITY_MODE;
+  if (!f.quality_mode && envQualityMode && !VALID_QUALITY_MODES.includes(envQualityMode)) {
+    return ambiguous(
+      "INT-13",
+      `unknown LLM_WIKI_QUALITY_MODE value "${envQualityMode}"`,
+      VALID_QUALITY_MODES.map((m) => ({
+        description: `use ${m} quality mode`,
+        flag: `--quality-mode ${m}`,
+      })),
+      "LLM_WIKI_QUALITY_MODE",
+    );
+  }
   // Balance-enforcement flags are build/rebuild-only. The CLI parser
   // accepts them globally (to produce a uniform flag table), so intent
   // has to gate the subcommand explicitly — otherwise `fix`, `join`,
