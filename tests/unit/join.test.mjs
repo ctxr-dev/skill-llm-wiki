@@ -2,8 +2,14 @@
 //
 // Each test builds small source wiki fixtures by hand (the unit
 // scope avoids the full `build` CLI roundtrip — that's covered by
-// the e2e suite) and drives `runJoin` directly. The goal is to
-// exercise every phase's contract in isolation:
+// the e2e suite) and exercises the individual phase helpers
+// (`ingestWiki`, `validateSources`, `planUnion`, ...). The
+// end-to-end `runJoin` pipeline is not exercised here — the
+// convergence + index-generation + validation tail depends on the
+// full pipeline machinery (Tier 1 embeddings, git snapshots, etc.)
+// and is covered by the e2e build suite once the join operator
+// lands a golden fixture there. Scope of this file: every phase
+// helper's contract in isolation:
 //   - ingestWiki: reads frontmatter + body, skips dotfiles / plain md
 //   - validateSources: per-source findings aggregated
 //   - planUnion: sourceWiki tag preserved

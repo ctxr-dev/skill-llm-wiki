@@ -217,11 +217,15 @@ export function planUnion(ingestedSources) {
 //     Never loses an entry; never shadows the keeper.
 //
 //   `merge`: when frontmatter is compatible (same focus, same
-//     type, same depth_role), fold the duplicates into one entry
-//     inheriting both ids via `aliases[]` and both source wikis
-//     via `source_wikis[]`. When frontmatter is INcompatible,
-//     fall through to `namespace` — we never lose content on a
-//     merge fallback.
+//     type, same depth_role), fold duplicates into the keeper —
+//     preserving the absorbed record's existing `aliases[]` on
+//     the keeper and recording both source wikis via
+//     `source_wikis[]`. Because collisions are on IDENTICAL ids,
+//     the absorbed id is NOT added to `aliases[]` (it equals the
+//     keeper's live id; a self-alias would trip
+//     `ALIAS-COLLIDES-ID` at phase 9). When frontmatter is
+//     INcompatible, fall through to `namespace` — we never lose
+//     content on a merge fallback.
 //
 //   `ask`: halt and throw `JOIN-COLLISION-ASK` with the collision
 //     set for the caller to surface. The interactive resolution
@@ -689,6 +693,28 @@ export async function runJoin(sources, target, ctx = {}) {
     "join-convergence",
     `${convergence.applied.length} operator(s) applied`,
   );
+
+  // Honour the Tier 2 suspend/resume contract. If convergence
+  // parked any Tier 2 requests, we MUST stop here — finalising
+  // phases 8-11 (index-generation, validation, commit) on a tree
+  // that still has pending decisions would produce a half-baked
+  // joined wiki and leave orphan `.work/tier2/pending-*.json` the
+  // re-invoke flow expects to consume. The orchestrator wraps the
+  // `runJoin` call in a catch that routes NeedsTier2Error through
+  // the exit-7 handshake (drain pending queue → write batch → exit
+  // 7 for wiki-runner to resolve) and preserves the pre-op state
+  // without tagging `op/<id>`.
+  if (convergence.needs_tier2) {
+    return {
+      phases: phaseLog,
+      convergence,
+      needs_tier2: true,
+      unified: {
+        leaves: resolvedPlan.leaves.length,
+        indices: resolvedPlan.indices.length,
+      },
+    };
+  }
 
   // Phase 8 — generate-indices.
   const rebuilt = rebuildAllIndices(target);

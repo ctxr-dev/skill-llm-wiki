@@ -128,6 +128,30 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
         },
       });
       for (const p of result.phases) record(p.name, p.summary);
+      // Tier 2 suspend: convergence parked decisions that can't be
+      // resolved without a sub-agent. Drain the pending queue,
+      // write the batch, and throw NeedsTier2Error — the caller
+      // catches it via the same path the build/rebuild uses, exits
+      // 7, and the wiki-runner spawns sub-agents, writes responses,
+      // and re-invokes the CLI. Must happen BEFORE the op tag so a
+      // resume picks up at the same pre-op/... anchor.
+      if (result.needs_tier2) {
+        const requests = takePendingRequests(wikiRoot);
+        if (requests.length > 0) {
+          const batchId = deriveBatchId(
+            opId,
+            "join-convergence",
+            result.convergence.iterations,
+          );
+          const path = writePending(wikiRoot, batchId, requests);
+          throw new NeedsTier2Error(
+            `join: operator-convergence parked ${requests.length} Tier 2 request(s) ` +
+              `(batch ${batchId}); wiki-runner must resolve and re-invoke`,
+            opId,
+            path,
+          );
+        }
+      }
       // Finalise — tag the op and emit the op-log entry.
       const finalTag = `op/${opId}`;
       gitTag(wikiRoot, finalTag);
@@ -143,6 +167,12 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
       record("commit-finalize", `tagged ${finalTag}`);
       return { op_id: opId, final_sha: finalSha, phases };
     } catch (err) {
+      // NeedsTier2Error is NOT a failure — it's a suspend signal.
+      // Don't roll back the working tree; the wiki-runner will
+      // resume on re-invoke. Matches the build-path semantics.
+      if (err instanceof NeedsTier2Error) {
+        throw err;
+      }
       // Roll working tree back to the pre-op snapshot, matching the
       // build path's failure semantics.
       try {
