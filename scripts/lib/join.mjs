@@ -41,7 +41,6 @@ import {
   readFileSync,
   readSync,
   readdirSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
@@ -59,6 +58,20 @@ export {
   VALID_COLLISION_POLICIES,
 } from "./join-constants.mjs";
 import { DEFAULT_COLLISION_POLICY, VALID_COLLISION_POLICIES } from "./join-constants.mjs";
+
+// Body-read streaming chunk size, 64 KiB. Sized well above the
+// 4 KiB chunk.mjs uses for the bounded frontmatter read (where
+// frontmatter is expected to be small and the read budget matters)
+// — leaf bodies are much larger and can be full documents, so a
+// bigger chunk amortises the per-readSync syscall overhead while
+// still keeping each individual allocation predictably small.
+// Note this is the PER-READ ceiling, not a total-memory ceiling:
+// each leaf's body is still fully held in memory after the
+// `Buffer.concat` that assembles the chunks into the final UTF-8
+// string. A future optimisation could switch to lazy body loading
+// if the holding-every-body-in-memory shape becomes the bottleneck
+// on very large corpora.
+const BODY_READ_CHUNK_SIZE = 64 * 1024;
 
 // ── Phase 1: ingest-all ──────────────────────────────────────────
 //
@@ -118,36 +131,36 @@ export function ingestWiki(wikiRoot) {
       // Read the body starting at `captured.bodyOffset` rather than
       // re-reading the whole file via `readFileSync(full)` — the
       // full-file read was a needless double-I/O that loaded the
-      // frontmatter bytes twice. Use an explicit open+read+close
-      // so memory stays proportional to body size, not total file
-      // size (matters on multi-kilobyte leaves).
+      // frontmatter bytes twice. Stream the body in bounded
+      // `BODY_READ_CHUNK_SIZE` chunks (per-read allocation stays
+      // small and predictable) rather than a single
+      // `Buffer.alloc(bodyLen)` up front. Chunks accumulate in an
+      // array and assemble into the final UTF-8 string via
+      // `Buffer.concat` at the end; peak memory during the concat
+      // is ~2× the body size momentarily, but the per-read
+      // allocation is always the small chunk buffer regardless of
+      // how large the body turns out to be (which matters because
+      // we don't know the body size before reading).
       let body;
       try {
-        const fileSize = statSync(full).size;
-        const bodyLen = Math.max(0, fileSize - captured.bodyOffset);
-        if (bodyLen === 0) {
-          body = "";
-        } else {
-          const fd = openSync(full, "r");
-          try {
-            const buf = Buffer.alloc(bodyLen);
-            let read = 0;
-            while (read < bodyLen) {
-              const n = readSync(
-                fd,
-                buf,
-                read,
-                bodyLen - read,
-                captured.bodyOffset + read,
-              );
-              if (n === 0) break;
-              read += n;
-            }
-            body = buf.slice(0, read).toString("utf8");
-          } finally {
-            closeSync(fd);
+        const chunks = [];
+        const fd = openSync(full, "r");
+        try {
+          const buf = Buffer.alloc(BODY_READ_CHUNK_SIZE);
+          let pos = captured.bodyOffset;
+          while (true) {
+            const n = readSync(fd, buf, 0, buf.length, pos);
+            if (n === 0) break;
+            // Copy the populated slice — `buf` is reused on the
+            // next iteration, so retaining a view would corrupt
+            // previously-accumulated chunks.
+            chunks.push(Buffer.from(buf.subarray(0, n)));
+            pos += n;
           }
+        } finally {
+          closeSync(fd);
         }
+        body = Buffer.concat(chunks).toString("utf8");
       } catch {
         // Fall back to the full-file read on any low-level error
         // (e.g., stat race between the streaming read and now).
@@ -180,17 +193,29 @@ export function ingestWiki(wikiRoot) {
 // a broken joined wiki. Warnings are surfaced but don't block.
 // Malformed files collected by `ingestWiki` are folded in as
 // synthetic PARSE findings so the caller sees a single unified
-// list rather than two separate error channels.
+// list rather than two separate error channels — deduped by
+// (code, target) against `validateWiki`'s own PARSE findings so
+// the same file doesn't get reported twice when both channels
+// detect the same parse failure.
 export function validateSources(ingested) {
   const report = { errors: [], warnings: [] };
   for (const src of ingested) {
     const findings = validateWiki(src.wikiRoot);
+    const seenErrorKeys = new Set();
     for (const f of findings) {
       const entry = { wikiRoot: src.wikiRoot, ...f };
-      if (f.severity === "error") report.errors.push(entry);
-      else if (f.severity === "warning") report.warnings.push(entry);
+      if (f.severity === "error") {
+        seenErrorKeys.add(`${f.code}:${f.target}`);
+        report.errors.push(entry);
+      } else if (f.severity === "warning") {
+        report.warnings.push(entry);
+      }
     }
     for (const m of src.malformed) {
+      // Skip synthetic PARSE entries that `validateWiki` already
+      // reported — duplicating would make the
+      // JOIN-SOURCE-INVALID summary noisy without adding signal.
+      if (seenErrorKeys.has(`PARSE:${m.path}`)) continue;
       report.errors.push({
         wikiRoot: src.wikiRoot,
         severity: "error",

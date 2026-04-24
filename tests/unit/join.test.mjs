@@ -210,6 +210,40 @@ test("validateSources: passes on clean sources", () => {
   }
 });
 
+test("validateSources: does not duplicate PARSE findings that validateWiki already reported", () => {
+  // When a source wiki has a .md file whose frontmatter fails to
+  // parse, both `ingestWiki` (via the streaming reader) AND
+  // `validateWiki` (via its collectAll walk) can surface the same
+  // PARSE error. The aggregated report should dedupe by
+  // (code, target) so the JOIN-SOURCE-INVALID summary isn't
+  // noisy with paired duplicate entries.
+  const wiki = buildTinyWiki("val-dup", { leaves: [{ id: "alpha" }] });
+  try {
+    // Plant a malformed-frontmatter file (open fence, no close).
+    // Must NOT live at the wiki root — that would trip
+    // LEAF-AT-WIKI-ROOT instead of PARSE. Put it inside the
+    // `section-val-dup/` subcategory the fixture already creates.
+    const malformedPath = join(wiki, "section-val-dup", "broken.md");
+    writeFileSync(
+      malformedPath,
+      "---\nid: broken\ntype: primary\n# no closing fence\nbody\n",
+      "utf8",
+    );
+    const ingested = ingestWiki(wiki);
+    const report = validateSources([ingested]);
+    const parseFindingsForPath = report.errors.filter(
+      (f) => f.code === "PARSE" && f.target === malformedPath,
+    );
+    assert.equal(
+      parseFindingsForPath.length,
+      1,
+      `expected a single PARSE finding for ${malformedPath}, got ${parseFindingsForPath.length}: ${JSON.stringify(parseFindingsForPath)}`,
+    );
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 // ── planUnion ───────────────────────────────────────────────────
 
 test("planUnion: merges per-source records and tags sourceWiki", () => {
