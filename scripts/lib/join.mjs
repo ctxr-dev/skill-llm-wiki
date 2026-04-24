@@ -59,17 +59,18 @@ export {
 } from "./join-constants.mjs";
 import { DEFAULT_COLLISION_POLICY, VALID_COLLISION_POLICIES } from "./join-constants.mjs";
 
-// Body-read streaming chunk size. Matches the 64 KiB page-aligned
-// buffer used across the rest of the codebase (chunk.mjs,
-// similarity-cache.mjs) — big enough that the per-read syscall
-// overhead is amortised over a meaningful byte count, small enough
-// that each individual `readSync` allocation inside `ingestWiki`
-// stays predictably small. Note this is the PER-READ ceiling, not
-// a total-memory ceiling: each leaf's body is still fully held in
-// memory after the `Buffer.concat` that assembles the chunks into
-// the final UTF-8 string. A future optimisation could switch to
-// lazy body loading if the holding-every-body-in-memory shape
-// becomes the bottleneck on very large corpora.
+// Body-read streaming chunk size, 64 KiB. Sized well above the
+// 4 KiB chunk.mjs uses for the bounded frontmatter read (where
+// frontmatter is expected to be small and the read budget matters)
+// — leaf bodies are much larger and can be full documents, so a
+// bigger chunk amortises the per-readSync syscall overhead while
+// still keeping each individual allocation predictably small.
+// Note this is the PER-READ ceiling, not a total-memory ceiling:
+// each leaf's body is still fully held in memory after the
+// `Buffer.concat` that assembles the chunks into the final UTF-8
+// string. A future optimisation could switch to lazy body loading
+// if the holding-every-body-in-memory shape becomes the bottleneck
+// on very large corpora.
 const BODY_READ_CHUNK_SIZE = 64 * 1024;
 
 // ── Phase 1: ingest-all ──────────────────────────────────────────
