@@ -79,7 +79,22 @@ import {
 // { operation, layout_mode, source, target, is_new_wiki, flags }.
 // Returns { op_id, final_sha, phases: [...] } on success; throws on
 // validation failure (after rolling the working tree back to pre-op).
-export async function runOperation(plan, { opId, source, startedIso } = {}) {
+export async function runOperation(plan, {
+  opId,
+  source,
+  startedIso,
+  // Optional per-phase progress hook. Invoked inside `record()`
+  // so the caller (typically CLI) can surface phase-by-phase
+  // progress to the user in real time — a 596-leaf deterministic
+  // build otherwise prints nothing for 2+ minutes. Shape:
+  //   (phase: { name: string, summary: string, index: number }) => void
+  // The hook runs synchronously; any errors it throws are caught
+  // and swallowed inside `record()` so a misbehaving progress
+  // reporter can never halt the operation. When absent,
+  // `runOperation` is silent on phase progression (preserving the
+  // pre-X.9 behaviour tests may have relied on).
+  onProgress = null,
+} = {}) {
   if (!plan || !plan.target) {
     throw new Error("runOperation requires a resolved plan with a target");
   }
@@ -91,7 +106,32 @@ export async function runOperation(plan, { opId, source, startedIso } = {}) {
   mkdirSync(workDir, { recursive: true });
 
   const phases = [];
-  const record = (name, summary) => phases.push({ name, summary });
+  const record = (name, summary) => {
+    const phase = { name, summary };
+    phases.push(phase);
+    if (onProgress) {
+      // Two failure modes to cover: a synchronous throw, and a
+      // returned Promise that rejects (an `async` hook never
+      // throws synchronously — the rejection escapes as an
+      // unhandledRejection and would terminate the process under
+      // Node's default policy, violating the "progress-hook
+      // failures must never halt the op" contract). The try/catch
+      // handles the sync throw; `Promise.resolve(...).catch()`
+      // handles the async rejection. Both swallow silently — a
+      // user with a broken progress reporter should still get a
+      // successful op completion.
+      try {
+        const ret = onProgress({ name, summary, index: phases.length });
+        if (ret && typeof ret.then === "function") {
+          Promise.resolve(ret).catch(() => {
+            /* async progress-hook rejection silently swallowed */
+          });
+        }
+      } catch {
+        /* sync progress-hook throw silently swallowed */
+      }
+    }
+  };
 
   // `join` is the one top-level operation whose pipeline shape does
   // not match the build/rebuild/fix family. Instead of threading

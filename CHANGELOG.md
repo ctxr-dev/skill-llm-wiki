@@ -16,6 +16,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **CLI progress breadcrumbs (Phase X.9).** Long-running operations (build / rebuild / fix / join) now stream a per-phase breadcrumb to stderr as each orchestrator phase fires:
+  - `[build-20260424-212011-abc123 3] ingest: read 596 source file(s), 589 leaves`
+  - `[build-... 7] operator-convergence: 156 operator(s) applied across 23 iteration(s); ...`
+  - Format: `[<op-id> <phase-index>] <phase-name>: <phase-summary>`
+  - Format matches exactly what the final phase log records in the op-summary payload — no new formatter, just a live mirror of `record()` calls.
+  - Writes to stderr (never stdout) so consumers piping the command's stdout don't conflate phase chatter with the final op-summary payload.
+  - Monotonically-increasing phase index per op, so structured log aggregators can reconstruct phase ordering after multiplexing.
+  - Progress is on by default; suppressed when `--json` is passed (the `skill-llm-wiki/v1` envelope consumer contract requires a clean stderr) or when `LLM_WIKI_NO_PROGRESS=1` is set in the environment (CI / hermetic runs that want the pre-X.9 silent-stderr shape).
+  - Implementation: `scripts/lib/orchestrator.mjs::runOperation` accepts an `onProgress({name, summary, index})` callback that the internal `record()` helper invokes alongside the phase-log push. CLI wires a callback that writes the breadcrumb to stderr; in-process callers can pass their own handler for custom streaming (TUI, structured log shipper, etc.). Progress-hook throws are swallowed — a misbehaving callback never halts the op.
+  - Tests (`tests/unit/cli-progress.test.mjs`, 3 scenarios): stderr breadcrumb shape + monotonic phase index; `LLM_WIKI_NO_PROGRESS=1` suppresses; `--json` suppresses.
 - **Real 11-phase `join` implementation (Phase X.2).** The `join` operation now implements the full pipeline from `guide/operations/ingest/join.md` instead of falling through to the convergence-only stub. The skill can now actually merge N ≥ 2 source wikis into one unified output.
   - **New module `scripts/lib/join.mjs`** exports `runJoin(sources, target, ctx)` and the per-phase helpers (`ingestWiki`, `validateSources`, `planUnion`, `resolveIdCollisions`, `mergeCategoriesWithSameFocus`, `rewireReferences`, `materialisePlan`), plus the canonical `VALID_COLLISION_POLICIES` / `DEFAULT_COLLISION_POLICY` constants.
   - **Pipeline phases (per the methodology):**

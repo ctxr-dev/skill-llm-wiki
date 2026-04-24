@@ -235,6 +235,7 @@ All top-level operations accept:
 ## UX flags
 
 - `--no-prompt` / env `LLM_WIKI_NO_PROMPT=1` — fail loudly on any ambiguity instead of prompting; emits `INT-12` if the skill would otherwise ask a TTY question.
+- Env `LLM_WIKI_NO_PROGRESS=1` — suppress per-phase progress breadcrumbs that the CLI otherwise streams to stderr during long-running operations (build / rebuild / fix / join). Useful for CI jobs that already capture their own progress or that want the pre-X.9 silent stderr shape. `--json` implicitly sets this (the `skill-llm-wiki/v1` envelope consumer contract requires a clean stderr).
 - `--json` — canonical machine-output flag. Enables the `skill-llm-wiki/v1` envelope on subcommands that emit one (validate, init, heal, rollback) and switches `INT-NN` ambiguity errors to JSON on stderr. The consumer-facing probe subcommands `contract` and `where` always emit JSON when this flag is present.
 - `--json-errors` — legacy alias for `--json`, kept for consumers that adopted the flag before the envelope shipped. Triggers identical behaviour. New code should pass `--json`.
 - `--accept-dirty` — operate on a source inside a dirty user git repo (escape hatch for `INT-08`).

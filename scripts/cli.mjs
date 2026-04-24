@@ -848,12 +848,69 @@ async function main() {
     }
     const opId = newOpId(cmd);
     const startedIso = new Date().toISOString();
+    // X.9 progress: stream each orchestrator phase's `record()`
+    // output to stderr as it fires. On by default for interactive
+    // use; suppressed in JSON mode so stderr stays reserved for
+    // structured JSON diagnostics/errors (build/rebuild/fix/join
+    // still print their human-readable summary to stdout under
+    // --json, but a consumer tailing stderr under --json expects
+    // it to be empty on success or carry only structured
+    // diagnostics — progress breadcrumbs would mix into that
+    // channel). Also suppressed via `LLM_WIKI_NO_PROGRESS=1` for
+    // CI / hermetic runs that want the pre-X.9 silent shape.
+    // Progress goes to stderr (never stdout) so consumers piping
+    // the command's stdout don't conflate phase chatter with the
+    // final op-summary payload.
+    const suppressProgress =
+      jsonMode || process.env.LLM_WIKI_NO_PROGRESS === "1";
+    // A closed-stderr scenario (downstream pipe consumer that
+    // drops the stderr pipe, e.g. `… | head`) surfaces two ways:
+    // a synchronous throw on `.write()` (try/catch below), and
+    // an async `'error'` event with code EPIPE that the default
+    // Node handler escalates to an unhandled exception. Attach a
+    // best-effort one-time 'error' listener to swallow EPIPE
+    // while progress is enabled; other stream errors still
+    // surface via Node's default handler so we aren't masking
+    // bugs unrelated to the progress stream.
+    let stderrEpipeSilenced = false;
+    const onProgress = suppressProgress
+      ? null
+      : (phase) => {
+          if (!stderrEpipeSilenced) {
+            stderrEpipeSilenced = true;
+            try {
+              process.stderr.on("error", (err) => {
+                if (err && err.code === "EPIPE") return;
+                // Re-emit non-EPIPE errors so we don't hide real
+                // problems — Node's default handler will decide.
+                throw err;
+              });
+            } catch {
+              /* attach failed — progress reporter will best-effort */
+            }
+          }
+          // `.destroyed` / `.writableEnded` guards let us skip the
+          // write before it would throw, which is cheaper than
+          // catching the exception and matches the behaviour on
+          // an already-closed stream.
+          if (process.stderr.destroyed || process.stderr.writableEnded) {
+            return;
+          }
+          try {
+            process.stderr.write(
+              `[${opId} ${phase.index}] ${phase.name}: ${phase.summary}\n`,
+            );
+          } catch {
+            /* Best-effort — a closed stderr shouldn't halt the op. */
+          }
+        };
     let result;
     try {
       result = await runOperation(plan, {
         opId,
         source: plan.source,
         startedIso,
+        onProgress,
       });
     } catch (err) {
       if (err instanceof NonInteractiveError) {
