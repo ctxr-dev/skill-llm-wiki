@@ -4,15 +4,17 @@
 // each phase into `phases[]` and invokes `onProgress` if the
 // caller supplied one. The CLI wires a progress callback that
 // writes `[<op-id> <index>] <phase>: <summary>\n` to stderr.
-// This file pins three contracts:
+// This file pins four contracts:
 //
 //   1. `runOperation({ onProgress })` fires the callback once per
-//      phase, in order, with the running index.
+//      phase, in order, with a monotonic running index. (Exercised
+//      indirectly through the CLI breadcrumb shape below, which is
+//      what real callers actually observe.)
 //   2. The CLI's stderr breadcrumbs appear during a build.
 //   3. `LLM_WIKI_NO_PROGRESS=1` suppresses the breadcrumbs (CI /
 //      hermetic runs) without affecting exit code or phase output.
-//   4. `--json` implicitly suppresses the breadcrumbs — the
-//      JSON-envelope consumer contract requires a clean stderr.
+//   4. `--json` implicitly suppresses the breadcrumbs so stderr
+//      stays reserved for structured JSON diagnostics.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -118,10 +120,13 @@ test("cli progress: --json suppresses breadcrumbs for the envelope contract", ()
   try {
     const src = buildTinySource(parent, ["alpha", "beta"]);
     const r = runCli(["build", src, "--json"]);
-    // Build in JSON mode emits the envelope on stdout; stderr
-    // must not carry phase breadcrumbs that would pollute a
-    // consumer piping stderr to a log aggregator expecting
-    // structured output.
+    // In `--json` mode, stderr must stay free of phase
+    // breadcrumbs so machine-oriented consumers and log
+    // pipelines do not receive extra human-readable progress
+    // lines mixed into structured handling paths. (The build
+    // path still prints its human-readable completion summary to
+    // stdout under --json; this test only pins the stderr
+    // contract.)
     assert.equal(r.status, 0, r.stderr);
     assert.doesNotMatch(
       r.stderr,

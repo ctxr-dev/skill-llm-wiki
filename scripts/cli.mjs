@@ -850,14 +850,17 @@ async function main() {
     const startedIso = new Date().toISOString();
     // X.9 progress: stream each orchestrator phase's `record()`
     // output to stderr as it fires. On by default for interactive
-    // use; suppressed in JSON mode (the `skill-llm-wiki/v1`
-    // envelope is the only permitted stdout/stderr shape then —
-    // injecting human-readable breadcrumbs would make the stderr
-    // channel non-parseable) and suppressed via
-    // `LLM_WIKI_NO_PROGRESS=1` for CI / hermetic runs that want
-    // the pre-X.9 silent shape. Progress goes to stderr (never
-    // stdout) so consumers piping the command's stdout don't
-    // conflate phase chatter with the final op-summary payload.
+    // use; suppressed in JSON mode so stderr stays reserved for
+    // structured JSON diagnostics/errors (build/rebuild/fix/join
+    // still print their human-readable summary to stdout under
+    // --json, but a consumer tailing stderr under --json expects
+    // it to be empty on success or carry only structured
+    // diagnostics — progress breadcrumbs would mix into that
+    // channel). Also suppressed via `LLM_WIKI_NO_PROGRESS=1` for
+    // CI / hermetic runs that want the pre-X.9 silent shape.
+    // Progress goes to stderr (never stdout) so consumers piping
+    // the command's stdout don't conflate phase chatter with the
+    // final op-summary payload.
     const suppressProgress =
       jsonMode || process.env.LLM_WIKI_NO_PROGRESS === "1";
     const onProgress = suppressProgress

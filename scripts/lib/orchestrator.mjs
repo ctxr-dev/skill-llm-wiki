@@ -88,9 +88,11 @@ export async function runOperation(plan, {
   // progress to the user in real time — a 596-leaf deterministic
   // build otherwise prints nothing for 2+ minutes. Shape:
   //   (phase: { name: string, summary: string, index: number }) => void
-  // The hook runs synchronously; errors bubble to the caller.
-  // When absent, runOperation is silent on phase progression
-  // (preserving the pre-X.9 behaviour tests may have relied on).
+  // The hook runs synchronously; any errors it throws are caught
+  // and swallowed inside `record()` so a misbehaving progress
+  // reporter can never halt the operation. When absent,
+  // `runOperation` is silent on phase progression (preserving the
+  // pre-X.9 behaviour tests may have relied on).
   onProgress = null,
 } = {}) {
   if (!plan || !plan.target) {
