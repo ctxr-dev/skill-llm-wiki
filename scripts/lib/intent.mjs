@@ -60,7 +60,7 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   DEFAULT_COLLISION_POLICY,
   VALID_COLLISION_POLICIES,
@@ -597,6 +597,43 @@ export function resolveIntent(ctx) {
       );
     }
     const target = absolute(cwd, f.target);
+    // Source immutability guard: --target must not equal, nest
+    // under, or contain any source wiki. Join writes to target;
+    // any path relationship between target and a source means the
+    // write would either clobber source files or place output
+    // inside the source tree (violating the documented "sources
+    // are read-only" guarantee). Detect both subpath directions
+    // with `path.relative` and reject with INT-18 before the
+    // pre-op snapshot fires. This check runs BEFORE the
+    // empty-target check — a target that equals or contains a
+    // source would otherwise be (correctly) flagged as non-empty
+    // under INT-01, masking the more specific semantic problem.
+    for (const s of sources) {
+      const relTargetFromSource = relative(s, target);
+      const relSourceFromTarget = relative(target, s);
+      const targetUnderSource =
+        relTargetFromSource === "" ||
+        (!relTargetFromSource.startsWith("..") &&
+          !isAbsolute(relTargetFromSource));
+      const sourceUnderTarget =
+        relSourceFromTarget !== "" &&
+        !relSourceFromTarget.startsWith("..") &&
+        !isAbsolute(relSourceFromTarget);
+      if (targetUnderSource || sourceUnderTarget) {
+        return ambiguous(
+          "INT-18",
+          `join: --target ${target} must not equal, nest under, or contain any source wiki (conflicts with ${s})`,
+          [
+            {
+              description:
+                "pick a target path outside every source wiki tree",
+              flag: "--target <path-outside-sources>",
+            },
+          ],
+          "--target must not overlap sources",
+        );
+      }
+    }
     if (existsSync(target)) {
       // Allow an empty directory but nothing else — the target must
       // be safe to materialise into without clobbering user data.
