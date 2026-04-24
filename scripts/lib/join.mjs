@@ -702,9 +702,14 @@ export async function runJoin(sources, target, ctx = {}) {
     // orchestrator only sees join's phases AFTER `runJoin`
     // returns, so the `[<op-id> N] phase: summary` breadcrumbs
     // batch-print at the end of the join instead of streaming
-    // during execution. Shape: ({ phase, summary }) => void.
-    // Errors are swallowed — a misbehaving progress hook must
-    // never halt the op.
+    // during execution. Shape:
+    //   ({ phase, summary }) => any | Promise<any>
+    // The return value is ignored. Synchronous throws AND Promise
+    // rejections are both swallowed — a misbehaving progress hook
+    // must never halt the op. Async hooks are supported (the
+    // caller is responsible for ensuring their observable side
+    // effects don't race with subsequent phases; `runJoin` itself
+    // does not await the hook).
     onPhase = null,
   } = ctx;
   const commitPhase = async (phase, summary) => {

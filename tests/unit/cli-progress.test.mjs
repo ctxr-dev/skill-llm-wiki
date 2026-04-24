@@ -105,6 +105,84 @@ test("cli progress: stderr carries phase breadcrumbs on a build", () => {
   }
 });
 
+test("cli progress: join streams per-phase breadcrumbs during execution", () => {
+  // Regression for the PR-17-followup fix: before runJoin grew
+  // an `onPhase` callback, the orchestrator's join branch only
+  // relayed join's sub-phases into the outer phases[] AFTER
+  // runJoin returned, so the stderr breadcrumbs all printed at
+  // the end of the join instead of during it. This test pins
+  // that join's own phase names (ingest-all, plan-union,
+  // resolve-id-collisions, …) show up in stderr with consecutive
+  // phase indices — proof that `onPhase` is wired through to the
+  // CLI breadcrumb callback in real time.
+  const parent = tmpParent("join");
+  try {
+    const srcA = buildTinySource(parent, ["alpha-src"]);
+    // Build the first source into a wiki.
+    const buildA = runCli(["build", srcA]);
+    assert.equal(buildA.status, 0, buildA.stderr);
+    const wikiA = `${srcA}.wiki`;
+    // Build a second source (distinct subcat + leaves).
+    const srcBRoot = join(parent, "srcB");
+    mkdirSync(join(srcBRoot, "other"), { recursive: true });
+    writeFileSync(
+      join(srcBRoot, "other", "beta-src.md"),
+      "# Beta\n\ndistinct beta content\n",
+    );
+    const buildB = runCli(["build", srcBRoot]);
+    assert.equal(buildB.status, 0, buildB.stderr);
+    const wikiB = `${srcBRoot}.wiki`;
+    // Run the actual join; progress breadcrumbs should stream.
+    const target = join(parent, "joined.wiki");
+    const r = runCli([
+      "join",
+      wikiA,
+      wikiB,
+      "--target",
+      target,
+      "--quality-mode",
+      "deterministic",
+    ]);
+    assert.equal(r.status, 0, r.stderr);
+    // Each join sub-phase must appear as a `[join-... N] <phase>:`
+    // breadcrumb. Check a couple of representative ones that
+    // `runJoin` always records on a 2-source clean-merge run.
+    assert.match(
+      r.stderr,
+      /\[join-\S+ \d+\] ingest-all:/,
+      `expected ingest-all breadcrumb; got:\n${r.stderr}`,
+    );
+    assert.match(
+      r.stderr,
+      /\[join-\S+ \d+\] plan-union:/,
+      `expected plan-union breadcrumb; got:\n${r.stderr}`,
+    );
+    assert.match(
+      r.stderr,
+      /\[join-\S+ \d+\] validation:/,
+      `expected validation breadcrumb; got:\n${r.stderr}`,
+    );
+    // And the index sequence is consecutive from 1 for the join
+    // op's breadcrumbs.
+    const joinIndices = [...r.stderr.matchAll(/\[join-\S+ (\d+)\]/g)].map(
+      (m) => Number(m[1]),
+    );
+    assert.ok(
+      joinIndices.length > 0,
+      `expected at least one join breadcrumb; got:\n${r.stderr}`,
+    );
+    for (let i = 0; i < joinIndices.length; i++) {
+      assert.equal(
+        joinIndices[i],
+        i + 1,
+        `join phase index at position ${i} must equal ${i + 1}, got ${joinIndices[i]}; full sequence: ${joinIndices.join(", ")}`,
+      );
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test("cli progress: LLM_WIKI_NO_PROGRESS=1 suppresses breadcrumbs", () => {
   const parent = tmpParent("off");
   try {
