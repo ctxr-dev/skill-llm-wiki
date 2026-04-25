@@ -1,15 +1,12 @@
 // join.test.mjs — unit coverage for the 11-phase join pipeline.
 //
-// Each test builds small source wiki fixtures by hand (the unit
-// scope avoids the full `build` CLI roundtrip — that's covered by
-// the e2e suite) and exercises the individual phase helpers
-// (`ingestWiki`, `validateSources`, `planUnion`, ...). The
-// end-to-end `runJoin` pipeline is not exercised here — the
-// convergence + index-generation + validation tail depends on the
-// full pipeline machinery (Tier 1 embeddings, git snapshots, etc.)
-// and is covered by the e2e build suite once the join operator
-// lands a golden fixture there. Scope of this file: every phase
-// helper's contract in isolation:
+// Most tests in this file build small source-wiki fixtures by hand
+// (raw frontmatter + body writes via writeFm) and exercise
+// individual phase helpers (`ingestWiki`, `validateSources`,
+// `planUnion`, ...) in isolation — the unit scope avoids the full
+// `build` CLI roundtrip wherever possible because the full
+// end-to-end pipeline is covered by the e2e build suite. Scope of
+// the per-helper tests:
 //   - ingestWiki: reads frontmatter + body, skips dotfiles / plain md
 //   - validateSources: per-source findings aggregated
 //   - planUnion: sourceWiki tag preserved
@@ -22,6 +19,16 @@
 //   - materialisePlan: leaves + indices land at expected paths;
 //     dangling-category indices for fully-merged-away directories
 //     are dropped
+//
+// The single exception is `runJoin: onPhase fires DURING execution`
+// (the in-process streaming-contract test added in PR #19). That
+// one test deliberately uses `runCliBuild()` + `spawnSync` to
+// produce two real source wikis with `.llmwiki/git/` markers
+// because the contract under test (onPhase fires before runJoin's
+// promise resolves) requires real ingest-able sources. It sets
+// `LLM_WIKI_MOCK_TIER1=1` + `LLM_WIKI_SKIP_CLUSTER_NEST=1` on the
+// parent process for the runJoin call so the convergence path
+// stays hermetic / offline / fast.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -724,6 +731,23 @@ test("runJoin: onPhase fires DURING execution, not batched after (Promise.race)"
     `skill-llm-wiki-runjoin-stream-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
   );
   mkdirSync(parent, { recursive: true });
+
+  // Hermetic-runtime guard. Deterministic mode still routes
+  // mid-band similarity decisions through Tier 1 (MiniLM via
+  // `tiered.mjs`) and the convergence path may invoke
+  // cluster-nest. In a CLI subprocess `runCliBuild()` sets these
+  // env flags inside the child, but THIS test calls `runJoin`
+  // in-process — without these flags in the parent env, CI runs
+  // could load/download the real MiniLM weights and run real
+  // clustering, which is slow, network-sensitive, and irrelevant
+  // to the streaming-contract assertion below. Save the prior
+  // values so we restore them in `finally`, leaving global state
+  // untouched for sibling tests.
+  const priorMockTier1 = process.env.LLM_WIKI_MOCK_TIER1;
+  const priorSkipClusterNest = process.env.LLM_WIKI_SKIP_CLUSTER_NEST;
+  process.env.LLM_WIKI_MOCK_TIER1 = "1";
+  process.env.LLM_WIKI_SKIP_CLUSTER_NEST = "1";
+
   try {
     // Source A: notes-a/{alpha-src.md}
     const srcA = join(parent, "src-a");
@@ -801,6 +825,10 @@ test("runJoin: onPhase fires DURING execution, not batched after (Promise.race)"
       if (err.code !== "JOIN-TARGET-INVALID") throw err;
     });
   } finally {
+    if (priorMockTier1 === undefined) delete process.env.LLM_WIKI_MOCK_TIER1;
+    else process.env.LLM_WIKI_MOCK_TIER1 = priorMockTier1;
+    if (priorSkipClusterNest === undefined) delete process.env.LLM_WIKI_SKIP_CLUSTER_NEST;
+    else process.env.LLM_WIKI_SKIP_CLUSTER_NEST = priorSkipClusterNest;
     rmSync(parent, { recursive: true, force: true });
   }
 });
