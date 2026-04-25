@@ -18,7 +18,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -88,10 +88,123 @@ test("cli progress: stderr carries phase breadcrumbs on a build", () => {
     const indices = [...r.stderr.matchAll(/\[build-\S+ (\d+)\]/g)].map((m) =>
       Number(m[1]),
     );
-    for (let i = 1; i < indices.length; i++) {
-      assert.ok(
-        indices[i] >= indices[i - 1],
-        `phase index must not decrease; saw ${indices}`,
+    // Assert the exact "one callback per phase, in order" contract:
+    // indices must form the consecutive sequence 1, 2, 3, … with
+    // no duplicates and no gaps. That also rules out
+    // skipped-phase regressions.
+    assert.ok(indices.length > 0, "expected at least one phase breadcrumb");
+    for (let i = 0; i < indices.length; i++) {
+      assert.equal(
+        indices[i],
+        i + 1,
+        `phase index at position ${i} must equal ${i + 1}, got ${indices[i]}; full sequence: ${indices.join(", ")}`,
+      );
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("cli progress: join emits per-phase breadcrumbs in stderr (final shape)", async () => {
+  // CLI-side check: a `join` invocation's stderr carries the
+  // expected per-phase breadcrumb names with consecutive indices
+  // from 1. This is a final-shape test — it verifies the wiring
+  // from `runJoin`'s `onPhase` through the orchestrator's
+  // `record()` to the CLI's `onProgress` writer reaches stderr,
+  // but it intentionally does NOT try to distinguish "streamed
+  // during execution" from "batched at end" via stderr timing.
+  // That distinction is unreliable from a black-box CLI runner
+  // (the regressed code path also wrote breadcrumbs before
+  // process exit, just not interleaved with join's phases). The
+  // streaming-vs-batching contract is pinned by a direct
+  // in-process test on `runJoin`'s `onPhase` in
+  // tests/unit/join.test.mjs.
+  const parent = tmpParent("join");
+  try {
+    const srcA = buildTinySource(parent, ["alpha-src"]);
+    const buildA = runCli(["build", srcA]);
+    assert.equal(buildA.status, 0, buildA.stderr);
+    const wikiA = `${srcA}.wiki`;
+    const srcBRoot = join(parent, "srcB");
+    mkdirSync(join(srcBRoot, "other"), { recursive: true });
+    writeFileSync(
+      join(srcBRoot, "other", "beta-src.md"),
+      "# Beta\n\ndistinct beta content\n",
+    );
+    const buildB = runCli(["build", srcBRoot]);
+    assert.equal(buildB.status, 0, buildB.stderr);
+    const wikiB = `${srcBRoot}.wiki`;
+    const target = join(parent, "joined.wiki");
+    const child = spawn(
+      "node",
+      [
+        CLI,
+        "join",
+        wikiA,
+        wikiB,
+        "--target",
+        target,
+        "--quality-mode",
+        "deterministic",
+      ],
+      {
+        env: {
+          ...process.env,
+          LLM_WIKI_NO_PROMPT: "1",
+          LLM_WIKI_MOCK_TIER1: "1",
+          LLM_WIKI_SKIP_CLUSTER_NEST: "1",
+        },
+        // Drop stdin + stdout. The CLI writes a completion summary
+        // and per-phase bullet list to stdout under `join`; if we
+        // piped it without draining, a long-enough run could block
+        // the child on a full pipe buffer and hang the test. We
+        // only need stderr (the breadcrumb stream) here.
+        stdio: ["ignore", "ignore", "pipe"],
+      },
+    );
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    // Listen on `close` rather than `exit`: `exit` fires when the
+    // process ends but stdio buffers may still flush afterwards;
+    // `close` is the reliable "all stdio drained" signal so we
+    // don't race with late-arriving stderr chunks. Also wire an
+    // error handler so a spawn failure rejects the test instead
+    // of hanging.
+    const exitCode = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code) => resolve(code));
+    });
+    assert.equal(exitCode, 0, stderr);
+    assert.match(
+      stderr,
+      /\[join-\S+ \d+\] ingest-all:/,
+      `expected ingest-all breadcrumb; got:\n${stderr}`,
+    );
+    assert.match(
+      stderr,
+      /\[join-\S+ \d+\] plan-union:/,
+      `expected plan-union breadcrumb; got:\n${stderr}`,
+    );
+    assert.match(
+      stderr,
+      /\[join-\S+ \d+\] validation:/,
+      `expected validation breadcrumb; got:\n${stderr}`,
+    );
+    const joinIndices = [...stderr.matchAll(/\[join-\S+ (\d+)\]/g)].map(
+      (m) => Number(m[1]),
+    );
+    assert.ok(
+      joinIndices.length > 0,
+      `expected at least one join breadcrumb; got:\n${stderr}`,
+    );
+    for (let i = 0; i < joinIndices.length; i++) {
+      assert.equal(
+        joinIndices[i],
+        i + 1,
+        `join phase index at position ${i} must equal ${i + 1}, got ${joinIndices[i]}; full sequence: ${joinIndices.join(", ")}`,
       );
     }
   } finally {

@@ -1,15 +1,12 @@
 // join.test.mjs — unit coverage for the 11-phase join pipeline.
 //
-// Each test builds small source wiki fixtures by hand (the unit
-// scope avoids the full `build` CLI roundtrip — that's covered by
-// the e2e suite) and exercises the individual phase helpers
-// (`ingestWiki`, `validateSources`, `planUnion`, ...). The
-// end-to-end `runJoin` pipeline is not exercised here — the
-// convergence + index-generation + validation tail depends on the
-// full pipeline machinery (Tier 1 embeddings, git snapshots, etc.)
-// and is covered by the e2e build suite once the join operator
-// lands a golden fixture there. Scope of this file: every phase
-// helper's contract in isolation:
+// Most tests in this file build small source-wiki fixtures by hand
+// (raw frontmatter + body writes via writeFm) and exercise
+// individual phase helpers (`ingestWiki`, `validateSources`,
+// `planUnion`, ...) in isolation — the unit scope avoids the full
+// `build` CLI roundtrip wherever possible because the full
+// end-to-end pipeline is covered by the e2e build suite. Scope of
+// the per-helper tests:
 //   - ingestWiki: reads frontmatter + body, skips dotfiles / plain md
 //   - validateSources: per-source findings aggregated
 //   - planUnion: sourceWiki tag preserved
@@ -22,6 +19,16 @@
 //   - materialisePlan: leaves + indices land at expected paths;
 //     dangling-category indices for fully-merged-away directories
 //     are dropped
+//
+// The single exception is `runJoin: onPhase fires DURING execution`
+// (the in-process streaming-contract test added in PR #19). That
+// one test deliberately uses `runCliBuild()` + `spawnSync` to
+// produce two real source wikis with `.llmwiki/git/` markers
+// because the contract under test (onPhase fires before runJoin's
+// promise resolves) requires real ingest-able sources. It sets
+// `LLM_WIKI_MOCK_TIER1=1` + `LLM_WIKI_SKIP_CLUSTER_NEST=1` on the
+// parent process for the runJoin call so the convergence path
+// stays hermetic / offline / fast.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -32,7 +39,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { renderFrontmatter, parseFrontmatter } from "../../scripts/lib/frontmatter.mjs";
 import {
@@ -44,8 +51,39 @@ import {
   planUnion,
   resolveIdCollisions,
   rewireReferences,
+  runJoin,
   validateSources,
 } from "../../scripts/lib/join.mjs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+const CLI = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "scripts",
+  "cli.mjs",
+);
+function runCliBuild(src) {
+  // Pin `--quality-mode deterministic` so the subprocess can never
+  // enqueue Tier 2 work (which would exit-7 with NEEDS_TIER2 under
+  // hermetic test conditions). The default `tiered-fast` mode can
+  // still escalate even with `LLM_WIKI_MOCK_TIER1=1` set; only
+  // deterministic mode resolves every mid-band similarity decision
+  // algorithmically and stays self-contained.
+  return spawnSync(
+    "node",
+    [CLI, "build", src, "--quality-mode", "deterministic"],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        LLM_WIKI_NO_PROMPT: "1",
+        LLM_WIKI_MOCK_TIER1: "1",
+        LLM_WIKI_SKIP_CLUSTER_NEST: "1",
+      },
+    },
+  );
+}
 
 function tmpWiki(tag) {
   const d = join(
@@ -666,5 +704,141 @@ test("materialisePlan: writes leaves + indices under target", () => {
   } finally {
     rmSync(a, { recursive: true, force: true });
     rmSync(out, { recursive: true, force: true });
+  }
+});
+
+// ── runJoin onPhase streaming contract ─────────────────────────
+
+test("runJoin: onPhase fires DURING execution, not batched after (Promise.race)", async () => {
+  // Strongest streaming-contract test for the PR-17-followup
+  // wiring. Earlier CLI-side variants couldn't reliably
+  // distinguish "streamed during execution" from
+  // "batched at end before exit" — both behaviours produce
+  // breadcrumbs in stderr before the process exits.
+  //
+  // This test pins the contract directly via Promise.race:
+  // a Promise that resolves on the FIRST `onPhase` callback
+  // (`ingest-all` is runJoin's first recorded phase) is raced
+  // against runJoin's overall promise. If `onPhase` fires
+  // synchronously inside runJoin's body — as it must under
+  // the streaming contract — the first-phase Promise settles
+  // long before runJoin's promise resolves, and the race
+  // returns "phase-fired". A regression that either dropped
+  // `onPhase` entirely or only invoked it after all I/O
+  // completed would let runJoin's promise win the race
+  // (either because onPhase never fires, or because all
+  // calls happen too close to runJoin's resolution).
+  //
+  // The test uses `spawnSync` to build two real source wikis
+  // via the build CLI — that gives them the `.llmwiki/git/`
+  // private-git markers `validateWiki` requires for source
+  // validation, plus enough I/O downstream that
+  // ingest-all → … → validation takes a meaningful (~hundreds
+  // of ms) amount of time. With deterministic mode (no Tier 2
+  // queue), the run is fully self-contained.
+  const parent = join(
+    tmpdir(),
+    `skill-llm-wiki-runjoin-stream-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  mkdirSync(parent, { recursive: true });
+
+  // Hermetic-runtime guard. Deterministic mode still routes
+  // mid-band similarity decisions through Tier 1 (MiniLM via
+  // `tiered.mjs`) and the convergence path may invoke
+  // cluster-nest. In a CLI subprocess `runCliBuild()` sets these
+  // env flags inside the child, but THIS test calls `runJoin`
+  // in-process — without these flags in the parent env, CI runs
+  // could load/download the real MiniLM weights and run real
+  // clustering, which is slow, network-sensitive, and irrelevant
+  // to the streaming-contract assertion below. Save the prior
+  // values so we restore them in `finally`, leaving global state
+  // untouched for sibling tests.
+  const priorMockTier1 = process.env.LLM_WIKI_MOCK_TIER1;
+  const priorSkipClusterNest = process.env.LLM_WIKI_SKIP_CLUSTER_NEST;
+  process.env.LLM_WIKI_MOCK_TIER1 = "1";
+  process.env.LLM_WIKI_SKIP_CLUSTER_NEST = "1";
+
+  try {
+    // Source A: notes-a/{alpha-src.md}
+    const srcA = join(parent, "src-a");
+    mkdirSync(join(srcA, "notes-a"), { recursive: true });
+    writeFileSync(
+      join(srcA, "notes-a", "alpha-src.md"),
+      "# Alpha\n\ndistinct alpha content for streaming test\n",
+    );
+    const buildA = runCliBuild(srcA);
+    assert.equal(buildA.status, 0, buildA.stderr);
+    const wikiA = `${srcA}.wiki`;
+
+    // Source B: notes-b/{beta-src.md}
+    const srcB = join(parent, "src-b");
+    mkdirSync(join(srcB, "notes-b"), { recursive: true });
+    writeFileSync(
+      join(srcB, "notes-b", "beta-src.md"),
+      "# Beta\n\ndistinct beta content for streaming test\n",
+    );
+    const buildB = runCliBuild(srcB);
+    assert.equal(buildB.status, 0, buildB.stderr);
+    const wikiB = `${srcB}.wiki`;
+
+    const target = join(parent, "joined.wiki");
+    mkdirSync(target, { recursive: true });
+
+    let firstPhaseSignaller;
+    const firstPhasePromise = new Promise((resolve) => {
+      firstPhaseSignaller = resolve;
+    });
+    const observedPhases = [];
+    const joinPromise = runJoin([wikiA, wikiB], target, {
+      qualityMode: "deterministic",
+      idCollisionPolicy: "namespace",
+      onPhase: ({ phase, summary }) => {
+        observedPhases.push(phase);
+        if (phase === "ingest-all") firstPhaseSignaller(phase);
+      },
+    });
+
+    const winner = await Promise.race([
+      firstPhasePromise.then(() => "phase-fired"),
+      joinPromise.then(() => "join-resolved", () => "join-resolved"),
+    ]);
+    assert.equal(
+      winner,
+      "phase-fired",
+      `onPhase("ingest-all") must settle BEFORE runJoin's promise resolves — proves the callback wiring exists. The realistic regression this catches is "onPhase support dropped from runJoin" (the wiring this PR adds); the OLD pre-onPhase code path had runJoin's promise resolve before any callback fired, so the race winner would be "join-resolved". Observed phases at race time: ${JSON.stringify(observedPhases)}`,
+    );
+
+    // Macrotask-gap timing checks were tried in an earlier
+    // round but proved flaky: a join over two-leaf source
+    // wikis under deterministic mode + LLM_WIKI_MOCK_TIER1
+    // completes in a few hundred microseconds end-to-end with
+    // every internal `await` resolving as a microtask in the
+    // same event-loop turn — `setImmediate` between phases
+    // never gets to fire before runJoin returns, so a
+    // "still-pending after first phase" assertion went both
+    // ways across runs. The Promise.race winner check above
+    // is the authoritative streaming-contract test here; the
+    // CLI-side `cli progress: join emits per-phase
+    // breadcrumbs in stderr` covers the end-to-end shape.
+
+    // Cleanup: still need to await runJoin's resolution to
+    // avoid an unhandled-promise-rejection warning. The
+    // runJoin invocation runs without an orchestrator-driven
+    // preOpSnapshot, so the target tree never gets the
+    // `.llmwiki/git/` markers `validateWiki` requires — we
+    // expect the call to fail at phase 9 with
+    // `JOIN-TARGET-INVALID`. That's fine: the streaming
+    // contract is already proven by the Promise.race winner
+    // above; the eventual failure is downstream of the part
+    // we're testing. Swallow it.
+    await joinPromise.catch((err) => {
+      if (err.code !== "JOIN-TARGET-INVALID") throw err;
+    });
+  } finally {
+    if (priorMockTier1 === undefined) delete process.env.LLM_WIKI_MOCK_TIER1;
+    else process.env.LLM_WIKI_MOCK_TIER1 = priorMockTier1;
+    if (priorSkipClusterNest === undefined) delete process.env.LLM_WIKI_SKIP_CLUSTER_NEST;
+    else process.env.LLM_WIKI_SKIP_CLUSTER_NEST = priorSkipClusterNest;
+    rmSync(parent, { recursive: true, force: true });
   }
 });

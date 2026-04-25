@@ -695,6 +695,22 @@ export async function runJoin(sources, target, ctx = {}) {
     // runs end-to-end without intermediate commits — the shape tests
     // in `tests/unit/join.test.mjs` use that path.
     onPhaseCommit = null,
+    // Optional per-phase progress hook, invoked synchronously the
+    // moment each phase records its summary (i.e. BEFORE the op
+    // awaits the next phase's I/O). This is what makes CLI-level
+    // progress streaming work for join — without it the
+    // orchestrator only sees join's phases AFTER `runJoin`
+    // returns, so the `[<op-id> N] phase: summary` breadcrumbs
+    // batch-print at the end of the join instead of streaming
+    // during execution. Shape:
+    //   ({ phase, summary }) => any | Promise<any>
+    // The return value is ignored. Synchronous throws AND Promise
+    // rejections are both swallowed — a misbehaving progress hook
+    // must never halt the op. Async hooks are supported (the
+    // caller is responsible for ensuring their observable side
+    // effects don't race with subsequent phases; `runJoin` itself
+    // does not await the hook).
+    onPhase = null,
   } = ctx;
   const commitPhase = async (phase, summary) => {
     if (onPhaseCommit) await onPhaseCommit({ phase, summary });
@@ -703,7 +719,27 @@ export async function runJoin(sources, target, ctx = {}) {
     throw new Error(`join: at least 2 source wikis required, got ${sources?.length ?? 0}`);
   }
   const phaseLog = [];
-  const record = (name, summary) => phaseLog.push({ name, summary });
+  const record = (name, summary) => {
+    phaseLog.push({ name, summary });
+    if (onPhase) {
+      // Cover BOTH sync throws and async rejections from the hook
+      // (mirrors `orchestrator.mjs::record()`). An `async` onPhase
+      // that rejects would otherwise escape as unhandledRejection
+      // and could terminate the process under Node's default
+      // policy, violating the "progress hook failures never halt
+      // the op" contract.
+      try {
+        const ret = onPhase({ phase: name, summary });
+        if (ret && typeof ret.then === "function") {
+          Promise.resolve(ret).catch(() => {
+            /* async onPhase rejection silently swallowed */
+          });
+        }
+      } catch {
+        /* sync onPhase throw silently swallowed */
+      }
+    }
+  };
 
   // Phase 1 — ingest-all.
   const ingested = sources.map((s) => ingestWiki(s));
