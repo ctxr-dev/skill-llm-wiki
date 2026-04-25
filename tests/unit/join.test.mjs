@@ -64,15 +64,25 @@ const CLI = join(
   "cli.mjs",
 );
 function runCliBuild(src) {
-  return spawnSync("node", [CLI, "build", src], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      LLM_WIKI_NO_PROMPT: "1",
-      LLM_WIKI_MOCK_TIER1: "1",
-      LLM_WIKI_SKIP_CLUSTER_NEST: "1",
+  // Pin `--quality-mode deterministic` so the subprocess can never
+  // enqueue Tier 2 work (which would exit-7 with NEEDS_TIER2 under
+  // hermetic test conditions). The default `tiered-fast` mode can
+  // still escalate even with `LLM_WIKI_MOCK_TIER1=1` set; only
+  // deterministic mode resolves every mid-band similarity decision
+  // algorithmically and stays self-contained.
+  return spawnSync(
+    "node",
+    [CLI, "build", src, "--quality-mode", "deterministic"],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        LLM_WIKI_NO_PROMPT: "1",
+        LLM_WIKI_MOCK_TIER1: "1",
+        LLM_WIKI_SKIP_CLUSTER_NEST: "1",
+      },
     },
-  });
+  );
 }
 
 function tmpWiki(tag) {
