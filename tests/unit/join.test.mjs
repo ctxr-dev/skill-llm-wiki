@@ -720,7 +720,10 @@ test("runJoin: onPhase fires DURING execution, not batched after (Promise.race)"
   // ingest-all → … → validation takes a meaningful (~hundreds
   // of ms) amount of time. With deterministic mode (no Tier 2
   // queue), the run is fully self-contained.
-  const parent = tmpdir() + `/skill-llm-wiki-runjoin-stream-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const parent = join(
+    tmpdir(),
+    `skill-llm-wiki-runjoin-stream-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
   mkdirSync(parent, { recursive: true });
   try {
     // Source A: notes-a/{alpha-src.md}
@@ -764,13 +767,26 @@ test("runJoin: onPhase fires DURING execution, not batched after (Promise.race)"
 
     const winner = await Promise.race([
       firstPhasePromise.then(() => "phase-fired"),
-      joinPromise.then(() => "join-resolved"),
+      joinPromise.then(() => "join-resolved", () => "join-resolved"),
     ]);
     assert.equal(
       winner,
       "phase-fired",
-      `onPhase("ingest-all") must settle BEFORE runJoin's promise resolves — proves the callback streams during execution rather than batching at end. Observed phases at race time: ${JSON.stringify(observedPhases)}`,
+      `onPhase("ingest-all") must settle BEFORE runJoin's promise resolves — proves the callback wiring exists. The realistic regression this catches is "onPhase support dropped from runJoin" (the wiring this PR adds); the OLD pre-onPhase code path had runJoin's promise resolve before any callback fired, so the race winner would be "join-resolved". Observed phases at race time: ${JSON.stringify(observedPhases)}`,
     );
+
+    // Macrotask-gap timing checks were tried in an earlier
+    // round but proved flaky: a join over two-leaf source
+    // wikis under deterministic mode + LLM_WIKI_MOCK_TIER1
+    // completes in a few hundred microseconds end-to-end with
+    // every internal `await` resolving as a microtask in the
+    // same event-loop turn — `setImmediate` between phases
+    // never gets to fire before runJoin returns, so a
+    // "still-pending after first phase" assertion went both
+    // ways across runs. The Promise.race winner check above
+    // is the authoritative streaming-contract test here; the
+    // CLI-side `cli progress: join emits per-phase
+    // breadcrumbs in stderr` covers the end-to-end shape.
 
     // Cleanup: still need to await runJoin's resolution to
     // avoid an unhandled-promise-rejection warning. The
