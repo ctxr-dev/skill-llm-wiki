@@ -154,6 +154,12 @@ test("cli progress: join emits per-phase breadcrumbs in stderr (final shape)", a
           LLM_WIKI_MOCK_TIER1: "1",
           LLM_WIKI_SKIP_CLUSTER_NEST: "1",
         },
+        // Drop stdin + stdout. The CLI writes a completion summary
+        // and per-phase bullet list to stdout under `join`; if we
+        // piped it without draining, a long-enough run could block
+        // the child on a full pipe buffer and hang the test. We
+        // only need stderr (the breadcrumb stream) here.
+        stdio: ["ignore", "ignore", "pipe"],
       },
     );
     let stderr = "";

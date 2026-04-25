@@ -32,7 +32,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { renderFrontmatter, parseFrontmatter } from "../../scripts/lib/frontmatter.mjs";
 import {
@@ -48,7 +48,6 @@ import {
   validateSources,
 } from "../../scripts/lib/join.mjs";
 import { spawnSync } from "node:child_process";
-import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 const CLI = join(
   dirname(fileURLToPath(import.meta.url)),
