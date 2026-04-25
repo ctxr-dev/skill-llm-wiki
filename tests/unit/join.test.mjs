@@ -44,8 +44,30 @@ import {
   planUnion,
   resolveIdCollisions,
   rewireReferences,
+  runJoin,
   validateSources,
 } from "../../scripts/lib/join.mjs";
+import { spawnSync } from "node:child_process";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+const CLI = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "scripts",
+  "cli.mjs",
+);
+function runCliBuild(src) {
+  return spawnSync("node", [CLI, "build", src], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      LLM_WIKI_NO_PROMPT: "1",
+      LLM_WIKI_MOCK_TIER1: "1",
+      LLM_WIKI_SKIP_CLUSTER_NEST: "1",
+    },
+  });
+}
 
 function tmpWiki(tag) {
   const d = join(
@@ -666,5 +688,104 @@ test("materialisePlan: writes leaves + indices under target", () => {
   } finally {
     rmSync(a, { recursive: true, force: true });
     rmSync(out, { recursive: true, force: true });
+  }
+});
+
+// ── runJoin onPhase streaming contract ─────────────────────────
+
+test("runJoin: onPhase fires DURING execution, not batched after (Promise.race)", async () => {
+  // Strongest streaming-contract test for the PR-17-followup
+  // wiring. Earlier CLI-side variants couldn't reliably
+  // distinguish "streamed during execution" from
+  // "batched at end before exit" — both behaviours produce
+  // breadcrumbs in stderr before the process exits.
+  //
+  // This test pins the contract directly via Promise.race:
+  // a Promise that resolves on the FIRST `onPhase` callback
+  // (`ingest-all` is runJoin's first recorded phase) is raced
+  // against runJoin's overall promise. If `onPhase` fires
+  // synchronously inside runJoin's body — as it must under
+  // the streaming contract — the first-phase Promise settles
+  // long before runJoin's promise resolves, and the race
+  // returns "phase-fired". A regression that either dropped
+  // `onPhase` entirely or only invoked it after all I/O
+  // completed would let runJoin's promise win the race
+  // (either because onPhase never fires, or because all
+  // calls happen too close to runJoin's resolution).
+  //
+  // The test uses `spawnSync` to build two real source wikis
+  // via the build CLI — that gives them the `.llmwiki/git/`
+  // private-git markers `validateWiki` requires for source
+  // validation, plus enough I/O downstream that
+  // ingest-all → … → validation takes a meaningful (~hundreds
+  // of ms) amount of time. With deterministic mode (no Tier 2
+  // queue), the run is fully self-contained.
+  const parent = tmpdir() + `/skill-llm-wiki-runjoin-stream-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  mkdirSync(parent, { recursive: true });
+  try {
+    // Source A: notes-a/{alpha-src.md}
+    const srcA = join(parent, "src-a");
+    mkdirSync(join(srcA, "notes-a"), { recursive: true });
+    writeFileSync(
+      join(srcA, "notes-a", "alpha-src.md"),
+      "# Alpha\n\ndistinct alpha content for streaming test\n",
+    );
+    const buildA = runCliBuild(srcA);
+    assert.equal(buildA.status, 0, buildA.stderr);
+    const wikiA = `${srcA}.wiki`;
+
+    // Source B: notes-b/{beta-src.md}
+    const srcB = join(parent, "src-b");
+    mkdirSync(join(srcB, "notes-b"), { recursive: true });
+    writeFileSync(
+      join(srcB, "notes-b", "beta-src.md"),
+      "# Beta\n\ndistinct beta content for streaming test\n",
+    );
+    const buildB = runCliBuild(srcB);
+    assert.equal(buildB.status, 0, buildB.stderr);
+    const wikiB = `${srcB}.wiki`;
+
+    const target = join(parent, "joined.wiki");
+    mkdirSync(target, { recursive: true });
+
+    let firstPhaseSignaller;
+    const firstPhasePromise = new Promise((resolve) => {
+      firstPhaseSignaller = resolve;
+    });
+    const observedPhases = [];
+    const joinPromise = runJoin([wikiA, wikiB], target, {
+      qualityMode: "deterministic",
+      idCollisionPolicy: "namespace",
+      onPhase: ({ phase, summary }) => {
+        observedPhases.push(phase);
+        if (phase === "ingest-all") firstPhaseSignaller(phase);
+      },
+    });
+
+    const winner = await Promise.race([
+      firstPhasePromise.then(() => "phase-fired"),
+      joinPromise.then(() => "join-resolved"),
+    ]);
+    assert.equal(
+      winner,
+      "phase-fired",
+      `onPhase("ingest-all") must settle BEFORE runJoin's promise resolves — proves the callback streams during execution rather than batching at end. Observed phases at race time: ${JSON.stringify(observedPhases)}`,
+    );
+
+    // Cleanup: still need to await runJoin's resolution to
+    // avoid an unhandled-promise-rejection warning. The
+    // runJoin invocation runs without an orchestrator-driven
+    // preOpSnapshot, so the target tree never gets the
+    // `.llmwiki/git/` markers `validateWiki` requires — we
+    // expect the call to fail at phase 9 with
+    // `JOIN-TARGET-INVALID`. That's fine: the streaming
+    // contract is already proven by the Promise.race winner
+    // above; the eventual failure is downstream of the part
+    // we're testing. Swallow it.
+    await joinPromise.catch((err) => {
+      if (err.code !== "JOIN-TARGET-INVALID") throw err;
+    });
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
   }
 });

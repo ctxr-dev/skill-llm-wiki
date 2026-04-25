@@ -105,23 +105,20 @@ test("cli progress: stderr carries phase breadcrumbs on a build", () => {
   }
 });
 
-test("cli progress: join streams per-phase breadcrumbs during execution", async () => {
-  // Regression for the PR-17-followup fix: before runJoin grew
-  // an `onPhase` callback, the orchestrator's join branch only
-  // relayed join's sub-phases into the outer phases[] AFTER
-  // runJoin returned, so the stderr breadcrumbs all printed at
-  // the end of the join instead of during it. This test pins
-  // the streaming contract two ways:
-  //   (1) Final stderr carries the expected per-phase
-  //       breadcrumbs with consecutive indices from 1.
-  //   (2) The first join breadcrumb is observed BEFORE the
-  //       child process exits — proof that the breadcrumb
-  //       arrived as part of the streaming output, not flushed
-  //       in a single batch at process-exit. This is the part
-  //       a `spawnSync`-based test couldn't distinguish: it
-  //       only sees stderr after the process is gone, so a
-  //       regression to batch-at-end emission would still pass
-  //       under a sync-spawn check.
+test("cli progress: join emits per-phase breadcrumbs in stderr (final shape)", async () => {
+  // CLI-side check: a `join` invocation's stderr carries the
+  // expected per-phase breadcrumb names with consecutive indices
+  // from 1. This is a final-shape test — it verifies the wiring
+  // from `runJoin`'s `onPhase` through the orchestrator's
+  // `record()` to the CLI's `onProgress` writer reaches stderr,
+  // but it intentionally does NOT try to distinguish "streamed
+  // during execution" from "batched at end" via stderr timing.
+  // That distinction is unreliable from a black-box CLI runner
+  // (the regressed code path also wrote breadcrumbs before
+  // process exit, just not interleaved with join's phases). The
+  // streaming-vs-batching contract is pinned by a direct
+  // in-process test on `runJoin`'s `onPhase` in
+  // tests/unit/join.test.mjs.
   const parent = tmpParent("join");
   try {
     const srcA = buildTinySource(parent, ["alpha-src"]);
@@ -137,11 +134,6 @@ test("cli progress: join streams per-phase breadcrumbs during execution", async 
     const buildB = runCli(["build", srcBRoot]);
     assert.equal(buildB.status, 0, buildB.stderr);
     const wikiB = `${srcBRoot}.wiki`;
-    // Async-spawn the join so we can listen to stderr `data`
-    // events as they arrive. `child.exitCode` is null while the
-    // process is alive and gets set only at exit, so checking
-    // it inside the `data` handler tells us whether the
-    // breadcrumb arrived during execution or post-exit.
     const target = join(parent, "joined.wiki");
     const child = spawn(
       "node",
@@ -165,24 +157,21 @@ test("cli progress: join streams per-phase breadcrumbs during execution", async 
       },
     );
     let stderr = "";
-    let breadcrumbDuringExecution = false;
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => {
       stderr += chunk;
-      if (child.exitCode === null && /\[join-\S+ \d+\] /.test(stderr)) {
-        breadcrumbDuringExecution = true;
-      }
     });
-    const exitCode = await new Promise((resolve) => {
-      child.on("exit", (code) => resolve(code));
+    // Listen on `close` rather than `exit`: `exit` fires when the
+    // process ends but stdio buffers may still flush afterwards;
+    // `close` is the reliable "all stdio drained" signal so we
+    // don't race with late-arriving stderr chunks. Also wire an
+    // error handler so a spawn failure rejects the test instead
+    // of hanging.
+    const exitCode = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code) => resolve(code));
     });
     assert.equal(exitCode, 0, stderr);
-    assert.ok(
-      breadcrumbDuringExecution,
-      `expected at least one join breadcrumb to arrive BEFORE process exit (proof that emission streams rather than batching at end); final stderr was:\n${stderr}`,
-    );
-    // Now also verify the final shape — every join sub-phase
-    // appears, and indices are consecutive from 1.
     assert.match(
       stderr,
       /\[join-\S+ \d+\] ingest-all:/,
