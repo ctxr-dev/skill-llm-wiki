@@ -963,7 +963,17 @@ export function deterministicPurpose(componentLeaves) {
     return top.length === 1 ? top[0] : top.join("; ");
   }
   const sorted = normalised
-    .map((data) => ({ id: data?.id ?? "", focus: data?.focus ?? "" }))
+    .map((data) => ({
+      id: data?.id ?? "",
+      // Mirror the single-member branch: only accept string focus
+      // values, normalise everything else to "". Without this, a
+      // hand-authored leaf with a non-string `focus:` (e.g. a YAML
+      // number `0` or `false`) would propagate through and make
+      // `deterministicPurpose()` return a non-string, breaking the
+      // documented contract that this helper always returns a
+      // string.
+      focus: typeof data?.focus === "string" ? data.focus : "",
+    }))
     .filter((x) => x.id)
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return sorted[0]?.focus ?? "";

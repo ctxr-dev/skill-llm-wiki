@@ -555,6 +555,30 @@ test("deterministicPurpose: falls back to first-sorted-id's focus when no covers
   assert.equal(deterministicPurpose(leaves), "alpha focus text");
 });
 
+test("deterministicPurpose: no-covers fallback always returns a string", () => {
+  // Pin the helper's "always returns a string" contract on the
+  // multi-member no-covers fallback path. Both the single-member
+  // branch and the joined-covers branch already normalise to a
+  // string; this test guards the lex-first-fallback branch from
+  // propagating non-string `focus:` values (e.g. YAML number `0`,
+  // boolean `false`, missing key) — without normalisation those
+  // would flow through `data?.focus ?? ""` (which only catches
+  // null/undefined) and the function's return type would silently
+  // change.
+  const numeric = [
+    { data: { id: "alpha", focus: 0 } },
+    { data: { id: "beta", focus: 42 } },
+  ];
+  assert.strictEqual(deterministicPurpose(numeric), "");
+  const mixed = [
+    { data: { id: "alpha" } },
+    { data: { id: "beta", focus: "real text" } },
+  ];
+  // alpha's missing focus normalises to "" and wins the lex-sort,
+  // so the helper returns "" — still a string, still deterministic.
+  assert.strictEqual(deterministicPurpose(mixed), "");
+});
+
 test("deterministicPurpose: accepts plain frontmatter objects (no wrapper)", () => {
   // API-shape symmetry with generateDeterministicSlug and
   // buildSiblingIdfContext: the helper must normalise either leaf
