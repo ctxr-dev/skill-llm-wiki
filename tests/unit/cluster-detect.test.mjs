@@ -469,33 +469,114 @@ test("generateDeterministicSlug: hash fallback when no valid token survives", ()
 
 // ─── deterministicPurpose ────────────────────────────────────────────
 
-test("deterministicPurpose: picks the most-shared cover phrase", () => {
+test("deterministicPurpose: shared-cover wins frequency rank, then lex top-up follows", () => {
+  // 3 members. `shared-topic` appears in 2 of them so it ranks first
+  // by frequency. The remaining covers (alpha / beta / gamma) all
+  // appear once and are lex-sorted into the top-up slots so the
+  // resulting focus is honest about the cluster being multi-topic.
   const leaves = [
     { data: { id: "a", focus: "A focus", covers: ["shared-topic", "alpha"] } },
     { data: { id: "b", focus: "B focus", covers: ["shared-topic", "beta"] } },
     { data: { id: "c", focus: "C focus", covers: ["gamma"] } },
   ];
-  assert.equal(deterministicPurpose(leaves), "shared-topic");
+  assert.equal(
+    deterministicPurpose(leaves),
+    "shared-topic; alpha; beta; gamma",
+    "shared-topic ranks first (count 2); the rest fill in count-1 lex order",
+  );
 });
 
-test("deterministicPurpose: lex tie-break on equal frequency", () => {
+test("deterministicPurpose: all-unique covers → top-N lex-sorted union", () => {
+  // No cover is shared across members — the historical bug case
+  // that picked one arbitrary lex-first cover and lied about the
+  // cluster's content. New behaviour joins the union with "; ".
   const leaves = [
     { data: { id: "a", focus: "A focus", covers: ["zzz"] } },
     { data: { id: "b", focus: "B focus", covers: ["aaa"] } },
   ];
   assert.equal(
     deterministicPurpose(leaves),
-    "aaa",
-    "lex-smallest wins tie-break for reproducibility",
+    "aaa; zzz",
+    "no shared covers → top-N (here all) joined in deterministic lex order",
   );
 });
 
+test("deterministicPurpose: caps the joined focus at PURPOSE_MAX_COVERS=4", () => {
+  // 6 members with all-unique covers. Output must include at most
+  // 4 covers so the synthesised focus stays scannable.
+  const leaves = [
+    { data: { id: "a", focus: "fA", covers: ["a-cover"] } },
+    { data: { id: "b", focus: "fB", covers: ["b-cover"] } },
+    { data: { id: "c", focus: "fC", covers: ["c-cover"] } },
+    { data: { id: "d", focus: "fD", covers: ["d-cover"] } },
+    { data: { id: "e", focus: "fE", covers: ["e-cover"] } },
+    { data: { id: "f", focus: "fF", covers: ["f-cover"] } },
+  ];
+  assert.equal(
+    deterministicPurpose(leaves),
+    "a-cover; b-cover; c-cover; d-cover",
+    "top-4 covers joined; later covers dropped to keep focus readable",
+  );
+});
+
+test("deterministicPurpose: single-member cluster returns the member's own focus", () => {
+  // X.11 root-containment moves a single outlier leaf into its own
+  // dedicated folder. The folder's focus must reflect what that one
+  // leaf is actually about — not a multi-cover join, which would be
+  // pointlessly verbose for a 1-leaf cluster.
+  const leaf = {
+    data: {
+      id: "outlier",
+      focus: "Specific outlier topic that has no cluster home",
+      covers: ["topic-a", "topic-b", "topic-c"],
+    },
+  };
+  assert.equal(
+    deterministicPurpose([leaf]),
+    "Specific outlier topic that has no cluster home",
+  );
+});
+
+test("deterministicPurpose: single-member cluster handles empty/missing focus safely", () => {
+  // A leaf with no `focus:` should produce an empty string, not crash.
+  // (Earlier versions of the helper returned `""` via the `?? ""` at
+  // the bottom; preserve that contract.)
+  assert.equal(deterministicPurpose([{ data: { id: "a" } }]), "");
+  assert.equal(deterministicPurpose([{ data: { id: "a", focus: 0 } }]), "");
+});
+
 test("deterministicPurpose: falls back to first-sorted-id's focus when no covers", () => {
+  // ≥ 2 members and no covers anywhere → deterministic lex-first
+  // fallback. Preserves the historical contract for this edge case.
   const leaves = [
     { data: { id: "beta", focus: "beta focus text" } },
     { data: { id: "alpha", focus: "alpha focus text" } },
   ];
   assert.equal(deterministicPurpose(leaves), "alpha focus text");
+});
+
+test("deterministicPurpose: no-covers fallback always returns a string", () => {
+  // Pin the helper's "always returns a string" contract on the
+  // multi-member no-covers fallback path. Both the single-member
+  // branch and the joined-covers branch already normalise to a
+  // string; this test guards the lex-first-fallback branch from
+  // propagating non-string `focus:` values (e.g. YAML number `0`,
+  // boolean `false`, missing key) — without normalisation those
+  // would flow through `data?.focus ?? ""` (which only catches
+  // null/undefined) and the function's return type would silently
+  // change.
+  const numeric = [
+    { data: { id: "alpha", focus: 0 } },
+    { data: { id: "beta", focus: 42 } },
+  ];
+  assert.strictEqual(deterministicPurpose(numeric), "");
+  const mixed = [
+    { data: { id: "alpha" } },
+    { data: { id: "beta", focus: "real text" } },
+  ];
+  // alpha's missing focus normalises to "" and wins the lex-sort,
+  // so the helper returns "" — still a string, still deterministic.
+  assert.strictEqual(deterministicPurpose(mixed), "");
 });
 
 test("deterministicPurpose: accepts plain frontmatter objects (no wrapper)", () => {
@@ -511,11 +592,12 @@ test("deterministicPurpose: accepts plain frontmatter objects (no wrapper)", () 
     { id: "b", focus: "B focus", covers: ["shared-topic", "beta"] },
     { id: "c", focus: "C focus", covers: ["gamma"] },
   ];
-  assert.equal(deterministicPurpose(plain), "shared-topic");
+  const expected = "shared-topic; alpha; beta; gamma";
+  assert.equal(deterministicPurpose(plain), expected);
   // Control: the same inputs wrapped in `{ data }` must produce the
   // same result, proving the normalisation is semantically lossless.
   const wrapped = plain.map((data) => ({ data }));
-  assert.equal(deterministicPurpose(wrapped), "shared-topic");
+  assert.equal(deterministicPurpose(wrapped), expected);
 });
 
 // ── detectCoarseClusters (Phase X.10 — flat large-diverse root pre-pass) ─

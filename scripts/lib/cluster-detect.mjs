@@ -906,11 +906,32 @@ export function buildSiblingIdfContext(siblings) {
   return computeIdf(tokenLists);
 }
 
-// Deterministic purpose for the NEST stub's `focus:` field. Picks the
-// single cover phrase that appears in the most member frontmatters
-// (with lex tie-breaking for reproducibility). When members share no
-// covers, falls back to the focus of the member whose id sorts first
-// — still deterministic, still driven by member content alone.
+// Maximum number of cover phrases to splice into a multi-member
+// cluster's synthesised focus. Four is a soft cap that keeps the
+// resulting string short enough to read at a glance while still
+// telling the orchestrator the cluster is multi-topic.
+const PURPOSE_MAX_COVERS = 4;
+
+// Deterministic purpose for the NEST stub's `focus:` field.
+//
+// Tiered policy:
+//   - Single-member cluster: return the member's own `focus` directly
+//     — concise + accurate, e.g. for an X.11 root-containment outlier
+//     whose folder will hold exactly one leaf.
+//   - Multi-member cluster: aggregate the top-N cover phrases across
+//     members ranked by frequency desc, then lex asc, joined with
+//     "; ". This is the corrected behaviour: previously the
+//     algorithm returned just the lex-first highest-count cover,
+//     which on coarse k-means clusters of diverse content (where no
+//     cover appears in multiple members) collapsed to "the
+//     alphabetically-first cover of any member" — producing
+//     misleading single-leaf focus strings on multi-topic clusters
+//     (see X.11 wiki output where an 8-leaf ops/observability
+//     cluster's focus read "Action items without owner or deadline",
+//     which was just one detail of one member).
+//   - Multi-member cluster with no covers anywhere: fall back to the
+//     focus of the member whose id sorts first. Still deterministic,
+//     still driven by member content alone.
 //
 // Accepts either `{ path, data }` leaf wrappers or plain frontmatter
 // objects. Input is normalised via `leaf?.data ?? leaf` at the top so
@@ -919,6 +940,9 @@ export function buildSiblingIdfContext(siblings) {
 // without getting silent empty results for the plain-object path.
 export function deterministicPurpose(componentLeaves) {
   const normalised = componentLeaves.map((leaf) => leaf?.data ?? leaf);
+  if (normalised.length === 1) {
+    return typeof normalised[0]?.focus === "string" ? normalised[0].focus : "";
+  }
   const counts = new Map();
   for (const data of normalised) {
     const covers = Array.isArray(data?.covers) ? data.covers : [];
@@ -935,10 +959,21 @@ export function deterministicPurpose(componentLeaves) {
       if (b[1] !== a[1]) return b[1] - a[1];
       return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
     });
-    return ranked[0][0];
+    const top = ranked.slice(0, PURPOSE_MAX_COVERS).map(([cover]) => cover);
+    return top.length === 1 ? top[0] : top.join("; ");
   }
   const sorted = normalised
-    .map((data) => ({ id: data?.id ?? "", focus: data?.focus ?? "" }))
+    .map((data) => ({
+      id: data?.id ?? "",
+      // Mirror the single-member branch: only accept string focus
+      // values, normalise everything else to "". Without this, a
+      // hand-authored leaf with a non-string `focus:` (e.g. a YAML
+      // number `0` or `false`) would propagate through and make
+      // `deterministicPurpose()` return a non-string, breaking the
+      // documented contract that this helper always returns a
+      // string.
+      focus: typeof data?.focus === "string" ? data.focus : "",
+    }))
     .filter((x) => x.id)
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return sorted[0]?.focus ?? "";
