@@ -18,7 +18,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -105,24 +105,29 @@ test("cli progress: stderr carries phase breadcrumbs on a build", () => {
   }
 });
 
-test("cli progress: join streams per-phase breadcrumbs during execution", () => {
+test("cli progress: join streams per-phase breadcrumbs during execution", async () => {
   // Regression for the PR-17-followup fix: before runJoin grew
   // an `onPhase` callback, the orchestrator's join branch only
   // relayed join's sub-phases into the outer phases[] AFTER
   // runJoin returned, so the stderr breadcrumbs all printed at
   // the end of the join instead of during it. This test pins
-  // that join's own phase names (ingest-all, plan-union,
-  // resolve-id-collisions, …) show up in stderr with consecutive
-  // phase indices — proof that `onPhase` is wired through to the
-  // CLI breadcrumb callback in real time.
+  // the streaming contract two ways:
+  //   (1) Final stderr carries the expected per-phase
+  //       breadcrumbs with consecutive indices from 1.
+  //   (2) The first join breadcrumb is observed BEFORE the
+  //       child process exits — proof that the breadcrumb
+  //       arrived as part of the streaming output, not flushed
+  //       in a single batch at process-exit. This is the part
+  //       a `spawnSync`-based test couldn't distinguish: it
+  //       only sees stderr after the process is gone, so a
+  //       regression to batch-at-end emission would still pass
+  //       under a sync-spawn check.
   const parent = tmpParent("join");
   try {
     const srcA = buildTinySource(parent, ["alpha-src"]);
-    // Build the first source into a wiki.
     const buildA = runCli(["build", srcA]);
     assert.equal(buildA.status, 0, buildA.stderr);
     const wikiA = `${srcA}.wiki`;
-    // Build a second source (distinct subcat + leaves).
     const srcBRoot = join(parent, "srcB");
     mkdirSync(join(srcBRoot, "other"), { recursive: true });
     writeFileSync(
@@ -132,44 +137,73 @@ test("cli progress: join streams per-phase breadcrumbs during execution", () => 
     const buildB = runCli(["build", srcBRoot]);
     assert.equal(buildB.status, 0, buildB.stderr);
     const wikiB = `${srcBRoot}.wiki`;
-    // Run the actual join; progress breadcrumbs should stream.
+    // Async-spawn the join so we can listen to stderr `data`
+    // events as they arrive. `child.exitCode` is null while the
+    // process is alive and gets set only at exit, so checking
+    // it inside the `data` handler tells us whether the
+    // breadcrumb arrived during execution or post-exit.
     const target = join(parent, "joined.wiki");
-    const r = runCli([
-      "join",
-      wikiA,
-      wikiB,
-      "--target",
-      target,
-      "--quality-mode",
-      "deterministic",
-    ]);
-    assert.equal(r.status, 0, r.stderr);
-    // Each join sub-phase must appear as a `[join-... N] <phase>:`
-    // breadcrumb. Check a couple of representative ones that
-    // `runJoin` always records on a 2-source clean-merge run.
+    const child = spawn(
+      "node",
+      [
+        CLI,
+        "join",
+        wikiA,
+        wikiB,
+        "--target",
+        target,
+        "--quality-mode",
+        "deterministic",
+      ],
+      {
+        env: {
+          ...process.env,
+          LLM_WIKI_NO_PROMPT: "1",
+          LLM_WIKI_MOCK_TIER1: "1",
+          LLM_WIKI_SKIP_CLUSTER_NEST: "1",
+        },
+      },
+    );
+    let stderr = "";
+    let breadcrumbDuringExecution = false;
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+      if (child.exitCode === null && /\[join-\S+ \d+\] /.test(stderr)) {
+        breadcrumbDuringExecution = true;
+      }
+    });
+    const exitCode = await new Promise((resolve) => {
+      child.on("exit", (code) => resolve(code));
+    });
+    assert.equal(exitCode, 0, stderr);
+    assert.ok(
+      breadcrumbDuringExecution,
+      `expected at least one join breadcrumb to arrive BEFORE process exit (proof that emission streams rather than batching at end); final stderr was:\n${stderr}`,
+    );
+    // Now also verify the final shape — every join sub-phase
+    // appears, and indices are consecutive from 1.
     assert.match(
-      r.stderr,
+      stderr,
       /\[join-\S+ \d+\] ingest-all:/,
-      `expected ingest-all breadcrumb; got:\n${r.stderr}`,
+      `expected ingest-all breadcrumb; got:\n${stderr}`,
     );
     assert.match(
-      r.stderr,
+      stderr,
       /\[join-\S+ \d+\] plan-union:/,
-      `expected plan-union breadcrumb; got:\n${r.stderr}`,
+      `expected plan-union breadcrumb; got:\n${stderr}`,
     );
     assert.match(
-      r.stderr,
+      stderr,
       /\[join-\S+ \d+\] validation:/,
-      `expected validation breadcrumb; got:\n${r.stderr}`,
+      `expected validation breadcrumb; got:\n${stderr}`,
     );
-    // And the index sequence is consecutive from 1 for the join
-    // op's breadcrumbs.
-    const joinIndices = [...r.stderr.matchAll(/\[join-\S+ (\d+)\]/g)].map(
+    const joinIndices = [...stderr.matchAll(/\[join-\S+ (\d+)\]/g)].map(
       (m) => Number(m[1]),
     );
     assert.ok(
       joinIndices.length > 0,
-      `expected at least one join breadcrumb; got:\n${r.stderr}`,
+      `expected at least one join breadcrumb; got:\n${stderr}`,
     );
     for (let i = 0; i < joinIndices.length; i++) {
       assert.equal(
