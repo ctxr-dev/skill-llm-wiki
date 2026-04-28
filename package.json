@@ -1,6 +1,6 @@
 {
   "name": "@ctxr/skill-llm-wiki",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Claude Code skill — build, extend, validate, rebuild, fix, and join LLM wikis from any knowledge corpus. Token-efficient retrieval via hierarchical indices, DAG parents, and deterministic rewrite operators.",
   "type": "module",
   "license": "MIT",
