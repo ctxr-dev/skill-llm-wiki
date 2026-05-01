@@ -23,21 +23,52 @@
 // `needs_ai` flag on the returned draft tells the caller which entries
 // need AI review.
 
-// Fields we copy straight from the source frontmatter when the author
-// supplied them. Fields NOT in this list (id / type / depth_role /
-// parents / source) are always re-derived because their authoritative
-// source is the target-tree position, not the original source file.
-const AUTHORED_LEAF_FIELDS = [
+// Prototype-pollution deny-list. Mirrors POLLUTION_KEYS in
+// scripts/lib/frontmatter.mjs — the parser refuses these at parse
+// time, but the new pass-through path in draftLeafFrontmatter could
+// still surface them if a crafted candidate JSON (e.g. from
+// `scripts/cli.mjs draft-leaf` invoked with adversarial input)
+// shipped them via authored_frontmatter. Refusing here keeps the
+// invariant local to the assignment site.
+const POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+// Fields whose authoritative source is the target-tree position (not
+// the original source file). These are ALWAYS re-derived during a
+// rebuild regardless of what the author wrote: `id` comes from the
+// filename / target slot, `type` defaults to "primary" (overlays must
+// be re-asserted explicitly via the rebuild's overlay path),
+// `depth_role` is always "leaf" for non-index leaves, and `source` is
+// recomputed from the build invocation.
+//
+// `parents` is NOT in this set — it's a hand-authored field (the
+// comment in the data object below describes the convention) and the
+// drafter pickAuthored()s it. Including it here would silently drop
+// authored parents and break the soft-DAG.
+//
+// EVERY OTHER authored field flows through verbatim. This is a
+// deny-list, not an allow-list (issue #26): consumers ship their own
+// schemas (e.g. skill-code-review's `dimensions`, `audit_surface`,
+// `languages`, `tools`) and a generic wiki framework should preserve
+// what the author wrote rather than enumerating per-consumer fields.
+const RESERVED_LEAF_FIELDS = new Set([
+  "id",
+  "type",
+  "depth_role",
+  "source",
+]);
+
+// Fields the drafter computes a heuristic baseline for and writes
+// explicitly in the canonical data object below. Authored values for
+// these win over the heuristic via pickAuthored(); they're listed here
+// only so the pass-through loop knows to skip them (they're already in
+// the data object — re-forwarding would be a no-op but with the wrong
+// authored-vs-heuristic precedence).
+const EXPLICITLY_HANDLED_LEAF_FIELDS = new Set([
   "focus",
   "covers",
   "tags",
-  "domains",
-  "aliases",
-  "activation",
-  "shared_covers",
-  "overlay_targets",
-  "links",
-];
+  "parents",
+]);
 
 export function draftLeafFrontmatter(candidate, { categoryPath } = {}) {
   const authored = candidate.authored_frontmatter || {};
@@ -71,20 +102,96 @@ export function draftLeafFrontmatter(candidate, { categoryPath } = {}) {
     },
   };
 
-  // Forward the remaining AUTHORED_LEAF_FIELDS verbatim. These have no
-  // heuristic analogue — when the author supplied them, we keep them;
-  // otherwise we omit the field entirely so the output stays compact.
+  // Forward EVERY authored field that isn't reserved (re-derived from
+  // target-tree position) or explicitly handled above (focus / covers
+  // / tags / parents, where authored-wins-over-drafted is enforced via
+  // pickAuthored). Issue #26: the previous allow-list dropped any
+  // consumer-specific v2 field (dimensions, audit_surface, languages,
+  // tools, …) authored at the source; the deny-list now preserves
+  // arbitrary author-shipped frontmatter VALUES (the downstream
+  // renderer applies canonical top-level key ordering and YAML
+  // formatting, so the rebuilt bytes need not match the source bytes).
   if (hasAuthored) {
-    for (const field of AUTHORED_LEAF_FIELDS) {
-      if (field === "focus" || field === "covers" || field === "tags") continue;
-      if (authored[field] !== undefined && authored[field] !== null) {
-        data[field] = authored[field];
-      }
+    for (const [field, value] of Object.entries(authored)) {
+      if (RESERVED_LEAF_FIELDS.has(field)) continue;
+      if (EXPLICITLY_HANDLED_LEAF_FIELDS.has(field)) continue;
+      // Refuse prototype-pollution keys before any assignment touches
+      // the prototype chain. Mirrors frontmatter.mjs's safeAssign.
+      if (POLLUTION_KEYS.has(field)) continue;
+      if (value === undefined || value === null) continue;
+      const sanitised = sanitiseAuthoredValue(value);
+      if (sanitised === undefined) continue;
+      // Empty arrays / empty strings DO get forwarded — distinguishing
+      // "author wrote []" from "author omitted" matters for some
+      // consumer schemas (e.g. an explicit empty file_globs[] means
+      // "this leaf opts out of glob-based activation"). Only the
+      // null/undefined case is treated as "author omitted".
+      // Use defineProperty (configurable, enumerable, writable) so the
+      // assignment never invokes a setter on Object.prototype if the
+      // POLLUTION_KEYS guard above is ever bypassed.
+      Object.defineProperty(data, field, {
+        value: sanitised,
+        configurable: true,
+        enumerable: true,
+        writable: true,
+      });
     }
   }
 
   const confidence = scoreConfidence(data, candidate);
   return { data, confidence, needs_ai: confidence < 0.6 };
+}
+
+// Sanitise a value pulled from authored frontmatter for assignment
+// into `data` (which is later passed to renderFrontmatter). The
+// renderer at scripts/lib/frontmatter.mjs handles plain objects,
+// arrays, and scalar primitives (string / number / boolean / null) but
+// not richer JS types — gray-matter / js-yaml can return:
+//   - Date (from YAML timestamps like `created_at: 2026-04-30`):
+//     converted to ISO string. Otherwise renderScalar(date) calls
+//     String(date) which produces the verbose JS Date toString form.
+//   - functions / symbols / class instances: rejected (return
+//     undefined so the pass-through loop skips the field).
+// Plain objects and arrays recurse so a Date nested inside an
+// authored object still gets normalised.
+function sanitiseAuthoredValue(value) {
+  if (value === null) return null;
+  if (value === undefined) return undefined;
+  const t = typeof value;
+  if (t === "string" || t === "number" || t === "boolean") return value;
+  if (t === "function" || t === "symbol" || t === "bigint") return undefined;
+  if (value instanceof Date) {
+    // YAML timestamps come back as Date; canonicalise to ISO string so
+    // a downstream rebuild round-trips the same string back into the
+    // YAML stream.
+    return value.toISOString();
+  }
+  if (Array.isArray(value)) {
+    return value.map(sanitiseAuthoredValue).filter((v) => v !== undefined);
+  }
+  if (t === "object") {
+    // Plain-object check: only recurse into objects whose prototype
+    // is Object.prototype or null. Class instances (URL, Buffer, …)
+    // are rejected — their `Object.entries` shape is rarely what a
+    // YAML frontmatter consumer wants.
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== null && proto !== Object.prototype) return undefined;
+    // Use a null-prototype object as the accumulator so neither the
+    // POLLUTION_KEYS guard nor a setter on Object.prototype can be
+    // triggered by an `out[__proto__] = ...` assignment with a crafted
+    // key. (defineProperty would also work; null-proto is one allocation.)
+    const out = Object.create(null);
+    for (const [k, v] of Object.entries(value)) {
+      if (POLLUTION_KEYS.has(k)) continue;
+      const s = sanitiseAuthoredValue(v);
+      if (s === undefined) continue;
+      out[k] = s;
+    }
+    // Re-parent to Object.prototype before returning so downstream
+    // consumers that do `value.hasOwnProperty(...)` etc. keep working.
+    return Object.assign({}, out);
+  }
+  return undefined;
 }
 
 function pickAuthored(authoredVal, fallback) {

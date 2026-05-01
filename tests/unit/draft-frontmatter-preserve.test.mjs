@@ -82,6 +82,149 @@ test("draftLeafFrontmatter: falls back to heuristics when authored is empty", ()
   assert.equal(data.activation, undefined);
 });
 
+test("draftLeafFrontmatter: consumer-defined fields pass through (#26 deny-list)", () => {
+  // Issue #26: the previous allow-list dropped any authored field not
+  // in a hardcoded vocabulary (focus / covers / tags / domains /
+  // aliases / activation / shared_covers / overlay_targets / links).
+  // skill-code-review's v2 schema (dimensions, audit_surface, languages,
+  // tools, plus an arbitrary `custom_consumer_field`) was silently
+  // erased on every wiki rebuild. The deny-list now preserves them.
+  const authored = {
+    focus: "auth focus",
+    dimensions: ["security", "correctness"],
+    audit_surface: ["request_handling", "auth_flow"],
+    languages: ["typescript", "python"],
+    tools: [{ name: "eslint", purpose: "lint JS" }],
+    custom_consumer_field: { nested: true, value: 42 },
+  };
+  const candidate = fakeCandidate({
+    authored_frontmatter: authored,
+    has_authored_frontmatter: true,
+  });
+  const { data } = draftLeafFrontmatter(candidate, { categoryPath: "" });
+  assert.deepEqual(data.dimensions, ["security", "correctness"]);
+  assert.deepEqual(data.audit_surface, ["request_handling", "auth_flow"]);
+  assert.deepEqual(data.languages, ["typescript", "python"]);
+  assert.deepEqual(data.tools, [{ name: "eslint", purpose: "lint JS" }]);
+  assert.deepEqual(data.custom_consumer_field, { nested: true, value: 42 });
+});
+
+test("draftLeafFrontmatter: reserved fields are NOT pulled from authored (#26)", () => {
+  // The deny-list keeps id / type / depth_role / source as re-derived
+  // from the target-tree position. An author writing `id: hostile-id`
+  // or `type: overlay` in a primary leaf source should NOT see those
+  // leak into the generated leaf — `source` in particular leaking
+  // would corrupt the build's source-of-truth pointer. (overlay_targets
+  // is an authored field; declaring `type: overlay` is the rebuild's
+  // decision via the overlay path.)
+  //
+  // `parents` is intentionally NOT reserved — it's hand-authored when
+  // the soft-DAG layout requires it; covered by the dedicated
+  // "additional authored fields are forwarded" test.
+  const authored = {
+    id: "hostile-id-from-source",
+    type: "overlay",
+    depth_role: "category",
+    source: { origin: "synthetic", path: "lying.md", hash: "0" },
+    focus: "legit focus",
+  };
+  const candidate = fakeCandidate({
+    id: "actual-id",
+    source_path: "actual.md",
+    hash: "sha256:realhash",
+    authored_frontmatter: authored,
+    has_authored_frontmatter: true,
+  });
+  const { data } = draftLeafFrontmatter(candidate, { categoryPath: "" });
+  assert.equal(data.id, "actual-id");
+  assert.equal(data.type, "primary");
+  assert.equal(data.depth_role, "leaf");
+  assert.equal(data.source.path, "actual.md");
+  assert.equal(data.source.hash, "sha256:realhash");
+  assert.equal(data.source.origin, "file");
+  // The legitimate authored focus DID flow through.
+  assert.equal(data.focus, "legit focus");
+});
+
+test("draftLeafFrontmatter: Date authored values are normalised to ISO string (#27 review)", () => {
+  // gray-matter / js-yaml parse YAML timestamps like `created_at:
+  // 2026-04-30` into JavaScript Date objects. Without normalisation,
+  // the renderer's renderScalar() does String(date) which produces
+  // the verbose Date.toString() form, silently corrupting consumer
+  // data on every rebuild. Normalisation: Date → ISO string.
+  const authored = {
+    focus: "f",
+    created_at: new Date("2026-04-30T12:00:00.000Z"),
+    nested: { authored_at: new Date("2026-01-01T00:00:00.000Z"), label: "foo" },
+  };
+  const candidate = fakeCandidate({
+    authored_frontmatter: authored,
+    has_authored_frontmatter: true,
+  });
+  const { data } = draftLeafFrontmatter(candidate, { categoryPath: "" });
+  assert.equal(data.created_at, "2026-04-30T12:00:00.000Z");
+  assert.equal(data.nested.authored_at, "2026-01-01T00:00:00.000Z");
+  assert.equal(data.nested.label, "foo");
+});
+
+test("draftLeafFrontmatter: non-plain authored values are dropped (#27 review)", () => {
+  // Functions, symbols, class instances, etc. are not valid YAML and
+  // would otherwise be String()'d into garbage like "[object URL]".
+  // The sanitiser returns undefined for these; the field is then
+  // skipped so it never reaches the renderer.
+  const authored = {
+    focus: "f",
+    fn: () => 1,
+    sym: Symbol("x"),
+    big: 9007199254740993n, // bigint
+    url_instance: new URL("https://example.com"), // class instance, NOT plain object
+    plain_object: { ok: true },
+  };
+  const candidate = fakeCandidate({
+    authored_frontmatter: authored,
+    has_authored_frontmatter: true,
+  });
+  const { data } = draftLeafFrontmatter(candidate, { categoryPath: "" });
+  assert.equal(data.fn, undefined);
+  assert.equal(data.sym, undefined);
+  assert.equal(data.big, undefined);
+  assert.equal(data.url_instance, undefined);
+  assert.deepEqual(data.plain_object, { ok: true });
+});
+
+test("draftLeafFrontmatter: prototype-pollution keys are refused (#27 review)", () => {
+  // The pass-through path can be reached with adversarial JSON via
+  // scripts/cli.mjs draft-leaf. A field named __proto__ /
+  // constructor / prototype must NOT be assigned — neither at the
+  // top level nor nested inside an object — or it would mutate the
+  // prototype chain. Mirrors the same guard frontmatter.mjs's parser
+  // applies via POLLUTION_KEYS.
+  //
+  // Using JSON.parse to build the adversarial object: JSON.parse
+  // creates `__proto__` as an OWN property (which is exactly the
+  // attack surface) whereas an object-literal `__proto__:` invokes
+  // the setter and would tamper with the test's own object.
+  const beforeMagic = ({}).polluted;
+  const authored = JSON.parse(
+    '{"focus":"f","__proto__":{"polluted":"yes"},"constructor":"yes-ctor","prototype":"yes-proto","nested":{"ok":"ok","__proto__":{"polluted":"nested-yes"}}}',
+  );
+  const candidate = fakeCandidate({
+    authored_frontmatter: authored,
+    has_authored_frontmatter: true,
+  });
+  const { data } = draftLeafFrontmatter(candidate, { categoryPath: "" });
+  // Pollution keys NOT forwarded into data.
+  // (data.constructor falls back to Object's constructor, which is the
+  //  Object function — not the string we'd have leaked.)
+  assert.notEqual(data.constructor, "yes-ctor", "data.constructor must not be the leaked string");
+  assert.equal(data.prototype, undefined);
+  // Object.prototype unaffected.
+  assert.equal(({}).polluted, beforeMagic, "Object.prototype.polluted must be untouched");
+  // Nested still preserves clean keys, drops the magic ones.
+  assert.equal(data.nested.ok, "ok");
+  assert.equal(({}).polluted, beforeMagic, "nested __proto__ must not have polluted Object.prototype");
+});
+
 test("draftLeafFrontmatter: heuristic values fill in for partial authored frontmatter", () => {
   // Author supplied focus + activation but NOT covers. Drafter should
   // still synthesise covers from the headings while keeping the
