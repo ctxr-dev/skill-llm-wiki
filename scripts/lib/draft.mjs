@@ -95,11 +95,13 @@ export function draftLeafFrontmatter(candidate, { categoryPath } = {}) {
 
   // Forward EVERY authored field that isn't reserved (re-derived from
   // target-tree position) or explicitly handled above (focus / covers
-  // / tags, where authored-wins-over-drafted is enforced via
+  // / tags / parents, where authored-wins-over-drafted is enforced via
   // pickAuthored). Issue #26: the previous allow-list dropped any
   // consumer-specific v2 field (dimensions, audit_surface, languages,
   // tools, …) authored at the source; the deny-list now preserves
-  // arbitrary author-shipped frontmatter byte-equivalent.
+  // arbitrary author-shipped frontmatter VALUES (the downstream
+  // renderer applies canonical top-level key ordering and YAML
+  // formatting, so the rebuilt bytes need not match the source bytes).
   if (hasAuthored) {
     for (const [field, value] of Object.entries(authored)) {
       if (RESERVED_LEAF_FIELDS.has(field)) continue;

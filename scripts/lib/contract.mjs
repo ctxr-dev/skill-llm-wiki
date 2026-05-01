@@ -65,13 +65,18 @@ const FRONTMATTER_SCHEMA = {
       shared_covers: { kind: "string[]" },
       // Only present (and required) when type === "overlay".
       overlay_targets: { kind: "string[]" },
-      links: { kind: "string[]" },
+      links: {
+        kind: "object[]",
+        description: "Cross-leaf references; each entry carries an `id` (and optional metadata) — see scripts/lib/join.mjs for how runtime code reads link.id.",
+      },
       // Consumer-defined fields (e.g. skill-code-review's
       // `dimensions`, `audit_surface`, `languages`, `tools`) are
-      // preserved byte-equivalent through a rebuild via the deny-list
-      // forwarding in draft.mjs. The contract here describes only the
-      // fields the wiki framework itself reads / writes; consumers
-      // ship their own schemas alongside.
+      // carried through rebuilds via the deny-list forwarding in
+      // draft.mjs; their VALUES are preserved (not dropped). Exact
+      // bytes can change because the renderer applies canonical
+      // top-level key ordering and YAML formatting. The contract
+      // here describes only the fields the wiki framework itself
+      // reads / writes; consumers ship their own schemas alongside.
     },
     // Reserved fields that the rebuild ALWAYS re-derives from the
     // target-tree position, regardless of what the author wrote.
