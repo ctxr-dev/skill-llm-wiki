@@ -23,6 +23,15 @@
 // `needs_ai` flag on the returned draft tells the caller which entries
 // need AI review.
 
+// Prototype-pollution deny-list. Mirrors POLLUTION_KEYS in
+// scripts/lib/frontmatter.mjs — the parser refuses these at parse
+// time, but the new pass-through path in draftLeafFrontmatter could
+// still surface them if a crafted candidate JSON (e.g. from
+// `scripts/cli.mjs draft-leaf` invoked with adversarial input)
+// shipped them via authored_frontmatter. Refusing here keeps the
+// invariant local to the assignment site.
+const POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 // Fields whose authoritative source is the target-tree position (not
 // the original source file). These are ALWAYS re-derived during a
 // rebuild regardless of what the author wrote: `id` comes from the
@@ -106,6 +115,9 @@ export function draftLeafFrontmatter(candidate, { categoryPath } = {}) {
     for (const [field, value] of Object.entries(authored)) {
       if (RESERVED_LEAF_FIELDS.has(field)) continue;
       if (EXPLICITLY_HANDLED_LEAF_FIELDS.has(field)) continue;
+      // Refuse prototype-pollution keys before any assignment touches
+      // the prototype chain. Mirrors frontmatter.mjs's safeAssign.
+      if (POLLUTION_KEYS.has(field)) continue;
       if (value === undefined || value === null) continue;
       const sanitised = sanitiseAuthoredValue(value);
       if (sanitised === undefined) continue;
@@ -114,7 +126,15 @@ export function draftLeafFrontmatter(candidate, { categoryPath } = {}) {
       // consumer schemas (e.g. an explicit empty file_globs[] means
       // "this leaf opts out of glob-based activation"). Only the
       // null/undefined case is treated as "author omitted".
-      data[field] = sanitised;
+      // Use defineProperty (configurable, enumerable, writable) so the
+      // assignment never invokes a setter on Object.prototype if the
+      // POLLUTION_KEYS guard above is ever bypassed.
+      Object.defineProperty(data, field, {
+        value: sanitised,
+        configurable: true,
+        enumerable: true,
+        writable: true,
+      });
     }
   }
 
@@ -156,13 +176,20 @@ function sanitiseAuthoredValue(value) {
     // YAML frontmatter consumer wants.
     const proto = Object.getPrototypeOf(value);
     if (proto !== null && proto !== Object.prototype) return undefined;
-    const out = {};
+    // Use a null-prototype object as the accumulator so neither the
+    // POLLUTION_KEYS guard nor a setter on Object.prototype can be
+    // triggered by an `out[__proto__] = ...` assignment with a crafted
+    // key. (defineProperty would also work; null-proto is one allocation.)
+    const out = Object.create(null);
     for (const [k, v] of Object.entries(value)) {
+      if (POLLUTION_KEYS.has(k)) continue;
       const s = sanitiseAuthoredValue(v);
       if (s === undefined) continue;
       out[k] = s;
     }
-    return out;
+    // Re-parent to Object.prototype before returning so downstream
+    // consumers that do `value.hasOwnProperty(...)` etc. keep working.
+    return Object.assign({}, out);
   }
   return undefined;
 }

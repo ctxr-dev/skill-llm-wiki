@@ -192,6 +192,39 @@ test("draftLeafFrontmatter: non-plain authored values are dropped (#27 review)",
   assert.deepEqual(data.plain_object, { ok: true });
 });
 
+test("draftLeafFrontmatter: prototype-pollution keys are refused (#27 review)", () => {
+  // The pass-through path can be reached with adversarial JSON via
+  // scripts/cli.mjs draft-leaf. A field named __proto__ /
+  // constructor / prototype must NOT be assigned — neither at the
+  // top level nor nested inside an object — or it would mutate the
+  // prototype chain. Mirrors the same guard frontmatter.mjs's parser
+  // applies via POLLUTION_KEYS.
+  //
+  // Using JSON.parse to build the adversarial object: JSON.parse
+  // creates `__proto__` as an OWN property (which is exactly the
+  // attack surface) whereas an object-literal `__proto__:` invokes
+  // the setter and would tamper with the test's own object.
+  const beforeMagic = ({}).polluted;
+  const authored = JSON.parse(
+    '{"focus":"f","__proto__":{"polluted":"yes"},"constructor":"yes-ctor","prototype":"yes-proto","nested":{"ok":"ok","__proto__":{"polluted":"nested-yes"}}}',
+  );
+  const candidate = fakeCandidate({
+    authored_frontmatter: authored,
+    has_authored_frontmatter: true,
+  });
+  const { data } = draftLeafFrontmatter(candidate, { categoryPath: "" });
+  // Pollution keys NOT forwarded into data.
+  // (data.constructor falls back to Object's constructor, which is the
+  //  Object function — not the string we'd have leaked.)
+  assert.notEqual(data.constructor, "yes-ctor", "data.constructor must not be the leaked string");
+  assert.equal(data.prototype, undefined);
+  // Object.prototype unaffected.
+  assert.equal(({}).polluted, beforeMagic, "Object.prototype.polluted must be untouched");
+  // Nested still preserves clean keys, drops the magic ones.
+  assert.equal(data.nested.ok, "ok");
+  assert.equal(({}).polluted, beforeMagic, "nested __proto__ must not have polluted Object.prototype");
+});
+
 test("draftLeafFrontmatter: heuristic values fill in for partial authored frontmatter", () => {
   // Author supplied focus + activation but NOT covers. Drafter should
   // still synthesise covers from the headings while keeping the
