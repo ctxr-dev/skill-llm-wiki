@@ -82,6 +82,70 @@ test("draftLeafFrontmatter: falls back to heuristics when authored is empty", ()
   assert.equal(data.activation, undefined);
 });
 
+test("draftLeafFrontmatter: consumer-defined fields pass through (#26 deny-list)", () => {
+  // Issue #26: the previous allow-list dropped any authored field not
+  // in a hardcoded vocabulary (focus / covers / tags / domains /
+  // aliases / activation / shared_covers / overlay_targets / links).
+  // skill-code-review's v2 schema (dimensions, audit_surface, languages,
+  // tools, plus an arbitrary `custom_consumer_field`) was silently
+  // erased on every wiki rebuild. The deny-list now preserves them.
+  const authored = {
+    focus: "auth focus",
+    dimensions: ["security", "correctness"],
+    audit_surface: ["request_handling", "auth_flow"],
+    languages: ["typescript", "python"],
+    tools: [{ name: "eslint", purpose: "lint JS" }],
+    custom_consumer_field: { nested: true, value: 42 },
+  };
+  const candidate = fakeCandidate({
+    authored_frontmatter: authored,
+    has_authored_frontmatter: true,
+  });
+  const { data } = draftLeafFrontmatter(candidate, { categoryPath: "" });
+  assert.deepEqual(data.dimensions, ["security", "correctness"]);
+  assert.deepEqual(data.audit_surface, ["request_handling", "auth_flow"]);
+  assert.deepEqual(data.languages, ["typescript", "python"]);
+  assert.deepEqual(data.tools, [{ name: "eslint", purpose: "lint JS" }]);
+  assert.deepEqual(data.custom_consumer_field, { nested: true, value: 42 });
+});
+
+test("draftLeafFrontmatter: reserved fields are NOT pulled from authored (#26)", () => {
+  // The deny-list keeps id / type / depth_role / source as re-derived
+  // from the target-tree position. An author writing `id: hostile-id`
+  // or `type: overlay` in a primary leaf source should NOT see those
+  // leak into the generated leaf — `source` in particular leaking
+  // would corrupt the build's source-of-truth pointer. (overlay_targets
+  // is an authored field; declaring `type: overlay` is the rebuild's
+  // decision via the overlay path.)
+  //
+  // `parents` is intentionally NOT reserved — it's hand-authored when
+  // the soft-DAG layout requires it; covered by the dedicated
+  // "additional authored fields are forwarded" test.
+  const authored = {
+    id: "hostile-id-from-source",
+    type: "overlay",
+    depth_role: "category",
+    source: { origin: "synthetic", path: "lying.md", hash: "0" },
+    focus: "legit focus",
+  };
+  const candidate = fakeCandidate({
+    id: "actual-id",
+    source_path: "actual.md",
+    hash: "sha256:realhash",
+    authored_frontmatter: authored,
+    has_authored_frontmatter: true,
+  });
+  const { data } = draftLeafFrontmatter(candidate, { categoryPath: "" });
+  assert.equal(data.id, "actual-id");
+  assert.equal(data.type, "primary");
+  assert.equal(data.depth_role, "leaf");
+  assert.equal(data.source.path, "actual.md");
+  assert.equal(data.source.hash, "sha256:realhash");
+  assert.equal(data.source.origin, "file");
+  // The legitimate authored focus DID flow through.
+  assert.equal(data.focus, "legit focus");
+});
+
 test("draftLeafFrontmatter: heuristic values fill in for partial authored frontmatter", () => {
   // Author supplied focus + activation but NOT covers. Drafter should
   // still synthesise covers from the headings while keeping the

@@ -23,21 +23,43 @@
 // `needs_ai` flag on the returned draft tells the caller which entries
 // need AI review.
 
-// Fields we copy straight from the source frontmatter when the author
-// supplied them. Fields NOT in this list (id / type / depth_role /
-// parents / source) are always re-derived because their authoritative
-// source is the target-tree position, not the original source file.
-const AUTHORED_LEAF_FIELDS = [
+// Fields whose authoritative source is the target-tree position (not
+// the original source file). These are ALWAYS re-derived during a
+// rebuild regardless of what the author wrote: `id` comes from the
+// filename / target slot, `type` defaults to "primary" (overlays must
+// be re-asserted explicitly via the rebuild's overlay path),
+// `depth_role` is always "leaf" for non-index leaves, and `source` is
+// recomputed from the build invocation.
+//
+// `parents` is NOT in this set — it's a hand-authored field (the
+// comment in the data object below describes the convention) and the
+// drafter pickAuthored()s it. Including it here would silently drop
+// authored parents and break the soft-DAG.
+//
+// EVERY OTHER authored field flows through verbatim. This is a
+// deny-list, not an allow-list (issue #26): consumers ship their own
+// schemas (e.g. skill-code-review's `dimensions`, `audit_surface`,
+// `languages`, `tools`) and a generic wiki framework should preserve
+// what the author wrote rather than enumerating per-consumer fields.
+const RESERVED_LEAF_FIELDS = new Set([
+  "id",
+  "type",
+  "depth_role",
+  "source",
+]);
+
+// Fields the drafter computes a heuristic baseline for and writes
+// explicitly in the canonical data object below. Authored values for
+// these win over the heuristic via pickAuthored(); they're listed here
+// only so the pass-through loop knows to skip them (they're already in
+// the data object — re-forwarding would be a no-op but with the wrong
+// authored-vs-heuristic precedence).
+const EXPLICITLY_HANDLED_LEAF_FIELDS = new Set([
   "focus",
   "covers",
   "tags",
-  "domains",
-  "aliases",
-  "activation",
-  "shared_covers",
-  "overlay_targets",
-  "links",
-];
+  "parents",
+]);
 
 export function draftLeafFrontmatter(candidate, { categoryPath } = {}) {
   const authored = candidate.authored_frontmatter || {};
@@ -71,15 +93,24 @@ export function draftLeafFrontmatter(candidate, { categoryPath } = {}) {
     },
   };
 
-  // Forward the remaining AUTHORED_LEAF_FIELDS verbatim. These have no
-  // heuristic analogue — when the author supplied them, we keep them;
-  // otherwise we omit the field entirely so the output stays compact.
+  // Forward EVERY authored field that isn't reserved (re-derived from
+  // target-tree position) or explicitly handled above (focus / covers
+  // / tags, where authored-wins-over-drafted is enforced via
+  // pickAuthored). Issue #26: the previous allow-list dropped any
+  // consumer-specific v2 field (dimensions, audit_surface, languages,
+  // tools, …) authored at the source; the deny-list now preserves
+  // arbitrary author-shipped frontmatter byte-equivalent.
   if (hasAuthored) {
-    for (const field of AUTHORED_LEAF_FIELDS) {
-      if (field === "focus" || field === "covers" || field === "tags") continue;
-      if (authored[field] !== undefined && authored[field] !== null) {
-        data[field] = authored[field];
-      }
+    for (const [field, value] of Object.entries(authored)) {
+      if (RESERVED_LEAF_FIELDS.has(field)) continue;
+      if (EXPLICITLY_HANDLED_LEAF_FIELDS.has(field)) continue;
+      if (value === undefined || value === null) continue;
+      // Empty arrays / empty strings DO get forwarded — distinguishing
+      // "author wrote []" from "author omitted" matters for some
+      // consumer schemas (e.g. an explicit empty file_globs[] means
+      // "this leaf opts out of glob-based activation"). Only the
+      // null/undefined case is treated as "author omitted".
+      data[field] = value;
     }
   }
 

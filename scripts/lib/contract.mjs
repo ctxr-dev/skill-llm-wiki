@@ -66,7 +66,23 @@ const FRONTMATTER_SCHEMA = {
       // Only present (and required) when type === "overlay".
       overlay_targets: { kind: "string[]" },
       links: { kind: "string[]" },
+      // Consumer-defined fields (e.g. skill-code-review's
+      // `dimensions`, `audit_surface`, `languages`, `tools`) are
+      // preserved byte-equivalent through a rebuild via the deny-list
+      // forwarding in draft.mjs. The contract here describes only the
+      // fields the wiki framework itself reads / writes; consumers
+      // ship their own schemas alongside.
     },
+    // Reserved fields that the rebuild ALWAYS re-derives from the
+    // target-tree position, regardless of what the author wrote.
+    // `parents` is NOT in this set — it's hand-authored when the
+    // soft-DAG layout requires it (the drafter picks the authored
+    // value over the heuristic).
+    reserved: ["id", "type", "depth_role", "source"],
+    // Deny-list semantics for everything else: any authored field not
+    // in `reserved` flows through verbatim. This keeps the wiki
+    // framework agnostic to consumer-specific schemas.
+    pass_through_authored: true,
   },
   index: {
     required: ["id", "type", "depth_role", "focus"],
