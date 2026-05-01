@@ -146,6 +146,52 @@ test("draftLeafFrontmatter: reserved fields are NOT pulled from authored (#26)",
   assert.equal(data.focus, "legit focus");
 });
 
+test("draftLeafFrontmatter: Date authored values are normalised to ISO string (#27 review)", () => {
+  // gray-matter / js-yaml parse YAML timestamps like `created_at:
+  // 2026-04-30` into JavaScript Date objects. Without normalisation,
+  // the renderer's renderScalar() does String(date) which produces
+  // the verbose Date.toString() form, silently corrupting consumer
+  // data on every rebuild. Normalisation: Date → ISO string.
+  const authored = {
+    focus: "f",
+    created_at: new Date("2026-04-30T12:00:00.000Z"),
+    nested: { authored_at: new Date("2026-01-01T00:00:00.000Z"), label: "foo" },
+  };
+  const candidate = fakeCandidate({
+    authored_frontmatter: authored,
+    has_authored_frontmatter: true,
+  });
+  const { data } = draftLeafFrontmatter(candidate, { categoryPath: "" });
+  assert.equal(data.created_at, "2026-04-30T12:00:00.000Z");
+  assert.equal(data.nested.authored_at, "2026-01-01T00:00:00.000Z");
+  assert.equal(data.nested.label, "foo");
+});
+
+test("draftLeafFrontmatter: non-plain authored values are dropped (#27 review)", () => {
+  // Functions, symbols, class instances, etc. are not valid YAML and
+  // would otherwise be String()'d into garbage like "[object URL]".
+  // The sanitiser returns undefined for these; the field is then
+  // skipped so it never reaches the renderer.
+  const authored = {
+    focus: "f",
+    fn: () => 1,
+    sym: Symbol("x"),
+    big: 9007199254740993n, // bigint
+    url_instance: new URL("https://example.com"), // class instance, NOT plain object
+    plain_object: { ok: true },
+  };
+  const candidate = fakeCandidate({
+    authored_frontmatter: authored,
+    has_authored_frontmatter: true,
+  });
+  const { data } = draftLeafFrontmatter(candidate, { categoryPath: "" });
+  assert.equal(data.fn, undefined);
+  assert.equal(data.sym, undefined);
+  assert.equal(data.big, undefined);
+  assert.equal(data.url_instance, undefined);
+  assert.deepEqual(data.plain_object, { ok: true });
+});
+
 test("draftLeafFrontmatter: heuristic values fill in for partial authored frontmatter", () => {
   // Author supplied focus + activation but NOT covers. Drafter should
   // still synthesise covers from the headings while keeping the

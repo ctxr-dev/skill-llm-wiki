@@ -107,17 +107,64 @@ export function draftLeafFrontmatter(candidate, { categoryPath } = {}) {
       if (RESERVED_LEAF_FIELDS.has(field)) continue;
       if (EXPLICITLY_HANDLED_LEAF_FIELDS.has(field)) continue;
       if (value === undefined || value === null) continue;
+      const sanitised = sanitiseAuthoredValue(value);
+      if (sanitised === undefined) continue;
       // Empty arrays / empty strings DO get forwarded — distinguishing
       // "author wrote []" from "author omitted" matters for some
       // consumer schemas (e.g. an explicit empty file_globs[] means
       // "this leaf opts out of glob-based activation"). Only the
       // null/undefined case is treated as "author omitted".
-      data[field] = value;
+      data[field] = sanitised;
     }
   }
 
   const confidence = scoreConfidence(data, candidate);
   return { data, confidence, needs_ai: confidence < 0.6 };
+}
+
+// Sanitise a value pulled from authored frontmatter for assignment
+// into `data` (which is later passed to renderFrontmatter). The
+// renderer at scripts/lib/frontmatter.mjs handles plain objects,
+// arrays, and scalar primitives (string / number / boolean / null) but
+// not richer JS types — gray-matter / js-yaml can return:
+//   - Date (from YAML timestamps like `created_at: 2026-04-30`):
+//     converted to ISO string. Otherwise renderScalar(date) calls
+//     String(date) which produces the verbose JS Date toString form.
+//   - functions / symbols / class instances: rejected (return
+//     undefined so the pass-through loop skips the field).
+// Plain objects and arrays recurse so a Date nested inside an
+// authored object still gets normalised.
+function sanitiseAuthoredValue(value) {
+  if (value === null) return null;
+  if (value === undefined) return undefined;
+  const t = typeof value;
+  if (t === "string" || t === "number" || t === "boolean") return value;
+  if (t === "function" || t === "symbol" || t === "bigint") return undefined;
+  if (value instanceof Date) {
+    // YAML timestamps come back as Date; canonicalise to ISO string so
+    // a downstream rebuild round-trips the same string back into the
+    // YAML stream.
+    return value.toISOString();
+  }
+  if (Array.isArray(value)) {
+    return value.map(sanitiseAuthoredValue).filter((v) => v !== undefined);
+  }
+  if (t === "object") {
+    // Plain-object check: only recurse into objects whose prototype
+    // is Object.prototype or null. Class instances (URL, Buffer, …)
+    // are rejected — their `Object.entries` shape is rarely what a
+    // YAML frontmatter consumer wants.
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== null && proto !== Object.prototype) return undefined;
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      const s = sanitiseAuthoredValue(v);
+      if (s === undefined) continue;
+      out[k] = s;
+    }
+    return out;
+  }
+  return undefined;
 }
 
 function pickAuthored(authoredVal, fallback) {
