@@ -53,16 +53,57 @@ test("TIER2_KINDS includes all expected kinds", () => {
   }
 });
 
-test("propose_structure: uses opus + medium defaults", () => {
+test("propose_structure: uses balanced effort with the matching legacy alias", () => {
   const req = makeRequest("propose_structure", {
     prompt: "Propose a structure for this directory.",
     inputs: { directory: ".", leaves: [{ id: "a" }, { id: "b" }, { id: "c" }] },
   });
-  assert.equal(req.kind, "propose_structure");
-  assert.equal(req.model_hint, "opus");
+  // v1-conformant envelope: top-level `kind` is the wire constant; the
+  // per-Tier-2-request kind lives on `tier2_kind`.
+  assert.equal(req.kind, "subagent.dispatch.v1");
+  assert.equal(req.tier2_kind, "propose_structure");
+  assert.equal(req.role, "wiki-tier2-propose_structure");
+  assert.equal(req.effort, "balanced");
+  // Deprecated aliases preserved for one release.
+  assert.equal(req.model_hint, "sonnet");
   assert.equal(req.effort_hint, "medium");
   assert.ok(req.response_schema.subcategories);
   assert.ok(req.response_schema.siblings);
+});
+
+test("rebuild_plan_review: uses heavy effort (legacy: opus + high)", () => {
+  const req = makeRequest("rebuild_plan_review", {
+    prompt: "Review this rebuild plan.",
+    inputs: { plan: { iterations: [] } },
+  });
+  assert.equal(req.effort, "heavy");
+  assert.equal(req.model_hint, "opus");
+  assert.equal(req.effort_hint, "high");
+});
+
+test("makeRequest: explicit `model` override is preserved on the envelope", () => {
+  const req = makeRequest("merge_decision", {
+    prompt: "same?",
+    inputs: { a: 1, b: 2 },
+    effort: "heavy",
+    model: "claude-opus-4-7",
+  });
+  assert.equal(req.effort, "heavy");
+  assert.equal(req.model, "claude-opus-4-7");
+});
+
+test("makeRequest: deprecated model_hint alias still works (one-shot warning)", () => {
+  const req = makeRequest("merge_decision", {
+    prompt: "same?",
+    inputs: { a: 1, b: 2 },
+    model_hint: "sonnet",
+    effort_hint: "low",
+  });
+  // Deprecated path: aliases pass through unchanged.
+  assert.equal(req.model_hint, "sonnet");
+  assert.equal(req.effort_hint, "low");
+  // The new `effort` field defaults from TIER2_DEFAULTS when not supplied.
+  assert.ok(["heavy", "balanced", "light"].includes(req.effort));
 });
 
 test("nest_decision: schema uses keep_flat (not keep-flat)", () => {
@@ -78,7 +119,8 @@ test("makeRequest: fills defaults from kind matrix", () => {
     prompt: "Name the cluster containing these three leaves.",
     inputs: { leaves: [{ id: "a" }, { id: "b" }, { id: "c" }] },
   });
-  assert.equal(req.kind, "cluster_name");
+  assert.equal(req.kind, "subagent.dispatch.v1");
+  assert.equal(req.tier2_kind, "cluster_name");
   assert.equal(req.model_hint, "sonnet");
   assert.equal(req.effort_hint, "low");
   assert.ok(req.response_schema.slug);
@@ -169,7 +211,8 @@ test("writePending + readPending: round-trip preserves requests", () => {
     assert.equal(back.batch_id, "batch1");
     assert.equal(back.requests.length, 1);
     assert.equal(back.requests[0].request_id, req.request_id);
-    assert.equal(back.requests[0].kind, "merge_decision");
+    assert.equal(back.requests[0].kind, "subagent.dispatch.v1");
+    assert.equal(back.requests[0].tier2_kind, "merge_decision");
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }

@@ -243,7 +243,8 @@ test("detectClusters: emits cluster_name Tier 2 requests per proposal", async ()
     const proposals = await detectClusters(wiki, leaves);
     for (const p of proposals) {
       assert.ok(p.naming_request);
-      assert.equal(p.naming_request.kind, "cluster_name");
+      assert.equal(p.naming_request.kind, "subagent.dispatch.v1");
+      assert.equal(p.naming_request.tier2_kind, "cluster_name");
       assert.ok(p.naming_request.inputs.leaves);
       assert.equal(p.naming_request.inputs.leaves.length, p.leaves.length);
     }
@@ -274,7 +275,8 @@ test("detectClusters: math proposals carry gate_request (nest_decision)", async 
     const mathProps = proposals.filter((p) => !p.empty_partition);
     for (const p of mathProps) {
       assert.ok(p.gate_request, "every math proposal should carry a gate_request");
-      assert.equal(p.gate_request.kind, "nest_decision");
+      assert.equal(p.gate_request.kind, "subagent.dispatch.v1");
+      assert.equal(p.gate_request.tier2_kind, "nest_decision");
     }
   } finally {
     rmSync(wiki, { recursive: true, force: true });
@@ -325,8 +327,11 @@ test("buildProposeStructureRequest: returns a propose_structure request", () => 
     { data: { id: "c", focus: "z", covers: ["z"], tags: ["t"], activation: { keyword_matches: ["k3"] } } },
   ];
   const req = buildProposeStructureRequest("some/dir", leaves);
-  assert.equal(req.kind, "propose_structure");
-  assert.equal(req.model_hint, "opus");
+  assert.equal(req.kind, "subagent.dispatch.v1");
+  assert.equal(req.tier2_kind, "propose_structure");
+  assert.equal(req.effort, "balanced");
+  // Deprecated alias preserved for one release.
+  assert.equal(req.model_hint, "sonnet");
   assert.equal(req.inputs.directory, "some/dir");
   assert.equal(req.inputs.leaves.length, 3);
   assert.equal(req.inputs.leaves[0].id, "a");
