@@ -330,8 +330,9 @@ test("buildProposeStructureRequest: returns a propose_structure request", () => 
   assert.equal(req.kind, "subagent.dispatch.v1");
   assert.equal(req.tier2_kind, "propose_structure");
   assert.equal(req.effort, "balanced");
-  // Deprecated alias preserved for one release.
-  assert.equal(req.model_hint, "sonnet");
+  // Deprecated alias preserves the EXACT pre-v1 per-kind value (opus) for one
+  // release; it is no longer derived from `effort`.
+  assert.equal(req.model_hint, "opus");
   assert.equal(req.inputs.directory, "some/dir");
   assert.equal(req.inputs.leaves.length, 3);
   assert.equal(req.inputs.leaves[0].id, "a");

@@ -64,8 +64,9 @@ test("propose_structure: uses balanced effort with the matching legacy alias", (
   assert.equal(req.tier2_kind, "propose_structure");
   assert.equal(req.role, "wiki-tier2-propose_structure");
   assert.equal(req.effort, "balanced");
-  // Deprecated aliases preserved for one release.
-  assert.equal(req.model_hint, "sonnet");
+  // Deprecated aliases preserve the EXACT pre-v1 per-kind values for one
+  // release: propose_structure was opus + medium (NOT effort-derived sonnet).
+  assert.equal(req.model_hint, "opus");
   assert.equal(req.effort_hint, "medium");
   assert.ok(req.response_schema.subcategories);
   assert.ok(req.response_schema.siblings);

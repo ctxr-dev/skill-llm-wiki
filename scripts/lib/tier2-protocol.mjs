@@ -74,6 +74,8 @@ export const TIER2_EXIT_CODE = 7;
 export const TIER2_DEFAULTS = Object.freeze({
   merge_decision: {
     effort: "light",
+    legacy_model_hint: "sonnet",
+    legacy_effort_hint: "low",
     response_schema: {
       decision: "same|different|undecidable",
       reason: "string",
@@ -81,6 +83,8 @@ export const TIER2_DEFAULTS = Object.freeze({
   },
   nest_decision: {
     effort: "balanced",
+    legacy_model_hint: "sonnet",
+    legacy_effort_hint: "medium",
     response_schema: {
       decision: "nest|keep_flat|undecidable",
       reason: "string",
@@ -88,6 +92,8 @@ export const TIER2_DEFAULTS = Object.freeze({
   },
   cluster_name: {
     effort: "light",
+    legacy_model_hint: "sonnet",
+    legacy_effort_hint: "low",
     response_schema: {
       slug: "kebab-case-slug",
       purpose: "string",
@@ -104,6 +110,8 @@ export const TIER2_DEFAULTS = Object.freeze({
   // reasoning model.
   propose_structure: {
     effort: "balanced",
+    legacy_model_hint: "opus",
+    legacy_effort_hint: "medium",
     response_schema: {
       subcategories: "array of { slug, purpose, members[] }",
       siblings: "array of leaf ids",
@@ -112,6 +120,8 @@ export const TIER2_DEFAULTS = Object.freeze({
   },
   draft_frontmatter: {
     effort: "balanced",
+    legacy_model_hint: "sonnet",
+    legacy_effort_hint: "medium",
     response_schema: {
       focus: "string",
       covers: "array of strings",
@@ -120,6 +130,8 @@ export const TIER2_DEFAULTS = Object.freeze({
   },
   rebuild_plan_review: {
     effort: "heavy",
+    legacy_model_hint: "opus",
+    legacy_effort_hint: "high",
     response_schema: {
       approve: "boolean",
       drop: "array of iteration ids",
@@ -128,6 +140,8 @@ export const TIER2_DEFAULTS = Object.freeze({
   },
   human_fix_item: {
     effort: "light",
+    legacy_model_hint: "sonnet",
+    legacy_effort_hint: "low",
     response_schema: {
       action: "string",
       rationale: "string",
@@ -135,15 +149,10 @@ export const TIER2_DEFAULTS = Object.freeze({
   },
 });
 
-// Map effort hints back to the deprecated string aliases so callers
-// that still read `model_hint` / `effort_hint` keep working for one
-// release. The model alias is best-effort: hosts MUST use `effort`
-// (or the explicit `model` override) for routing decisions.
-const EFFORT_TO_LEGACY = Object.freeze({
-  heavy: { model_hint: "opus", effort_hint: "high" },
-  balanced: { model_hint: "sonnet", effort_hint: "medium" },
-  light: { model_hint: "sonnet", effort_hint: "low" },
-});
+// The three valid provider-neutral effort values. Any other value
+// is rejected by makeRequest rather than silently falling back to a
+// legacy alias.
+const VALID_EFFORTS = new Set(["heavy", "balanced", "light"]);
 
 let deprecationWarned = false;
 function warnDeprecatedAliasOnce() {
@@ -211,7 +220,7 @@ export function listBatches(wikiRoot) {
 // frontmatter blobs at most) so batches stay under a few KB each.
 //
 // Wire shape: emitted envelopes conform to the open `subagent.dispatch.v1`
-// envelope (see ../../../ctxr/docs/subagent-dispatch-v1.md) so any Agent
+// envelope (see https://github.com/ctxr-dev/kit/blob/main/docs/subagent-dispatch-v1.md) so any Agent
 // Skills harness can validate them. The Tier 2 per-request kind
 // (`merge_decision`, `propose_structure`, …) lives on `tier2_kind`, NOT on
 // the envelope's top-level `kind` field — `kind` MUST be the literal
@@ -250,7 +259,11 @@ export function makeRequest(
     warnDeprecatedAliasOnce();
   }
   const resolvedEffort = effort ?? defaults.effort;
-  const legacy = EFFORT_TO_LEGACY[resolvedEffort] ?? EFFORT_TO_LEGACY.balanced;
+  if (!VALID_EFFORTS.has(resolvedEffort)) {
+    throw new Error(
+      `tier2-protocol: invalid effort "${resolvedEffort}" (allowed: ${[...VALID_EFFORTS].join(", ")})`,
+    );
+  }
   // Required v1 fields first (`kind`, `request_id`, `role`, `prompt`,
   // `inputs`, `effort`); skill-specific extensions follow.
   const out = {
@@ -265,9 +278,13 @@ export function makeRequest(
     // wiki-runner to route to the right inline handler / prompt template.
     tier2_kind: kind,
     // Deprecated aliases retained for one release; readers should migrate to
-    // `effort` (and optional `model`).
-    model_hint: model_hint ?? legacy.model_hint,
-    effort_hint: effort_hint ?? legacy.effort_hint,
+    // `effort` (and optional `model`). These emit the EXACT pre-v1 per-kind
+    // `model_hint`/`effort_hint` values (stored on TIER2_DEFAULTS) so the
+    // deprecation window is byte-compatible — they are NOT derived from
+    // `effort` (which would change e.g. propose_structure's model_hint).
+    // A caller-supplied alias still wins.
+    model_hint: model_hint ?? defaults.legacy_model_hint,
+    effort_hint: effort_hint ?? defaults.legacy_effort_hint,
   };
   if (typeof model === "string" && model.length > 0) {
     out.model = model;
@@ -319,7 +336,9 @@ function canonicalJson(value) {
  */
 export function tier2KindOf(req) {
   if (!req || typeof req !== "object") return null;
-  if (typeof req.tier2_kind === "string" && req.tier2_kind.length > 0) {
+  // Only accept a `tier2_kind` that names a recognised kind; an unknown or
+  // malformed value must NOT be treated as valid downstream.
+  if (typeof req.tier2_kind === "string" && TIER2_KINDS.includes(req.tier2_kind)) {
     return req.tier2_kind;
   }
   // Legacy fallback: `kind` was the per-request tier-2 kind before v1 conformance.
@@ -338,6 +357,16 @@ export function validateRequest(req) {
   }
   if (typeof req.request_id !== "string" || req.request_id.length === 0) {
     throw new Error("tier2-protocol: request.request_id must be a non-empty string");
+  }
+  // Envelope `kind`, when present, must be the v1 wire constant OR — for
+  // legacy pre-v1 envelopes — itself one of the Tier 2 kinds. Anything else
+  // is a malformed envelope.
+  if (req.kind !== undefined) {
+    if (req.kind !== "subagent.dispatch.v1" && !TIER2_KINDS.includes(req.kind)) {
+      throw new Error(
+        `tier2-protocol: request.kind must be "subagent.dispatch.v1" or a legacy tier-2 kind (${TIER2_KINDS.join(", ")}), got "${req.kind}"`,
+      );
+    }
   }
   const t2 = tier2KindOf(req);
   if (!t2) {
