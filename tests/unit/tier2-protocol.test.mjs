@@ -20,6 +20,7 @@ import {
   resolveFromFixture,
   responsesPath,
   tier2Dir,
+  tier2KindOf,
   validateRequest,
   validateResponse,
   writePending,
@@ -107,6 +108,37 @@ test("makeRequest: deprecated model_hint alias still works (one-shot warning)", 
   assert.ok(["heavy", "balanced", "light"].includes(req.effort));
 });
 
+test("makeRequest: rejects an effort outside {heavy, balanced, light}", () => {
+  assert.throws(
+    () =>
+      makeRequest("merge_decision", {
+        prompt: "same?",
+        inputs: { a: 1, b: 2 },
+        effort: "extreme",
+      }),
+    /invalid effort "extreme".*heavy.*balanced.*light/,
+  );
+});
+
+test("makeRequest: every kind emits its exact pre-v1 legacy model_hint/effort_hint pair", () => {
+  // Byte-compatible deprecation window: these are the EXACT pre-v1 per-kind
+  // values, NOT derived uniformly from effort.
+  const expected = {
+    merge_decision: ["sonnet", "low"],
+    nest_decision: ["sonnet", "medium"],
+    cluster_name: ["sonnet", "low"],
+    propose_structure: ["opus", "medium"],
+    draft_frontmatter: ["sonnet", "medium"],
+    rebuild_plan_review: ["opus", "high"],
+    human_fix_item: ["sonnet", "low"],
+  };
+  for (const [kind, [model_hint, effort_hint]] of Object.entries(expected)) {
+    const req = makeRequest(kind, { prompt: "p", inputs: { x: 1 } });
+    assert.equal(req.model_hint, model_hint, `${kind} model_hint`);
+    assert.equal(req.effort_hint, effort_hint, `${kind} effort_hint`);
+  }
+});
+
 test("nest_decision: schema uses keep_flat (not keep-flat)", () => {
   const req = makeRequest("nest_decision", {
     prompt: "Should these leaves nest?",
@@ -175,6 +207,57 @@ test("makeRequest: rejects inputs containing __proto__ (JSON-parsed)", () => {
         inputs: polluted,
       }),
     /forbidden key/,
+  );
+});
+
+test("tier2KindOf: prefers a valid tier2_kind", () => {
+  assert.equal(
+    tier2KindOf({ kind: "subagent.dispatch.v1", tier2_kind: "cluster_name" }),
+    "cluster_name",
+  );
+});
+
+test("tier2KindOf: ignores a bogus tier2_kind, falls back to legacy kind", () => {
+  // An unrecognised tier2_kind must NOT be treated as valid; fall through to
+  // the legacy `kind` if that one is a real tier-2 kind.
+  assert.equal(
+    tier2KindOf({ kind: "merge_decision", tier2_kind: "bogus" }),
+    "merge_decision",
+  );
+});
+
+test("tier2KindOf: returns null when neither tier2_kind nor kind names a real kind", () => {
+  assert.equal(tier2KindOf({ kind: "subagent.dispatch.v1", tier2_kind: "bogus" }), null);
+  assert.equal(tier2KindOf({}), null);
+  assert.equal(tier2KindOf(null), null);
+});
+
+test("resolveFromFixture: a bogus tier2_kind does not match a wildcard, but legacy kind does", () => {
+  const map = new Map([["__kind__merge_decision", { decision: "same", reason: "wild" }]]);
+  // Bogus tier2_kind with no legacy kind → no wildcard match.
+  assert.equal(
+    resolveFromFixture(map, { request_id: "z", tier2_kind: "bogus" }),
+    null,
+  );
+  // Legacy on-disk envelope (kind = the tier-2 kind, no tier2_kind) still
+  // resolves via the wildcard — backward compat with the previous release.
+  const resp = resolveFromFixture(map, { request_id: "z", kind: "merge_decision" });
+  assert.equal(resp.decision, "same");
+});
+
+test("validateRequest: rejects a bogus envelope kind, accepts v1 literal and legacy kind", () => {
+  const base = { request_id: "r", tier2_kind: "merge_decision", prompt: "p", inputs: {} };
+  // Bogus envelope kind (e.g. a future/typo'd version) is rejected.
+  assert.throws(
+    () => validateRequest({ ...base, kind: "subagent.dispatch.v2" }),
+    /request\.kind must be "subagent\.dispatch\.v1"/,
+  );
+  // The new v1 wire literal is accepted.
+  assert.equal(validateRequest({ ...base, kind: "subagent.dispatch.v1" }), true);
+  // A legacy bare tier-2 kind (pre-v1 on-disk envelope, no tier2_kind) is accepted.
+  assert.equal(
+    validateRequest({ request_id: "r", kind: "merge_decision", prompt: "p", inputs: {} }),
+    true,
   );
 });
 
