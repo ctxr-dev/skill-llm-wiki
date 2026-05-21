@@ -20,22 +20,34 @@
 //   - Batch read / write / merge helpers
 //   - Pollution-key defence for JSON parse
 //
-// Request shape (JSON, conforms to subagent.dispatch.v1 with skill-specific extensions):
+// Request shape (JSON, conforms to the open subagent.dispatch.v1 envelope
+// with skill-specific extensions). What makeRequest() emits today:
 //   {
+//     kind:            "subagent.dispatch.v1"   (the wire-format literal)
 //     request_id:      string, unique per batch
-//     kind:            "merge_decision" | "nest_decision" | "cluster_name"
-//                    | "propose_structure"
-//                    | "draft_frontmatter" | "rebuild_plan_review"
-//                    | "human_fix_item"
+//     role:            "wiki-tier2-<tier2_kind>" (host maps to its native
+//                       sub-agent type)
 //     prompt:          natural-language question the sub-agent answers
 //     inputs:          minimal per-kind inputs (frontmatter blobs, etc.)
+//     effort:          "heavy" | "balanced" | "light" (provider-neutral hint)
 //     response_schema: JSON shape the sub-agent must return
-//     effort:          "heavy" | "balanced" | "light" (provider-neutral effort hint)
-//     model:           optional explicit model override; host prefers this when set
+//     tier2_kind:      "merge_decision" | "nest_decision" | "cluster_name"
+//                    | "propose_structure" | "draft_frontmatter"
+//                    | "rebuild_plan_review" | "human_fix_item"
+//                       (skill extension: the per-Tier-2-request kind, which
+//                        the wiki-runner routes on)
+//     model:           optional explicit model override; host prefers this
+//                       when set, else maps `effort` to its own lineup
 //
-//   Deprecated aliases kept for one release:
-//     model_hint  → emitted alongside `model` for callers that haven't migrated
-//     effort_hint → emitted alongside `effort` for callers that haven't migrated
+//   Deprecated aliases kept for one release (emitted with the exact pre-v1
+//   per-kind values so existing wiki-runner consumers stay byte-compatible):
+//     model_hint  → preserved per-kind legacy model hint
+//     effort_hint → preserved per-kind legacy effort hint
+//
+//   Legacy envelopes written by a PREVIOUS release (where top-level `kind`
+//   WAS the Tier 2 kind and there was no `tier2_kind`/`role`) are still
+//   accepted on read: validateRequest and tier2KindOf both tolerate that
+//   shape so in-flight pending files resume across the upgrade.
 //   }
 //
 // Response shape (JSON):
@@ -358,15 +370,20 @@ export function validateRequest(req) {
   if (typeof req.request_id !== "string" || req.request_id.length === 0) {
     throw new Error("tier2-protocol: request.request_id must be a non-empty string");
   }
-  // Envelope `kind`, when present, must be the v1 wire constant OR — for
-  // legacy pre-v1 envelopes — itself one of the Tier 2 kinds. Anything else
-  // is a malformed envelope.
-  if (req.kind !== undefined) {
-    if (req.kind !== "subagent.dispatch.v1" && !TIER2_KINDS.includes(req.kind)) {
-      throw new Error(
-        `tier2-protocol: request.kind must be "subagent.dispatch.v1" or a legacy tier-2 kind (${TIER2_KINDS.join(", ")}), got "${req.kind}"`,
-      );
-    }
+  // Envelope `kind` is REQUIRED. It must be the v1 wire constant
+  // "subagent.dispatch.v1" OR — for legacy pre-v1 envelopes — itself one of
+  // the Tier 2 kinds. Omitting it (even when a valid `tier2_kind` is present)
+  // is a malformed envelope: an envelope with no `kind` is neither v1 nor a
+  // recognised legacy shape, and must not be writable to a pending file.
+  if (typeof req.kind !== "string" || req.kind.length === 0) {
+    throw new Error(
+      `tier2-protocol: request.kind is required and must be "subagent.dispatch.v1" or a legacy tier-2 kind (${TIER2_KINDS.join(", ")})`,
+    );
+  }
+  if (req.kind !== "subagent.dispatch.v1" && !TIER2_KINDS.includes(req.kind)) {
+    throw new Error(
+      `tier2-protocol: request.kind must be "subagent.dispatch.v1" or a legacy tier-2 kind (${TIER2_KINDS.join(", ")}), got "${req.kind}"`,
+    );
   }
   const t2 = tier2KindOf(req);
   if (!t2) {

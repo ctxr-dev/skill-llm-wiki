@@ -265,6 +265,22 @@ test("validateRequest: rejects missing request_id", () => {
   assert.throws(() => validateRequest({ kind: "cluster_name", prompt: "x", inputs: {} }));
 });
 
+test("validateRequest: rejects an envelope with no `kind` even when tier2_kind is valid", () => {
+  // The v1 envelope `kind` is required. A request carrying only a valid
+  // tier2_kind (but no top-level kind) is neither a v1 envelope nor a
+  // recognised legacy shape, so it must NOT be writable to a pending file.
+  assert.throws(
+    () =>
+      validateRequest({
+        request_id: "r",
+        tier2_kind: "merge_decision",
+        prompt: "p",
+        inputs: {},
+      }),
+    /request\.kind is required/,
+  );
+});
+
 test("validateRequest: accepts well-formed request", () => {
   const r = makeRequest("cluster_name", {
     prompt: "Name it",
