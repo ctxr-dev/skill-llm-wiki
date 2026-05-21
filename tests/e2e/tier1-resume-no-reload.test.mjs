@@ -136,7 +136,7 @@ function drainTier2(tier2Dir) {
     const raw = readFileSync(join(tier2Dir, p), "utf8");
     const parsed = JSON.parse(raw);
     const responses = parsed.requests.map((req) => {
-      switch (req.kind) {
+      switch (req.tier2_kind ?? req.kind) {
         case "cluster_name":
           return {
             request_id: req.request_id,

@@ -141,15 +141,18 @@ test("tier2-resume: exit-7 handshake produces pending file and resumes on re-inv
       const raw = readFileSync(join(tier2Dir, pending), "utf8");
       const parsed = JSON.parse(raw);
       const responses = parsed.requests.map((req) => {
-        // This is the "Agent sub-agent" stand-in. For
-        // cluster_name requests we return a generic slug.
-        if (req.kind === "cluster_name") {
+        // This is the sub-agent stand-in. v1-conformant envelopes carry
+        // the per-Tier-2-request kind on `tier2_kind`; legacy envelopes
+        // (pre-v1 conformance) put it on `kind`. Accept either so resume
+        // tests work against both shapes.
+        const t2 = req.tier2_kind ?? req.kind;
+        if (t2 === "cluster_name") {
           return {
             request_id: req.request_id,
             response: { slug: "grouped", purpose: "grouped cluster" },
           };
         }
-        if (req.kind === "merge_decision") {
+        if (t2 === "merge_decision") {
           return {
             request_id: req.request_id,
             response: { decision: "different", reason: "distinct concepts" },

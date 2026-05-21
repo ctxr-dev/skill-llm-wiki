@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Cross-harness support (Claude Code + OpenAI Codex CLI)
+
+- **SKILL.md prose neutralised so the wiki-runner sub-agent dispatch works under both Claude Code (via the `Agent` tool) and Codex CLI (via its equivalent).** The Tier 2 envelope shape is now the open `subagent.dispatch.v1` contract: top-level `kind: "subagent.dispatch.v1"`, `role: "wiki-tier2-<kind>"`, the per-Tier-2-request kind moved to the `tier2_kind` extension field. The deprecated `model_hint` / `effort_hint` aliases continue to be emitted for one release so existing wiki-runner consumers keep working; new code should consume `effort` (and optional `model` override) instead. See `https://github.com/ctxr-dev/kit/blob/main/docs/subagent-dispatch-v1.md` for the full envelope spec.
+- Replaced hardcoded Claude model names (`opus` / `sonnet` / `haiku`) in default-model documentation with provider-neutral effort hints (`heavy` / `balanced` / `light`). Each host harness maps `effort` to its own lineup; `model` overrides remain available for explicit pinning.
+- Repositioned package.json description from "Claude Code skill" to "Agent Skills (Claude Code, Codex CLI)".
+- Reordered package.json keywords to lead with `agent-skills`, `agents-md`, `codex`, `claude-code`.
+- Updated git-submodule install path in README from `.claude/skills/` to `.agents/skills/` to match the canonical install topology used by `@ctxr/kit`.
+- Fixed three broken cross-references in `guide/correctness/safety.md` and `guide/layout/in-place-mode.md` (relative paths that resolved outside their target subdir).
+- Declared `publishConfig.access: "public"` for scoped npm publish; added `prepublishOnly` lint+test gate.
+
 ### Performance
 
 - **Large-corpus pairwise-sweep speedup (~50-100× on I/O-bound paths).** A 596-leaf deterministic build previously took 2h15m; this release targets the three I/O antipatterns responsible for most of that wall time. Surfaced during a live Phase X.6 rebuild attempt on `skill-code-review/reviewers.src`.

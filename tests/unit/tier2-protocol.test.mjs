@@ -20,6 +20,7 @@ import {
   resolveFromFixture,
   responsesPath,
   tier2Dir,
+  tier2KindOf,
   validateRequest,
   validateResponse,
   writePending,
@@ -53,16 +54,89 @@ test("TIER2_KINDS includes all expected kinds", () => {
   }
 });
 
-test("propose_structure: uses opus + medium defaults", () => {
+test("propose_structure: uses balanced effort with the matching legacy alias", () => {
   const req = makeRequest("propose_structure", {
     prompt: "Propose a structure for this directory.",
     inputs: { directory: ".", leaves: [{ id: "a" }, { id: "b" }, { id: "c" }] },
   });
-  assert.equal(req.kind, "propose_structure");
+  // v1-conformant envelope: top-level `kind` is the wire constant; the
+  // per-Tier-2-request kind lives on `tier2_kind`.
+  assert.equal(req.kind, "subagent.dispatch.v1");
+  assert.equal(req.tier2_kind, "propose_structure");
+  assert.equal(req.role, "wiki-tier2-propose_structure");
+  assert.equal(req.effort, "balanced");
+  // Deprecated aliases preserve the EXACT pre-v1 per-kind values for one
+  // release: propose_structure was opus + medium (NOT effort-derived sonnet).
   assert.equal(req.model_hint, "opus");
   assert.equal(req.effort_hint, "medium");
   assert.ok(req.response_schema.subcategories);
   assert.ok(req.response_schema.siblings);
+});
+
+test("rebuild_plan_review: uses heavy effort (legacy: opus + high)", () => {
+  const req = makeRequest("rebuild_plan_review", {
+    prompt: "Review this rebuild plan.",
+    inputs: { plan: { iterations: [] } },
+  });
+  assert.equal(req.effort, "heavy");
+  assert.equal(req.model_hint, "opus");
+  assert.equal(req.effort_hint, "high");
+});
+
+test("makeRequest: explicit `model` override is preserved on the envelope", () => {
+  const req = makeRequest("merge_decision", {
+    prompt: "same?",
+    inputs: { a: 1, b: 2 },
+    effort: "heavy",
+    model: "claude-opus-4-7",
+  });
+  assert.equal(req.effort, "heavy");
+  assert.equal(req.model, "claude-opus-4-7");
+});
+
+test("makeRequest: deprecated model_hint alias still works (one-shot warning)", () => {
+  const req = makeRequest("merge_decision", {
+    prompt: "same?",
+    inputs: { a: 1, b: 2 },
+    model_hint: "sonnet",
+    effort_hint: "low",
+  });
+  // Deprecated path: aliases pass through unchanged.
+  assert.equal(req.model_hint, "sonnet");
+  assert.equal(req.effort_hint, "low");
+  // The new `effort` field defaults from TIER2_DEFAULTS when not supplied.
+  assert.ok(["heavy", "balanced", "light"].includes(req.effort));
+});
+
+test("makeRequest: rejects an effort outside {heavy, balanced, light}", () => {
+  assert.throws(
+    () =>
+      makeRequest("merge_decision", {
+        prompt: "same?",
+        inputs: { a: 1, b: 2 },
+        effort: "extreme",
+      }),
+    /invalid effort "extreme".*heavy.*balanced.*light/,
+  );
+});
+
+test("makeRequest: every kind emits its exact pre-v1 legacy model_hint/effort_hint pair", () => {
+  // Byte-compatible deprecation window: these are the EXACT pre-v1 per-kind
+  // values, NOT derived uniformly from effort.
+  const expected = {
+    merge_decision: ["sonnet", "low"],
+    nest_decision: ["sonnet", "medium"],
+    cluster_name: ["sonnet", "low"],
+    propose_structure: ["opus", "medium"],
+    draft_frontmatter: ["sonnet", "medium"],
+    rebuild_plan_review: ["opus", "high"],
+    human_fix_item: ["sonnet", "low"],
+  };
+  for (const [kind, [model_hint, effort_hint]] of Object.entries(expected)) {
+    const req = makeRequest(kind, { prompt: "p", inputs: { x: 1 } });
+    assert.equal(req.model_hint, model_hint, `${kind} model_hint`);
+    assert.equal(req.effort_hint, effort_hint, `${kind} effort_hint`);
+  }
 });
 
 test("nest_decision: schema uses keep_flat (not keep-flat)", () => {
@@ -78,7 +152,8 @@ test("makeRequest: fills defaults from kind matrix", () => {
     prompt: "Name the cluster containing these three leaves.",
     inputs: { leaves: [{ id: "a" }, { id: "b" }, { id: "c" }] },
   });
-  assert.equal(req.kind, "cluster_name");
+  assert.equal(req.kind, "subagent.dispatch.v1");
+  assert.equal(req.tier2_kind, "cluster_name");
   assert.equal(req.model_hint, "sonnet");
   assert.equal(req.effort_hint, "low");
   assert.ok(req.response_schema.slug);
@@ -135,8 +210,75 @@ test("makeRequest: rejects inputs containing __proto__ (JSON-parsed)", () => {
   );
 });
 
+test("tier2KindOf: prefers a valid tier2_kind", () => {
+  assert.equal(
+    tier2KindOf({ kind: "subagent.dispatch.v1", tier2_kind: "cluster_name" }),
+    "cluster_name",
+  );
+});
+
+test("tier2KindOf: ignores a bogus tier2_kind, falls back to legacy kind", () => {
+  // An unrecognised tier2_kind must NOT be treated as valid; fall through to
+  // the legacy `kind` if that one is a real tier-2 kind.
+  assert.equal(
+    tier2KindOf({ kind: "merge_decision", tier2_kind: "bogus" }),
+    "merge_decision",
+  );
+});
+
+test("tier2KindOf: returns null when neither tier2_kind nor kind names a real kind", () => {
+  assert.equal(tier2KindOf({ kind: "subagent.dispatch.v1", tier2_kind: "bogus" }), null);
+  assert.equal(tier2KindOf({}), null);
+  assert.equal(tier2KindOf(null), null);
+});
+
+test("resolveFromFixture: a bogus tier2_kind does not match a wildcard, but legacy kind does", () => {
+  const map = new Map([["__kind__merge_decision", { decision: "same", reason: "wild" }]]);
+  // Bogus tier2_kind with no legacy kind → no wildcard match.
+  assert.equal(
+    resolveFromFixture(map, { request_id: "z", tier2_kind: "bogus" }),
+    null,
+  );
+  // Legacy on-disk envelope (kind = the tier-2 kind, no tier2_kind) still
+  // resolves via the wildcard — backward compat with the previous release.
+  const resp = resolveFromFixture(map, { request_id: "z", kind: "merge_decision" });
+  assert.equal(resp.decision, "same");
+});
+
+test("validateRequest: rejects a bogus envelope kind, accepts v1 literal and legacy kind", () => {
+  const base = { request_id: "r", tier2_kind: "merge_decision", prompt: "p", inputs: {} };
+  // Bogus envelope kind (e.g. a future/typo'd version) is rejected.
+  assert.throws(
+    () => validateRequest({ ...base, kind: "subagent.dispatch.v2" }),
+    /request\.kind must be "subagent\.dispatch\.v1"/,
+  );
+  // The new v1 wire literal is accepted.
+  assert.equal(validateRequest({ ...base, kind: "subagent.dispatch.v1" }), true);
+  // A legacy bare tier-2 kind (pre-v1 on-disk envelope, no tier2_kind) is accepted.
+  assert.equal(
+    validateRequest({ request_id: "r", kind: "merge_decision", prompt: "p", inputs: {} }),
+    true,
+  );
+});
+
 test("validateRequest: rejects missing request_id", () => {
   assert.throws(() => validateRequest({ kind: "cluster_name", prompt: "x", inputs: {} }));
+});
+
+test("validateRequest: rejects an envelope with no `kind` even when tier2_kind is valid", () => {
+  // The v1 envelope `kind` is required. A request carrying only a valid
+  // tier2_kind (but no top-level kind) is neither a v1 envelope nor a
+  // recognised legacy shape, so it must NOT be writable to a pending file.
+  assert.throws(
+    () =>
+      validateRequest({
+        request_id: "r",
+        tier2_kind: "merge_decision",
+        prompt: "p",
+        inputs: {},
+      }),
+    /request\.kind is required/,
+  );
 });
 
 test("validateRequest: accepts well-formed request", () => {
@@ -169,7 +311,8 @@ test("writePending + readPending: round-trip preserves requests", () => {
     assert.equal(back.batch_id, "batch1");
     assert.equal(back.requests.length, 1);
     assert.equal(back.requests[0].request_id, req.request_id);
-    assert.equal(back.requests[0].kind, "merge_decision");
+    assert.equal(back.requests[0].kind, "subagent.dispatch.v1");
+    assert.equal(back.requests[0].tier2_kind, "merge_decision");
   } finally {
     rmSync(wiki, { recursive: true, force: true });
   }

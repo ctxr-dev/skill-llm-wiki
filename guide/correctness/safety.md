@@ -69,8 +69,8 @@ The `.work/` directory is scratch space used by phases that need to stage interm
   folders. History is tracked by the private git repo at
   `<source>.wiki/.llmwiki/git/`, and rollback is `skill-llm-wiki rollback
   <source>.wiki --to pre-<op-id>` (byte-exact via `git reset --hard`).
-- See [guide/layout-modes.md](layout-modes.md) for the full mode matrix and
-  [guide/in-place-mode.md](in-place-mode.md) for the in-place variant. Legacy
+- See [guide/layout/layout-modes.md](../layout/layout-modes.md) for the full mode matrix and
+  [guide/layout/in-place-mode.md](../layout/in-place-mode.md) for the in-place variant. Legacy
   `<source>.llmwiki.v<N>/` wikis are detected via **INT-04** and must be
   migrated explicitly with `skill-llm-wiki migrate <legacy-path>` before any
   other operation will run.
