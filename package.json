@@ -1,7 +1,7 @@
 {
   "name": "@ctxr/skill-llm-wiki",
   "version": "1.1.0",
-  "description": "Claude Code skill — build, extend, validate, rebuild, fix, and join LLM wikis from any knowledge corpus. Token-efficient retrieval via hierarchical indices, DAG parents, and deterministic rewrite operators.",
+  "description": "Agent Skills (Claude Code, Codex CLI): build, extend, validate, rebuild, fix, and join LLM wikis from any knowledge corpus. Token-efficient retrieval via hierarchical indices, DAG parents, and deterministic rewrite operators.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -16,6 +16,9 @@
     "node": ">=18.0.0"
   },
   "keywords": [
+    "agent-skills",
+    "agents-md",
+    "codex",
     "claude-code",
     "skill",
     "llm-wiki",
@@ -38,6 +41,9 @@
     "type": "skill",
     "target": "folder"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "skill-llm-wiki": "scripts/cli.mjs"
   },
@@ -46,7 +52,8 @@
     "validate": "node scripts/cli.mjs --version",
     "lint": "markdownlint-cli2 '**/*.md' '#node_modules'",
     "lint:fix": "markdownlint-cli2 --fix '**/*.md' '#node_modules'",
-    "prepare": "husky || true"
+    "prepare": "husky || true",
+    "prepublishOnly": "npm run lint && npm test"
   },
   "devDependencies": {
     "husky": "^9.1.0",

@@ -3,8 +3,11 @@
 [![npm](https://img.shields.io/npm/v/@ctxr/skill-llm-wiki)](https://www.npmjs.com/package/@ctxr/skill-llm-wiki)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![CI](https://img.shields.io/badge/CI-Ubuntu%20%2B%20Windows-green)](.github/workflows/ci.yml)
+[![Agent Skills](https://img.shields.io/badge/Agent%20Skills-Claude%20Code%20%7C%20Codex%20CLI-blue)](https://agentskills.io)
 
 > **Turn any folder of markdown, docs, or source into a deterministic, token-efficient knowledge base your AI agent reads the way you'd want it to — once, and only the parts it needs.**
+
+Supports Claude Code and OpenAI Codex CLI via the open Agent Skills standard. Tier 2 sub-agent dispatch follows the [`subagent-dispatch-v1`](https://github.com/ctxr-dev/kit/blob/main/docs/subagent-dispatch-v1.md) envelope.
 
 ## The problem every AI-heavy workflow eventually hits
 
@@ -91,8 +94,8 @@ Merge my docs and runbooks wikis into a handbook
 
 This skill has two hard requirements. If either is missing, the skill will refuse to run and print a clear message explaining why and how to fix it.
 
-1. **[Claude Code](https://claude.ai/code) CLI or IDE extension.**
-2. **Node.js ≥ 18.0.0.** The skill's deterministic CLI (`scripts/cli.mjs`) is a Node.js program, so Node must be available in the shell Claude Code uses to run Bash commands. If Node.js is missing or below the minimum version, Claude will stop the operation before making any changes and relay platform-specific install instructions.
+1. **An Agent Skills-compatible harness** ([Claude Code](https://claude.ai/code) CLI/IDE, OpenAI Codex CLI, or another harness implementing the [open Agent Skills standard](https://agentskills.io)).
+2. **Node.js ≥ 18.0.0.** The skill's deterministic CLI (`scripts/cli.mjs`) is a Node.js program, so Node must be available in the shell the host harness uses to run Bash commands. If Node.js is missing or below the minimum version, the harness will stop the operation before making any changes and relay platform-specific install instructions.
 
 ### Verify your environment before invoking the skill
 
@@ -172,7 +175,7 @@ npx @ctxr/kit install @ctxr/skill-llm-wiki            # project-local
 npx @ctxr/kit install @ctxr/skill-llm-wiki --user     # user-global
 ```
 
-Installs to `.claude/skills/ctxr-skill-llm-wiki/` (or `~/.claude/skills/…` with `--user`). No post-install wiring, no automatic hooks, no filesystem watchers — the skill is pure standby until you explicitly ask Claude to run an operation against a specific directory.
+Installs canonically to `.agents/skills/ctxr-skill-llm-wiki/` (or `~/.agents/skills/…` with `--user`); `@ctxr/kit` auto-creates discovery-mirror symlinks at `.claude/skills/` (and `~/.codex/skills/` for user-scope) so Claude Code, Codex CLI, and other Agent Skills harnesses all find the artefact. No post-install wiring, no automatic hooks, no filesystem watchers; the skill is pure standby until you explicitly ask the host harness to run an operation against a specific directory.
 
 The installed package contains `SKILL.md` (the routing entry point Claude reads at activation), `LICENSE`, `README.md`, `scripts/` (invoked via `node scripts/cli.mjs <subcommand>`, never read as source), and `guide/` (context-specific routing leaves loaded on keyword activation — `hidden-git.md` when the user asks about history or diff, `user-intent.md` when the request is ambiguous, `tiered-ai.md` when the user asks about quality modes, etc.). The internal design doc `methodology.md` is deliberately excluded from the installed package (`files[]` in `package.json` does not list it) so it is never copied into any user environment and never loaded during a session.
 
@@ -180,15 +183,15 @@ The installed package contains `SKILL.md` (the routing entry point Claude reads 
 
 ```bash
 git clone https://github.com/ctxr-dev/skill-llm-wiki.git /tmp/skill-llm-wiki
-mkdir -p .claude/skills
-cp -r /tmp/skill-llm-wiki .claude/skills/skill-llm-wiki
+mkdir -p .agents/skills
+cp -r /tmp/skill-llm-wiki .agents/skills/skill-llm-wiki
 ```
 
 ### Git Submodule
 
 ```bash
 git submodule add https://github.com/ctxr-dev/skill-llm-wiki.git \
-    .claude/skills/skill-llm-wiki
+    .agents/skills/skill-llm-wiki
 ```
 
 ## Usage

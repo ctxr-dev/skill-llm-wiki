@@ -1097,7 +1097,9 @@ test("runConvergence: skips propose_structure on a 2-leaf directory", async () =
     // No propose_structure enqueued — a 2-leaf dir is below the
     // MIN_TIER2_CLUSTER_SIZE + 1 threshold for cluster detection.
     const pending = takePendingRequests(wiki);
-    const proposeRequests = pending.filter((p) => p.kind === "propose_structure");
+    const proposeRequests = pending.filter(
+      (p) => (p.tier2_kind ?? p.kind) === "propose_structure",
+    );
     assert.equal(
       proposeRequests.length,
       0,
@@ -1150,7 +1152,9 @@ test("runConvergence: emits propose_structure on a 3-leaf directory", async () =
     // minimum that can produce a non-trivial partition — the loop
     // should emit a propose_structure request and park it.
     const pending = takePendingRequests(wiki);
-    const proposeRequests = pending.filter((p) => p.kind === "propose_structure");
+    const proposeRequests = pending.filter(
+      (p) => (p.tier2_kind ?? p.kind) === "propose_structure",
+    );
     assert.ok(
       proposeRequests.length >= 1,
       `expected ≥1 propose_structure request for a 3-leaf dir, got ${proposeRequests.length}`,
@@ -1426,7 +1430,7 @@ test("runConvergence: batches propose_structure across every directory in one pa
 
     const pending = takePendingRequests(wiki);
     const proposeRequests = pending.filter(
-      (r) => r.kind === "propose_structure",
+      (r) => (r.tier2_kind ?? r.kind) === "propose_structure",
     );
     // Every eligible directory should have parked its own
     // propose_structure request in a single walk: root + 2 subcats.

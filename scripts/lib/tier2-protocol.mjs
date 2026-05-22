@@ -20,18 +20,34 @@
 //   - Batch read / write / merge helpers
 //   - Pollution-key defence for JSON parse
 //
-// Request shape (JSON):
+// Request shape (JSON, conforms to the open subagent.dispatch.v1 envelope
+// with skill-specific extensions). What makeRequest() emits today:
 //   {
+//     kind:            "subagent.dispatch.v1"   (the wire-format literal)
 //     request_id:      string, unique per batch
-//     kind:            "merge_decision" | "nest_decision" | "cluster_name"
-//                    | "propose_structure"
-//                    | "draft_frontmatter" | "rebuild_plan_review"
-//                    | "human_fix_item"
+//     role:            "wiki-tier2-<tier2_kind>" (host maps to its native
+//                       sub-agent type)
 //     prompt:          natural-language question the sub-agent answers
 //     inputs:          minimal per-kind inputs (frontmatter blobs, etc.)
+//     effort:          "heavy" | "balanced" | "light" (provider-neutral hint)
 //     response_schema: JSON shape the sub-agent must return
-//     model_hint:      string, picked from guide/tiered-ai.md matrix
-//     effort_hint:     string, picked from guide/tiered-ai.md matrix
+//     tier2_kind:      "merge_decision" | "nest_decision" | "cluster_name"
+//                    | "propose_structure" | "draft_frontmatter"
+//                    | "rebuild_plan_review" | "human_fix_item"
+//                       (skill extension: the per-Tier-2-request kind, which
+//                        the wiki-runner routes on)
+//     model:           optional explicit model override; host prefers this
+//                       when set, else maps `effort` to its own lineup
+//
+//   Deprecated aliases kept for one release (emitted with the exact pre-v1
+//   per-kind values so existing wiki-runner consumers stay byte-compatible):
+//     model_hint  → preserved per-kind legacy model hint
+//     effort_hint → preserved per-kind legacy effort hint
+//
+//   Legacy envelopes written by a PREVIOUS release (where top-level `kind`
+//   WAS the Tier 2 kind and there was no `tier2_kind`/`role`) are still
+//   accepted on read: validateRequest and tier2KindOf both tolerate that
+//   shape so in-flight pending files resume across the upgrade.
 //   }
 //
 // Response shape (JSON):
@@ -57,30 +73,39 @@ import { dirname, join } from "node:path";
 
 export const TIER2_EXIT_CODE = 7;
 
-// The default model + effort matrix from guide/tiered-ai.md. Each
-// request kind maps to a model hint and an effort hint the wiki-
-// runner uses when spawning the sub-agent. These are hints, not
-// mandates — the wiki-runner may override per-session.
+// The default effort matrix from guide/tiered-ai.md. Each request
+// kind maps to an effort hint that the host harness translates to a
+// model from its own lineup. These are hints, not mandates — the
+// wiki-runner may override per-session by setting an explicit
+// `model` on the request.
+//
+// Effort enum (provider-neutral):
+//   "heavy"    — prior `opus` + high; deepest reasoning task
+//   "balanced" — prior `sonnet`/`opus` + medium; structural judgement
+//   "light"    — prior `sonnet`/`haiku` + low; quick decisions
 export const TIER2_DEFAULTS = Object.freeze({
   merge_decision: {
-    model_hint: "sonnet",
-    effort_hint: "low",
+    effort: "light",
+    legacy_model_hint: "sonnet",
+    legacy_effort_hint: "low",
     response_schema: {
       decision: "same|different|undecidable",
       reason: "string",
     },
   },
   nest_decision: {
-    model_hint: "sonnet",
-    effort_hint: "medium",
+    effort: "balanced",
+    legacy_model_hint: "sonnet",
+    legacy_effort_hint: "medium",
     response_schema: {
       decision: "nest|keep_flat|undecidable",
       reason: "string",
     },
   },
   cluster_name: {
-    model_hint: "sonnet",
-    effort_hint: "low",
+    effort: "light",
+    legacy_model_hint: "sonnet",
+    legacy_effort_hint: "low",
     response_schema: {
       slug: "kebab-case-slug",
       purpose: "string",
@@ -92,12 +117,13 @@ export const TIER2_DEFAULTS = Object.freeze({
   // ids) plus the leaves that should remain as siblings. This is
   // the "Tier 2 gets first dibs" escalation and fires BEFORE the
   // math-based cluster detector on every non-already-nested
-  // directory. Opus + medium effort because the task is a
-  // structural judgment call over many inputs that benefits from
-  // the strongest reasoning model.
+  // directory. balanced effort because the task is a structural
+  // judgement call over many inputs that benefits from a strong
+  // reasoning model.
   propose_structure: {
-    model_hint: "opus",
-    effort_hint: "medium",
+    effort: "balanced",
+    legacy_model_hint: "opus",
+    legacy_effort_hint: "medium",
     response_schema: {
       subcategories: "array of { slug, purpose, members[] }",
       siblings: "array of leaf ids",
@@ -105,8 +131,9 @@ export const TIER2_DEFAULTS = Object.freeze({
     },
   },
   draft_frontmatter: {
-    model_hint: "sonnet",
-    effort_hint: "medium",
+    effort: "balanced",
+    legacy_model_hint: "sonnet",
+    legacy_effort_hint: "medium",
     response_schema: {
       focus: "string",
       covers: "array of strings",
@@ -114,8 +141,9 @@ export const TIER2_DEFAULTS = Object.freeze({
     },
   },
   rebuild_plan_review: {
-    model_hint: "opus",
-    effort_hint: "high",
+    effort: "heavy",
+    legacy_model_hint: "opus",
+    legacy_effort_hint: "high",
     response_schema: {
       approve: "boolean",
       drop: "array of iteration ids",
@@ -123,14 +151,29 @@ export const TIER2_DEFAULTS = Object.freeze({
     },
   },
   human_fix_item: {
-    model_hint: "sonnet",
-    effort_hint: "low",
+    effort: "light",
+    legacy_model_hint: "sonnet",
+    legacy_effort_hint: "low",
     response_schema: {
       action: "string",
       rationale: "string",
     },
   },
 });
+
+// The three valid provider-neutral effort values. Any other value
+// is rejected by makeRequest rather than silently falling back to a
+// legacy alias.
+const VALID_EFFORTS = new Set(["heavy", "balanced", "light"]);
+
+let deprecationWarned = false;
+function warnDeprecatedAliasOnce() {
+  if (deprecationWarned) return;
+  deprecationWarned = true;
+  process.stderr.write(
+    "[skill-llm-wiki] tier2-protocol: `model_hint` and `effort_hint` are deprecated; pass `effort` and (optional) `model` instead.\n",
+  );
+}
 
 export const TIER2_KINDS = Object.freeze(Object.keys(TIER2_DEFAULTS));
 
@@ -187,8 +230,26 @@ export function listBatches(wikiRoot) {
 // The builder fills in defaults from TIER2_DEFAULTS and validates
 // the shape. `inputs` is kind-specific and kept small (a few
 // frontmatter blobs at most) so batches stay under a few KB each.
+//
+// Wire shape: emitted envelopes conform to the open `subagent.dispatch.v1`
+// envelope (see https://github.com/ctxr-dev/kit/blob/main/docs/subagent-dispatch-v1.md) so any Agent
+// Skills harness can validate them. The Tier 2 per-request kind
+// (`merge_decision`, `propose_structure`, …) lives on `tier2_kind`, NOT on
+// the envelope's top-level `kind` field — `kind` MUST be the literal
+// `"subagent.dispatch.v1"`. The skill-side `role` is derived from the Tier 2
+// kind so the harness can map to its native sub-agent type.
+//
+// Legacy aliases `model_hint` / `effort_hint` are emitted alongside the
+// canonical `effort` field for one release so wiki-runners that read the
+// old names keep working. The schema's `additionalProperties: true` allows
+// these as a documented extension profile.
 
-export function makeRequest(kind, { prompt, inputs, model_hint, effort_hint, request_id } = {}) {
+const ROLE_PREFIX = "wiki-tier2-";
+
+export function makeRequest(
+  kind,
+  { prompt, inputs, effort, model, model_hint, effort_hint, request_id } = {},
+) {
   if (!TIER2_KINDS.includes(kind)) {
     throw new Error(`tier2-protocol: unknown kind "${kind}" (valid: ${TIER2_KINDS.join(", ")})`);
   }
@@ -203,15 +264,44 @@ export function makeRequest(kind, { prompt, inputs, model_hint, effort_hint, req
   }
   const defaults = TIER2_DEFAULTS[kind];
   const rid = request_id ?? deriveRequestId(kind, inputs);
-  return {
+
+  // Accept deprecated aliases (with a one-shot stderr warning) but
+  // prefer the new names when both are set.
+  if ((model_hint !== undefined || effort_hint !== undefined) && effort === undefined && model === undefined) {
+    warnDeprecatedAliasOnce();
+  }
+  const resolvedEffort = effort ?? defaults.effort;
+  if (!VALID_EFFORTS.has(resolvedEffort)) {
+    throw new Error(
+      `tier2-protocol: invalid effort "${resolvedEffort}" (allowed: ${[...VALID_EFFORTS].join(", ")})`,
+    );
+  }
+  // Required v1 fields first (`kind`, `request_id`, `role`, `prompt`,
+  // `inputs`, `effort`); skill-specific extensions follow.
+  const out = {
+    kind: "subagent.dispatch.v1",
     request_id: rid,
-    kind,
+    role: ROLE_PREFIX + kind,
     prompt,
     inputs,
+    effort: resolvedEffort,
     response_schema: defaults.response_schema,
-    model_hint: model_hint ?? defaults.model_hint,
-    effort_hint: effort_hint ?? defaults.effort_hint,
+    // Skill-specific extension: the per-Tier-2-request kind, used by the
+    // wiki-runner to route to the right inline handler / prompt template.
+    tier2_kind: kind,
+    // Deprecated aliases retained for one release; readers should migrate to
+    // `effort` (and optional `model`). These emit the EXACT pre-v1 per-kind
+    // `model_hint`/`effort_hint` values (stored on TIER2_DEFAULTS) so the
+    // deprecation window is byte-compatible — they are NOT derived from
+    // `effort` (which would change e.g. propose_structure's model_hint).
+    // A caller-supplied alias still wins.
+    model_hint: model_hint ?? defaults.legacy_model_hint,
+    effort_hint: effort_hint ?? defaults.legacy_effort_hint,
   };
+  if (typeof model === "string" && model.length > 0) {
+    out.model = model;
+  }
+  return out;
 }
 
 // Deterministic request id: sha256(kind + canonical-JSON(inputs))
@@ -248,6 +338,28 @@ function canonicalJson(value) {
 
 // ── Request validation ─────────────────────────────────────────────
 
+/**
+ * Pull the per-request Tier 2 kind off an envelope.
+ *
+ * New v1-conformant envelopes carry it on `tier2_kind` (the wire `kind` is
+ * the literal `"subagent.dispatch.v1"`). Legacy envelopes (pre-v1
+ * conformance) put it on `kind`. This helper accepts either so on-disk
+ * envelopes from a previous release continue to resolve correctly.
+ */
+export function tier2KindOf(req) {
+  if (!req || typeof req !== "object") return null;
+  // Only accept a `tier2_kind` that names a recognised kind; an unknown or
+  // malformed value must NOT be treated as valid downstream.
+  if (typeof req.tier2_kind === "string" && TIER2_KINDS.includes(req.tier2_kind)) {
+    return req.tier2_kind;
+  }
+  // Legacy fallback: `kind` was the per-request tier-2 kind before v1 conformance.
+  if (typeof req.kind === "string" && TIER2_KINDS.includes(req.kind)) {
+    return req.kind;
+  }
+  return null;
+}
+
 export function validateRequest(req) {
   if (!req || typeof req !== "object") {
     throw new Error("tier2-protocol: request must be an object");
@@ -258,8 +370,24 @@ export function validateRequest(req) {
   if (typeof req.request_id !== "string" || req.request_id.length === 0) {
     throw new Error("tier2-protocol: request.request_id must be a non-empty string");
   }
-  if (!TIER2_KINDS.includes(req.kind)) {
-    throw new Error(`tier2-protocol: request.kind "${req.kind}" is not recognised`);
+  // Envelope `kind` is REQUIRED. It must be the v1 wire constant
+  // "subagent.dispatch.v1" OR — for legacy pre-v1 envelopes — itself one of
+  // the Tier 2 kinds. Omitting it (even when a valid `tier2_kind` is present)
+  // is a malformed envelope: an envelope with no `kind` is neither v1 nor a
+  // recognised legacy shape, and must not be writable to a pending file.
+  if (typeof req.kind !== "string" || req.kind.length === 0) {
+    throw new Error(
+      `tier2-protocol: request.kind is required and must be "subagent.dispatch.v1" or a legacy tier-2 kind (${TIER2_KINDS.join(", ")})`,
+    );
+  }
+  if (req.kind !== "subagent.dispatch.v1" && !TIER2_KINDS.includes(req.kind)) {
+    throw new Error(
+      `tier2-protocol: request.kind must be "subagent.dispatch.v1" or a legacy tier-2 kind (${TIER2_KINDS.join(", ")}), got "${req.kind}"`,
+    );
+  }
+  const t2 = tier2KindOf(req);
+  if (!t2) {
+    throw new Error(`tier2-protocol: request must declare tier2_kind (or legacy kind) from: ${TIER2_KINDS.join(", ")}`);
   }
   if (typeof req.prompt !== "string" || req.prompt.length === 0) {
     throw new Error("tier2-protocol: request.prompt must be a non-empty string");
@@ -441,8 +569,12 @@ export function resolveFromFixture(fixtureMap, request) {
   if (!request || typeof request.request_id !== "string") return null;
   const specific = fixtureMap.get(request.request_id);
   if (specific !== undefined) return specific;
-  if (typeof request.kind === "string") {
-    const wildcard = fixtureMap.get(`__kind__${request.kind}`);
+  // Wildcard lookups key on the per-Tier-2-request kind, not the v1
+  // envelope `kind` literal. Resolve via `tier2KindOf` so both new and
+  // legacy envelope shapes route correctly.
+  const t2 = tier2KindOf(request);
+  if (t2) {
+    const wildcard = fixtureMap.get(`__kind__${t2}`);
     if (wildcard !== undefined) return wildcard;
   }
   return null;

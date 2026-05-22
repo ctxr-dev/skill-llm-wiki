@@ -93,5 +93,5 @@ If the user's source folder is already tracked by their own git repo, the
 first in-place operation writes `.gitignore` with `.llmwiki/`, `.work/`,
 `.shape/history/*/work/`. The user's git sees those paths as ignored. Our
 private repo's operations never touch the user's `.git/` — see
-[guide/coexistence.md](coexistence.md) for the full coexistence story and
+[guide/isolation/coexistence.md](../isolation/coexistence.md) for the full coexistence story and
 proof-of-isolation tests.
