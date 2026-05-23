@@ -126,8 +126,9 @@ function parseMap(p, baseIndent) {
     const rest = text.slice(colon + 1).trim();
     p.advance();
 
-    if (rest === "|" || rest === ">") {
-      safeAssign(out, key, parseBlockScalar(p, baseIndent, rest === "|"), p, tok);
+    const blockHeader = blockScalarHeader(rest);
+    if (blockHeader) {
+      safeAssign(out, key, parseBlockScalar(p, baseIndent, blockHeader), p, tok);
       continue;
     }
     if (rest !== "") {
@@ -178,6 +179,12 @@ function parseSeq(p, baseIndent) {
       continue;
     }
 
+    const itemBlockHeader = blockScalarHeader(afterDash);
+    if (itemBlockHeader) {
+      out.push(parseBlockScalar(p, baseIndent, itemBlockHeader));
+      continue;
+    }
+
     const colon = findKeyColon(afterDash);
     if (colon === -1) {
       out.push(parseScalarInline(afterDash));
@@ -189,8 +196,9 @@ function parseSeq(p, baseIndent) {
     const firstRest = afterDash.slice(colon + 1).trim();
     const item = {};
 
-    if (firstRest === "|" || firstRest === ">") {
-      item[firstKey] = parseBlockScalar(p, baseIndent + 2, firstRest === "|");
+    const firstBlockHeader = blockScalarHeader(firstRest);
+    if (firstBlockHeader) {
+      item[firstKey] = parseBlockScalar(p, baseIndent + 2, firstBlockHeader);
     } else if (firstRest !== "") {
       item[firstKey] = parseScalarInline(firstRest);
     } else {
@@ -237,10 +245,13 @@ function parseSeq(p, baseIndent) {
         } else {
           item[subKey] = null;
         }
-      } else if (subRest === "|" || subRest === ">") {
-        item[subKey] = parseBlockScalar(p, baseIndent + 2, subRest === "|");
       } else {
-        item[subKey] = parseScalarInline(subRest);
+        const subBlockHeader = blockScalarHeader(subRest);
+        if (subBlockHeader) {
+          item[subKey] = parseBlockScalar(p, baseIndent + 2, subBlockHeader);
+        } else {
+          item[subKey] = parseScalarInline(subRest);
+        }
       }
     }
 
@@ -248,8 +259,29 @@ function parseSeq(p, baseIndent) {
   }
 }
 
-function parseBlockScalar(p, baseIndent, literal) {
+// Recognise a YAML block scalar header: `|` (literal) or `>` (folded),
+// each optionally carrying a chomping indicator (`+`/`-`) and/or an explicit
+// indentation indicator (a single digit 1-9), in either order (YAML 1.2
+// §8.1.1). Returns { literal } or null. Chomping/indent indicators affect
+// only trailing-newline and indent-detection nuances that do not change the
+// value of the single-line/wrapped scalars our frontmatter uses, so we read
+// them for tolerance but act only on the literal-vs-folded distinction. This
+// is why a serializer-folded `id: >-` (js-yaml's default line wrap) parses
+// instead of tripping "unexpected indent".
+function blockScalarHeader(rest) {
+  const m = /^([|>])(?:(?:([+-])([1-9])?)|(?:([1-9])([+-])?))?$/.exec(rest);
+  return m
+    ? {
+        literal: m[1] === "|",
+        indent: Number(m[3] ?? m[4] ?? 0),
+      }
+    : null;
+}
+
+function parseBlockScalar(p, baseIndent, header) {
+  const { literal, indent } = header;
   const collected = [];
+  let contentIndent = indent > 0 ? baseIndent + indent : null;
   while (p.pos < p.lines.length) {
     const raw = p.lines[p.pos];
     if (raw.trim() === "") {
@@ -259,7 +291,11 @@ function parseBlockScalar(p, baseIndent, literal) {
     }
     const indent = raw.length - raw.trimStart().length;
     if (indent <= baseIndent) break;
-    collected.push(raw.slice(baseIndent + 2));
+    if (contentIndent == null) {
+      contentIndent = indent;
+    }
+    if (indent < contentIndent) break;
+    collected.push(raw.slice(contentIndent));
     p.pos++;
   }
   // Trim trailing empty lines
