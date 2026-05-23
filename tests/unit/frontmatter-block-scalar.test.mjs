@@ -61,10 +61,13 @@ test("frontmatter: folded scalar as a bare sequence item (- >-)", () => {
   ]);
 });
 
-test("frontmatter: explicit indentation indicator (>2) is recognised", () => {
-  const raw = "---\nfocus: >2\n  wrapped value\n---\nbody\n";
-  const { data } = parseFrontmatter(raw, "<mem>");
-  assert.equal(data.focus, "wrapped value");
+test("frontmatter: explicit indentation indicator is respected", () => {
+  const one = parseFrontmatter("---\nfocus: >1\n wrapped value\n---\nbody\n", "<mem>").data;
+  assert.equal(one.focus, "wrapped value");
+  const two = parseFrontmatter("---\nfocus: >2\n  wrapped value\n---\nbody\n", "<mem>").data;
+  assert.equal(two.focus, "wrapped value");
+  const three = parseFrontmatter("---\nfocus: >3\n   wrapped value\n---\nbody\n", "<mem>").data;
+  assert.equal(three.focus, "wrapped value");
 });
 
 test("frontmatter: bare | and > headers still parse (no regression)", () => {
