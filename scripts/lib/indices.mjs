@@ -237,9 +237,9 @@ export function rebuildIndex(
   // Derived focus + tags: make the index self-describing for navigation. When no
   // focus is authored (or it is a stale "subtree under <path>" placeholder),
   // summarise the subtree from the aggregated child entries; also union the
-  // descendants' tags when none are authored. rebuildAllIndices / ensureIndexes
-  // run deepest-first, so a child's index focus is already aggregated when its
-  // parent reads it here -> leaf topics bubble up the tree.
+  // descendants' tags when none are authored. rebuildAllIndices runs deepest-first
+  // (and incremental callers should rebuild bottom-up), so a child's index focus
+  // is already aggregated when its parent reads it here -> leaf topics bubble up.
   if (!data.focus || isPlaceholderFocus(data.focus)) {
     data.focus = deriveIndexFocus(data.id, entries);
   }
