@@ -183,9 +183,9 @@ export function rebuildIndex(
   if (isRoot) data.depth_role = "category";
   data.depth = depth;
 
-  if (!data.focus) {
-    data.focus = `subtree under ${data.id}`;
-  }
+  // `focus` (and a derived `tags` union) are computed AFTER the entries are
+  // aggregated below, so the index can summarise its subtree instead of an
+  // opaque "subtree under <path>" placeholder. An authored focus is preserved.
 
   if (!data.parents) {
     if (isRoot) {
@@ -233,6 +233,29 @@ export function rebuildIndex(
     entries.push(record);
   }
   data.entries = entries;
+
+  // Derived focus + tags: make the index self-describing for navigation. When no
+  // focus is authored (or it is a stale "subtree under <path>" placeholder),
+  // summarise the subtree from the aggregated child entries; also union the
+  // descendants' tags when none are authored. rebuildAllIndices runs deepest-first
+  // (and incremental callers should rebuild bottom-up), so a child's index focus
+  // is already aggregated when its parent reads it here -> leaf topics bubble up.
+  if (!data.focus || isPlaceholderFocus(data.focus, data.id)) {
+    data.focus = deriveIndexFocus(data.id, entries);
+  }
+  // Normalise authored string tags ("foo" / "foo, bar") into an array: the schema
+  // (guide/basics/schema.md) types tags as string[], so downstream Array.isArray
+  // routing would otherwise ignore a string value entirely.
+  if (typeof data.tags === "string") {
+    data.tags = data.tags.split(",").map((t) => t.trim()).filter(Boolean);
+  }
+  // Derive a descendant-tag union ONLY when tags is absent. The presence of the
+  // key (even an empty `tags: []`) is treated as authored, so an author can
+  // deliberately opt a navigation index out of tags.
+  if (data.tags === undefined) {
+    const derivedTags = deriveIndexTags(entries);
+    if (derivedTags.length > 0) data.tags = derivedTags;
+  }
 
   // Semantic-routing substrate: `activation_defaults` is NOT
   // auto-aggregated anymore. Claude decides descent from `focus`
@@ -369,7 +392,10 @@ function collectDirs(dirPath, wikiRoot, acc, cache) {
 
 function depthOf(dirPath, wikiRoot) {
   if (dirPath === wikiRoot) return 0;
-  return relative(wikiRoot, dirPath).split("/").filter(Boolean).length;
+  // Split on BOTH separators: node's relative() yields "\\" on Windows, and the
+  // deepest-first rebuild order (which the focus/tag bubble-up relies on) would
+  // otherwise miscompute depth there and rebuild parents before children.
+  return relative(wikiRoot, dirPath).split(/[\\/]/).filter(Boolean).length;
 }
 
 function computeDepth(dirPath, wikiRoot) {
@@ -498,6 +524,54 @@ function extractAuthoredBlock(body) {
   const end = body.indexOf(AUTHORED_END);
   if (start === -1 || end === -1 || end <= start) return null;
   return body.slice(start + AUTHORED_BEGIN.length, end).trim();
+}
+
+// True only for the EXACT legacy placeholder this skill generated for `id`
+// ("subtree under <id>"). Matching exactly (not a prefix) means a genuinely
+// authored focus that merely starts with those words (e.g. "subtree under water")
+// is never mistaken for a placeholder and clobbered on rebuild.
+function isPlaceholderFocus(focus, id) {
+  if (typeof focus !== "string") return false;
+  const f = focus.trim();
+  // Match the placeholder for the current path-id AND for the legacy basename-id
+  // form: deep indices used to be id'd by basename (e.g. "v1" before the path-id
+  // change made it "api/v1"), so a placeholder written as "subtree under v1" must
+  // still be recognised and refreshed rather than bubbled up as opaque text.
+  const base = String(id).split("/").pop();
+  return f === `subtree under ${id}` || f === `subtree under ${base}`;
+}
+
+// Summarise a directory from its aggregated child entries so the index focus
+// describes the subtree (e.g. "landing: backtest cards badges; ocr stat numbers")
+// instead of an opaque "subtree under <path>". Deterministic + length-bounded.
+function deriveIndexFocus(id, entries) {
+  const label = String(id).split("/").pop() || String(id);
+  const topics = [];
+  for (const e of entries || []) {
+    const f = String(e.focus || e.id || "").replace(/\s+/g, " ").trim();
+    if (!f || isPlaceholderFocus(f, e.id)) continue;
+    topics.push(f);
+    if (topics.length >= 6) break;
+  }
+  if (topics.length === 0) return `${label}: (no described entries yet)`;
+  const summary = `${label}: ${topics.join("; ")}`;
+  return summary.length > 240 ? `${summary.slice(0, 237)}...` : summary;
+}
+
+// Union of descendant entry tags (entries carry each leaf's / sub-index's tags,
+// so this propagates bottom-up). Tags may be arrays or comma-strings. Sorted +
+// capped for deterministic output.
+function deriveIndexTags(entries) {
+  const seen = new Set();
+  for (const e of entries || []) {
+    const t = e.tags;
+    const arr = Array.isArray(t) ? t : typeof t === "string" ? t.split(",") : [];
+    for (const raw of arr) {
+      const v = String(raw).trim().toLowerCase();
+      if (v) seen.add(v);
+    }
+  }
+  return [...seen].sort().slice(0, 20);
 }
 
 function titleize(id) {

@@ -106,6 +106,128 @@ test("rebuildIndex: parent entries[] carries leaf id/type/focus/tags but NOT act
   }
 });
 
+test("rebuildIndex: derives a descriptive focus + tag union from children, bubbling up", () => {
+  const wiki = tmp();
+  try {
+    mkdirSync(join(wiki, "cat"), { recursive: true });
+    // root has no authored focus (derive path); cat carries a stale "subtree under
+    // cat" placeholder for its own id (refresh path). The root id is the temp dir
+    // name, so we omit its focus rather than guess the exact placeholder string.
+    writeFileSync(
+      join(wiki, "index.md"),
+      "---\nid: wiki\ntype: index\ndepth_role: category\nparents: []\ngenerator: skill-llm-wiki/v1\n---\n",
+    );
+    writeFileSync(
+      join(wiki, "cat", "index.md"),
+      "---\nid: cat\ntype: index\ndepth_role: subcategory\nfocus: subtree under cat\nparents:\n  - ../index.md\ngenerator: skill-llm-wiki/v1\n---\n",
+    );
+    writeFileSync(
+      join(wiki, "cat", "leaf-cards.md"),
+      [
+        "---",
+        "id: leaf-cards",
+        "type: primary",
+        "depth_role: leaf",
+        "focus: backtest cards badges must read as data-driven",
+        "parents:",
+        "  - index.md",
+        "tags:",
+        "  - cards",
+        "  - badges",
+        "---",
+        "",
+        "# Backtest cards",
+      ].join("\n"),
+    );
+    rebuildAllIndices(wiki);
+
+    const cat = parseFrontmatter(readFileSync(join(wiki, "cat", "index.md"), "utf8")).data;
+    assert.ok(!/^subtree under /.test(cat.focus), `cat focus still a placeholder: ${cat.focus}`);
+    assert.match(cat.focus, /backtest cards/, `cat focus should summarise its leaf: ${cat.focus}`);
+    assert.ok(
+      Array.isArray(cat.tags) && cat.tags.includes("cards"),
+      `cat tag-union should include 'cards': ${JSON.stringify(cat.tags)}`,
+    );
+
+    // Bubble-up: the root focus aggregates the cat subtree, so 'cards' is reachable from the top.
+    const root = parseFrontmatter(readFileSync(join(wiki, "index.md"), "utf8")).data;
+    assert.ok(!/^subtree under /.test(root.focus), `root focus still a placeholder: ${root.focus}`);
+    assert.match(root.focus, /cards/, `root focus should bubble up the leaf topic: ${root.focus}`);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("rebuildIndex: refreshes a legacy basename placeholder after the id becomes a path", () => {
+  const wiki = tmp();
+  try {
+    mkdirSync(join(wiki, "api", "v1"), { recursive: true });
+    writeFileSync(join(wiki, "index.md"), "---\nid: wiki\ntype: index\ndepth_role: category\nparents: []\ngenerator: skill-llm-wiki/v1\n---\n");
+    writeFileSync(join(wiki, "api", "index.md"), "---\nid: api\ntype: index\ndepth_role: subcategory\nparents:\n  - ../index.md\ngenerator: skill-llm-wiki/v1\n---\n");
+    // Legacy: this deep index was created with a BASENAME id ("v1") and the matching
+    // placeholder; the id now re-derives to the path "api/v1".
+    writeFileSync(
+      join(wiki, "api", "v1", "index.md"),
+      "---\nid: v1\ntype: index\ndepth_role: subcategory\nfocus: subtree under v1\nparents:\n  - ../index.md\ngenerator: skill-llm-wiki/v1\n---\n",
+    );
+    writeFileSync(
+      join(wiki, "api", "v1", "leaf.md"),
+      "---\nid: leaf\ntype: primary\ndepth_role: leaf\nfocus: handles v1 pagination cursors\nparents:\n  - index.md\n---\n\n# Leaf\n",
+    );
+    rebuildAllIndices(wiki);
+    const v1 = parseFrontmatter(readFileSync(join(wiki, "api", "v1", "index.md"), "utf8")).data;
+    assert.equal(v1.id, "api/v1", "id re-derived to the path");
+    assert.ok(!/^subtree under /.test(v1.focus), `legacy basename placeholder refreshed, not preserved: ${v1.focus}`);
+    assert.match(v1.focus, /pagination/, "focus summarises the leaf");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("rebuildIndex: an authored empty tags list (tags: []) is a preserved opt-out", () => {
+  const wiki = tmp();
+  try {
+    mkdirSync(wiki, { recursive: true });
+    // The index authored `tags: []` to deliberately opt out of routing tags; the
+    // leaf carries tags that would otherwise bubble up into the derived union.
+    writeFileSync(
+      join(wiki, "index.md"),
+      "---\nid: wiki\ntype: index\ndepth_role: category\nfocus: root\nparents: []\ntags: []\ngenerator: skill-llm-wiki/v1\n---\n",
+    );
+    writeFileSync(
+      join(wiki, "leaf.md"),
+      "---\nid: leaf\ntype: primary\ndepth_role: leaf\nfocus: leaf\nparents:\n  - index.md\ntags:\n  - would-bubble\n---\n\n# Leaf\n",
+    );
+    rebuildAllIndices(wiki);
+    const { data } = parseFrontmatter(readFileSync(join(wiki, "index.md"), "utf8"));
+    assert.deepEqual(data.tags, [], "authored empty tags must NOT be replaced by the derived union");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("rebuildIndex: authored string tags are normalised to a string[] array", () => {
+  const wiki = tmp();
+  try {
+    mkdirSync(wiki, { recursive: true });
+    // `tags: cards, badges` is valid YAML (a string), but the schema types tags as
+    // string[]; rebuild normalises it so Array.isArray routing sees the values.
+    writeFileSync(
+      join(wiki, "index.md"),
+      "---\nid: wiki\ntype: index\ndepth_role: category\nfocus: root\nparents: []\ntags: cards, badges\ngenerator: skill-llm-wiki/v1\n---\n",
+    );
+    writeFileSync(
+      join(wiki, "leaf.md"),
+      "---\nid: leaf\ntype: primary\ndepth_role: leaf\nfocus: leaf\nparents:\n  - index.md\n---\n\n# Leaf\n",
+    );
+    rebuildAllIndices(wiki);
+    const { data } = parseFrontmatter(readFileSync(join(wiki, "index.md"), "utf8"));
+    assert.deepEqual(data.tags, ["cards", "badges"], "string tags should be split/trimmed into an array");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("rebuildIndex: authored source index shared_covers and activation_defaults are forwarded", () => {
   const wiki = tmp();
   try {
