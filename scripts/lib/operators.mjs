@@ -45,6 +45,7 @@ import pTimeout, { TimeoutError } from "p-timeout";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
 import { collectFrontmatterOnly, readFrontmatterStreaming } from "./chunk.mjs";
 import { listChildren, rebuildAllIndices } from "./indices.mjs";
+import { indexIdForDir } from "./paths.mjs";
 import { buildComparisonModel } from "./similarity.mjs";
 import {
   countPendingRequests,
@@ -1635,7 +1636,7 @@ function bootstrapStubIndicesForMetric(wikiRoot) {
     const { leaves, subdirs } = listChildren(dir);
     if (leaves.length === 0 && subdirs.length === 0) continue;
     const isRoot = dir === wikiRoot;
-    const id = isRoot ? basename(wikiRoot) : basename(dir);
+    const id = indexIdForDir(wikiRoot, dir);
     const stub =
       "---\n" +
       `id: ${id}\n` +

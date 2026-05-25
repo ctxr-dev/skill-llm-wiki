@@ -9,7 +9,7 @@
 // version stays on disk until the user explicitly prunes.
 
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 
 const VERSION_RE = /^v(\d+)$/;
 
@@ -22,6 +22,21 @@ export const WIKI_GENERATOR_MARKER = "skill-llm-wiki/v1";
 
 export function wikiBaseName(sourcePath) {
   return basename(resolve(sourcePath));
+}
+
+// Stable, globally-unique id for a directory's index.md. The wiki root keeps its
+// bare basename; every nested directory uses its POSIX path relative to the wiki
+// root (e.g. "knowledge", "knowledge/billing", "knowledge/billing/decision").
+// Depth-1 directories therefore keep their historical basename id (relative path
+// == basename), so one-level wikis are byte-identical to before; deeper trees get
+// path-unique ids so a repeated path segment (the same atom_type under many
+// modules, the same module under many categories, a recurring day-of-month under
+// daily) no longer collides under the validator's global-unique-id invariant.
+export function indexIdForDir(wikiRoot, dirPath) {
+  const root = resolve(wikiRoot);
+  const dir = resolve(dirPath);
+  if (dir === root) return basename(root);
+  return relative(root, dir).split("\\").join("/");
 }
 
 export function siblingRoot(sourcePath) {
