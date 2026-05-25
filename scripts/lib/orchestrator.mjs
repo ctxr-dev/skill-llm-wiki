@@ -28,10 +28,11 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { ingestSource } from "./ingest.mjs";
 import { draftCategory, draftLeafFrontmatter } from "./draft.mjs";
 import { rebuildAllIndices } from "./indices.mjs";
+import { indexIdForDir } from "./paths.mjs";
 import { validateWiki, summariseFindings } from "./validate.mjs";
 import {
   gitClean,
@@ -1003,7 +1004,7 @@ function bootstrapIndexStubs(wikiRoot) {
     const indexPath = join(dir, "index.md");
     if (existsSync(indexPath)) continue;
     const isRoot = dir === wikiRoot;
-    const id = isRoot ? basename(wikiRoot) : basename(dir);
+    const id = indexIdForDir(wikiRoot, dir);
     // NOTE: we deliberately omit `parents:` from the stub. `rebuildIndex`
     // knows how to derive the immediate-parent path from the directory
     // position (see indices.mjs), and previous stub code got this wrong

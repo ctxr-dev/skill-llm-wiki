@@ -5,7 +5,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { parseFrontmatter } from "./frontmatter.mjs";
 import { readIndex } from "./indices.mjs";
-import { isWikiRoot } from "./paths.mjs";
+import { isWikiRoot, indexIdForDir } from "./paths.mjs";
 import { gitFsck, gitRefExists, gitRevParse, gitRun } from "./git.mjs";
 import { provenancePath, readProvenance, verifyCoverage } from "./provenance.mjs";
 import { readOpLog } from "./history.mjs";
@@ -60,8 +60,9 @@ export function validateWiki(wikiRoot) {
 
     // #2 id matches filename/directory
     if (data.type === "index") {
-      if (data.id !== basename(dirname(e.absolute))) {
-        push("error", "ID-MISMATCH-DIR", e.absolute, `index id "${data.id}" must match directory name "${basename(dirname(e.absolute))}"`);
+      const expectedId = indexIdForDir(wikiRoot, dirname(e.absolute));
+      if (data.id !== expectedId) {
+        push("error", "ID-MISMATCH-DIR", e.absolute, `index id "${data.id}" must match its path from the wiki root "${expectedId}"`);
       }
     } else {
       const expected = basename(e.absolute, ".md");

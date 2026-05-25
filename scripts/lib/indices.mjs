@@ -10,9 +10,9 @@
 // fields, rendering a deterministic body, writing back atomically.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { parseFrontmatter, renderFrontmatter } from "./frontmatter.mjs";
-import { WIKI_GENERATOR_MARKER } from "./paths.mjs";
+import { WIKI_GENERATOR_MARKER, indexIdForDir } from "./paths.mjs";
 import { readFrontmatterStreaming } from "./chunk.mjs";
 
 const AUTO_BEGIN = "<!-- BEGIN AUTO-GENERATED NAVIGATION -->";
@@ -169,8 +169,13 @@ export function rebuildIndex(
     }
   }
 
-  // Ensure required identity fields.
-  data.id = data.id ?? (isRoot ? basename(wikiRoot) : basename(dirPath));
+  // Ensure required identity fields. An index id is STRUCTURAL: the validator
+  // requires it to equal the directory's path from the wiki root, so it is always
+  // re-derived (never preserved from a stale/stub value). Using the relative path
+  // (root keeps its basename) means nested dirs that reuse a segment name do not
+  // collide under the validator's global-unique-id invariant, and an upgrade
+  // re-nests existing basename ids on the next rebuild.
+  data.id = indexIdForDir(wikiRoot, dirPath);
   data.type = "index";
   // Depth-role mapping per schema: root is "category", everything deeper is
   // "subcategory". (Early drafts mislabeled depth-1 as "category"; fixed.)
@@ -497,7 +502,7 @@ function extractAuthoredBlock(body) {
 
 function titleize(id) {
   return id
-    .split("-")
+    .split(/[/-]/)
     .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
     .join(" ");
 }
