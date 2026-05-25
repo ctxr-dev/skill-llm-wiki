@@ -184,6 +184,50 @@ test("rebuildIndex: refreshes a legacy basename placeholder after the id becomes
   }
 });
 
+test("rebuildIndex: an authored empty tags list (tags: []) is a preserved opt-out", () => {
+  const wiki = tmp();
+  try {
+    mkdirSync(wiki, { recursive: true });
+    // The index authored `tags: []` to deliberately opt out of routing tags; the
+    // leaf carries tags that would otherwise bubble up into the derived union.
+    writeFileSync(
+      join(wiki, "index.md"),
+      "---\nid: wiki\ntype: index\ndepth_role: category\nfocus: root\nparents: []\ntags: []\ngenerator: skill-llm-wiki/v1\n---\n",
+    );
+    writeFileSync(
+      join(wiki, "leaf.md"),
+      "---\nid: leaf\ntype: primary\ndepth_role: leaf\nfocus: leaf\nparents:\n  - index.md\ntags:\n  - would-bubble\n---\n\n# Leaf\n",
+    );
+    rebuildAllIndices(wiki);
+    const { data } = parseFrontmatter(readFileSync(join(wiki, "index.md"), "utf8"));
+    assert.deepEqual(data.tags, [], "authored empty tags must NOT be replaced by the derived union");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
+test("rebuildIndex: authored string tags are normalised to a string[] array", () => {
+  const wiki = tmp();
+  try {
+    mkdirSync(wiki, { recursive: true });
+    // `tags: cards, badges` is valid YAML (a string), but the schema types tags as
+    // string[]; rebuild normalises it so Array.isArray routing sees the values.
+    writeFileSync(
+      join(wiki, "index.md"),
+      "---\nid: wiki\ntype: index\ndepth_role: category\nfocus: root\nparents: []\ntags: cards, badges\ngenerator: skill-llm-wiki/v1\n---\n",
+    );
+    writeFileSync(
+      join(wiki, "leaf.md"),
+      "---\nid: leaf\ntype: primary\ndepth_role: leaf\nfocus: leaf\nparents:\n  - index.md\n---\n\n# Leaf\n",
+    );
+    rebuildAllIndices(wiki);
+    const { data } = parseFrontmatter(readFileSync(join(wiki, "index.md"), "utf8"));
+    assert.deepEqual(data.tags, ["cards", "badges"], "string tags should be split/trimmed into an array");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("rebuildIndex: authored source index shared_covers and activation_defaults are forwarded", () => {
   const wiki = tmp();
   try {

@@ -243,13 +243,16 @@ export function rebuildIndex(
   if (!data.focus || isPlaceholderFocus(data.focus, data.id)) {
     data.focus = deriveIndexFocus(data.id, entries);
   }
-  // Only derive tags when none are authored, in ANY valid YAML shape: a non-empty
-  // array OR a non-empty string ("foo" / "foo, bar"). Otherwise authored string
-  // tags would be silently replaced by the derived union.
-  const hasAuthoredTags =
-    (Array.isArray(data.tags) && data.tags.length > 0) ||
-    (typeof data.tags === "string" && data.tags.trim() !== "");
-  if (!hasAuthoredTags) {
+  // Normalise authored string tags ("foo" / "foo, bar") into an array: the schema
+  // (guide/basics/schema.md) types tags as string[], so downstream Array.isArray
+  // routing would otherwise ignore a string value entirely.
+  if (typeof data.tags === "string") {
+    data.tags = data.tags.split(",").map((t) => t.trim()).filter(Boolean);
+  }
+  // Derive a descendant-tag union ONLY when tags is absent. The presence of the
+  // key (even an empty `tags: []`) is treated as authored, so an author can
+  // deliberately opt a navigation index out of tags.
+  if (data.tags === undefined) {
     const derivedTags = deriveIndexTags(entries);
     if (derivedTags.length > 0) data.tags = derivedTags;
   }
@@ -389,7 +392,10 @@ function collectDirs(dirPath, wikiRoot, acc, cache) {
 
 function depthOf(dirPath, wikiRoot) {
   if (dirPath === wikiRoot) return 0;
-  return relative(wikiRoot, dirPath).split("/").filter(Boolean).length;
+  // Split on BOTH separators: node's relative() yields "\\" on Windows, and the
+  // deepest-first rebuild order (which the focus/tag bubble-up relies on) would
+  // otherwise miscompute depth there and rebuild parents before children.
+  return relative(wikiRoot, dirPath).split(/[\\/]/).filter(Boolean).length;
 }
 
 function computeDepth(dirPath, wikiRoot) {
