@@ -110,10 +110,12 @@ test("rebuildIndex: derives a descriptive focus + tag union from children, bubbl
   const wiki = tmp();
   try {
     mkdirSync(join(wiki, "cat"), { recursive: true });
-    // root + cat indices start as stale "subtree under" placeholders.
+    // root has no authored focus (derive path); cat carries a stale "subtree under
+    // cat" placeholder for its own id (refresh path). The root id is the temp dir
+    // name, so we omit its focus rather than guess the exact placeholder string.
     writeFileSync(
       join(wiki, "index.md"),
-      "---\nid: wiki\ntype: index\ndepth_role: category\nfocus: subtree under wiki\nparents: []\ngenerator: skill-llm-wiki/v1\n---\n",
+      "---\nid: wiki\ntype: index\ndepth_role: category\nparents: []\ngenerator: skill-llm-wiki/v1\n---\n",
     );
     writeFileSync(
       join(wiki, "cat", "index.md"),

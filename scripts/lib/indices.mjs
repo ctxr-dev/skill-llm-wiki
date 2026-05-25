@@ -240,10 +240,16 @@ export function rebuildIndex(
   // descendants' tags when none are authored. rebuildAllIndices runs deepest-first
   // (and incremental callers should rebuild bottom-up), so a child's index focus
   // is already aggregated when its parent reads it here -> leaf topics bubble up.
-  if (!data.focus || isPlaceholderFocus(data.focus)) {
+  if (!data.focus || isPlaceholderFocus(data.focus, data.id)) {
     data.focus = deriveIndexFocus(data.id, entries);
   }
-  if (!Array.isArray(data.tags) || data.tags.length === 0) {
+  // Only derive tags when none are authored, in ANY valid YAML shape: a non-empty
+  // array OR a non-empty string ("foo" / "foo, bar"). Otherwise authored string
+  // tags would be silently replaced by the derived union.
+  const hasAuthoredTags =
+    (Array.isArray(data.tags) && data.tags.length > 0) ||
+    (typeof data.tags === "string" && data.tags.trim() !== "");
+  if (!hasAuthoredTags) {
     const derivedTags = deriveIndexTags(entries);
     if (derivedTags.length > 0) data.tags = derivedTags;
   }
@@ -514,11 +520,12 @@ function extractAuthoredBlock(body) {
   return body.slice(start + AUTHORED_BEGIN.length, end).trim();
 }
 
-const PLACEHOLDER_FOCUS_RE = /^subtree under /;
-// A focus the deterministic rebuild generated (vs. an authored one). Detected so
-// a stale placeholder from an older build is refreshed rather than preserved.
-function isPlaceholderFocus(focus) {
-  return typeof focus === "string" && PLACEHOLDER_FOCUS_RE.test(focus.trim());
+// True only for the EXACT legacy placeholder this skill generated for `id`
+// ("subtree under <id>"). Matching exactly (not a prefix) means a genuinely
+// authored focus that merely starts with those words (e.g. "subtree under water")
+// is never mistaken for a placeholder and clobbered on rebuild.
+function isPlaceholderFocus(focus, id) {
+  return typeof focus === "string" && focus.trim() === `subtree under ${id}`;
 }
 
 // Summarise a directory from its aggregated child entries so the index focus
@@ -529,7 +536,7 @@ function deriveIndexFocus(id, entries) {
   const topics = [];
   for (const e of entries || []) {
     const f = String(e.focus || e.id || "").replace(/\s+/g, " ").trim();
-    if (!f || isPlaceholderFocus(f)) continue;
+    if (!f || isPlaceholderFocus(f, e.id)) continue;
     topics.push(f);
     if (topics.length >= 6) break;
   }
