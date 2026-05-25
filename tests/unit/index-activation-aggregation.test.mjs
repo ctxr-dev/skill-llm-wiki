@@ -158,6 +158,32 @@ test("rebuildIndex: derives a descriptive focus + tag union from children, bubbl
   }
 });
 
+test("rebuildIndex: refreshes a legacy basename placeholder after the id becomes a path", () => {
+  const wiki = tmp();
+  try {
+    mkdirSync(join(wiki, "api", "v1"), { recursive: true });
+    writeFileSync(join(wiki, "index.md"), "---\nid: wiki\ntype: index\ndepth_role: category\nparents: []\ngenerator: skill-llm-wiki/v1\n---\n");
+    writeFileSync(join(wiki, "api", "index.md"), "---\nid: api\ntype: index\ndepth_role: subcategory\nparents:\n  - ../index.md\ngenerator: skill-llm-wiki/v1\n---\n");
+    // Legacy: this deep index was created with a BASENAME id ("v1") and the matching
+    // placeholder; the id now re-derives to the path "api/v1".
+    writeFileSync(
+      join(wiki, "api", "v1", "index.md"),
+      "---\nid: v1\ntype: index\ndepth_role: subcategory\nfocus: subtree under v1\nparents:\n  - ../index.md\ngenerator: skill-llm-wiki/v1\n---\n",
+    );
+    writeFileSync(
+      join(wiki, "api", "v1", "leaf.md"),
+      "---\nid: leaf\ntype: primary\ndepth_role: leaf\nfocus: handles v1 pagination cursors\nparents:\n  - index.md\n---\n\n# Leaf\n",
+    );
+    rebuildAllIndices(wiki);
+    const v1 = parseFrontmatter(readFileSync(join(wiki, "api", "v1", "index.md"), "utf8")).data;
+    assert.equal(v1.id, "api/v1", "id re-derived to the path");
+    assert.ok(!/^subtree under /.test(v1.focus), `legacy basename placeholder refreshed, not preserved: ${v1.focus}`);
+    assert.match(v1.focus, /pagination/, "focus summarises the leaf");
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("rebuildIndex: authored source index shared_covers and activation_defaults are forwarded", () => {
   const wiki = tmp();
   try {

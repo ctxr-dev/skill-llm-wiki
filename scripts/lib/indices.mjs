@@ -525,7 +525,14 @@ function extractAuthoredBlock(body) {
 // authored focus that merely starts with those words (e.g. "subtree under water")
 // is never mistaken for a placeholder and clobbered on rebuild.
 function isPlaceholderFocus(focus, id) {
-  return typeof focus === "string" && focus.trim() === `subtree under ${id}`;
+  if (typeof focus !== "string") return false;
+  const f = focus.trim();
+  // Match the placeholder for the current path-id AND for the legacy basename-id
+  // form: deep indices used to be id'd by basename (e.g. "v1" before the path-id
+  // change made it "api/v1"), so a placeholder written as "subtree under v1" must
+  // still be recognised and refreshed rather than bubbled up as opaque text.
+  const base = String(id).split("/").pop();
+  return f === `subtree under ${id}` || f === `subtree under ${base}`;
 }
 
 // Summarise a directory from its aggregated child entries so the index focus
