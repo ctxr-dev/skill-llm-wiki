@@ -106,6 +106,56 @@ test("rebuildIndex: parent entries[] carries leaf id/type/focus/tags but NOT act
   }
 });
 
+test("rebuildIndex: derives a descriptive focus + tag union from children, bubbling up", () => {
+  const wiki = tmp();
+  try {
+    mkdirSync(join(wiki, "cat"), { recursive: true });
+    // root + cat indices start as stale "subtree under" placeholders.
+    writeFileSync(
+      join(wiki, "index.md"),
+      "---\nid: wiki\ntype: index\ndepth_role: category\nfocus: subtree under wiki\nparents: []\ngenerator: skill-llm-wiki/v1\n---\n",
+    );
+    writeFileSync(
+      join(wiki, "cat", "index.md"),
+      "---\nid: cat\ntype: index\ndepth_role: subcategory\nfocus: subtree under cat\nparents:\n  - ../index.md\ngenerator: skill-llm-wiki/v1\n---\n",
+    );
+    writeFileSync(
+      join(wiki, "cat", "leaf-cards.md"),
+      [
+        "---",
+        "id: leaf-cards",
+        "type: primary",
+        "depth_role: leaf",
+        "focus: backtest cards badges must read as data-driven",
+        "parents:",
+        "  - index.md",
+        "tags:",
+        "  - cards",
+        "  - badges",
+        "---",
+        "",
+        "# Backtest cards",
+      ].join("\n"),
+    );
+    rebuildAllIndices(wiki);
+
+    const cat = parseFrontmatter(readFileSync(join(wiki, "cat", "index.md"), "utf8")).data;
+    assert.ok(!/^subtree under /.test(cat.focus), `cat focus still a placeholder: ${cat.focus}`);
+    assert.match(cat.focus, /backtest cards/, `cat focus should summarise its leaf: ${cat.focus}`);
+    assert.ok(
+      Array.isArray(cat.tags) && cat.tags.includes("cards"),
+      `cat tag-union should include 'cards': ${JSON.stringify(cat.tags)}`,
+    );
+
+    // Bubble-up: the root focus aggregates the cat subtree, so 'cards' is reachable from the top.
+    const root = parseFrontmatter(readFileSync(join(wiki, "index.md"), "utf8")).data;
+    assert.ok(!/^subtree under /.test(root.focus), `root focus still a placeholder: ${root.focus}`);
+    assert.match(root.focus, /cards/, `root focus should bubble up the leaf topic: ${root.focus}`);
+  } finally {
+    rmSync(wiki, { recursive: true, force: true });
+  }
+});
+
 test("rebuildIndex: authored source index shared_covers and activation_defaults are forwarded", () => {
   const wiki = tmp();
   try {

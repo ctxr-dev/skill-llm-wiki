@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Deterministic index focuses (navigable trees without an AI pass).** `rebuildIndex` no longer writes the opaque `focus: "subtree under <path>"` placeholder. When an index has no AUTHORED focus (or carries a stale "subtree under" placeholder), it now derives a descriptive focus by summarising its aggregated child entries (leaf focuses / sub-index focuses), and sets a `tags` union from its descendants. Because rebuild runs deepest-first, child topics bubble up the tree, so reading a parent index tells you what's actually inside instead of nothing. Authored focuses/tags are preserved (placeholder detection only refreshes generated ones). This makes a deterministically-built wiki (e.g. an automated memory store) browsable by an LLM without running the AI build/rebuild draft path, which remains available for richer prose.
 - **CLI progress breadcrumbs (Phase X.9).** Long-running operations (build / rebuild / fix / join) now stream a per-phase breadcrumb to stderr as each orchestrator phase fires:
   - `[build-20260424-212011-abc123 3] ingest: read 596 source file(s), 589 leaves`
   - `[build-... 7] operator-convergence: 156 operator(s) applied across 23 iteration(s); ...`
