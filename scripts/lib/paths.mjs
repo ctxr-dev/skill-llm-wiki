@@ -136,31 +136,16 @@ export function shapeDir(wikiPath) {
 
 // Filename of the layout-contract YAML (hosted-mode wikis).
 //
-// The contract now lives inside a self-contained <wiki>/layout/ folder, so
-// the `.llmwiki.` prefix on the filename is redundant — `layout.yaml`
-// inside `layout/` is unambiguous. The previous filename
-// `.llmwiki.layout.yaml` is still accepted (at both the canonical location
-// and at the legacy wiki root) so pre-existing wikis keep working without
-// any rename.
+// The contract lives inside a self-contained <wiki>/layout/ folder. The
+// folder name "layout" makes any prefix on the filename redundant, so the
+// contract is just "layout.yaml".
 export const LAYOUT_CONTRACT_FILENAME = "layout.yaml";
-export const LEGACY_LAYOUT_CONTRACT_FILENAME = ".llmwiki.layout.yaml";
 
 // Resolve the layout-contract YAML path inside a wiki directory.
-//
-// Lookup order, first-match wins:
-//   1. <wiki>/layout/layout.yaml          (canonical)
-//   2. <wiki>/layout/.llmwiki.layout.yaml (canonical, legacy filename)
-//   3. <wiki>/.llmwiki.layout.yaml        (legacy location at wiki root)
-//
-// Returns null when none exist.
+// Returns the absolute path when present, or null when absent.
 export function resolveLayoutContractPath(wikiPath) {
-  const canonical = join(wikiPath, "layout", LAYOUT_CONTRACT_FILENAME);
-  if (existsSync(canonical)) return canonical;
-  const canonicalLegacyName = join(wikiPath, "layout", LEGACY_LAYOUT_CONTRACT_FILENAME);
-  if (existsSync(canonicalLegacyName)) return canonicalLegacyName;
-  const legacy = join(wikiPath, LEGACY_LAYOUT_CONTRACT_FILENAME);
-  if (existsSync(legacy)) return legacy;
-  return null;
+  const contract = join(wikiPath, "layout", LAYOUT_CONTRACT_FILENAME);
+  return existsSync(contract) ? contract : null;
 }
 
 export function hasLayoutContract(wikiPath) {

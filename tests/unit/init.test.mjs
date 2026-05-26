@@ -180,7 +180,7 @@ test("runInit refuses when an intermediate path segment is a symlink", () => {
     );
     // Confirm the real target was not populated through the symlink.
     assert.equal(
-      existsSync(join(realTarget, "reports", ".llmwiki.layout.yaml")),
+      existsSync(join(realTarget, "reports", "layout", "layout.yaml")),
       false,
     );
   } finally {
@@ -201,7 +201,7 @@ test("runInit refuses to write through a symlink at the topic path", () => {
     );
     // Confirm the target dir was NOT touched through the symlink.
     assert.equal(
-      existsSync(join(realTarget, ".llmwiki.layout.yaml")),
+      existsSync(join(realTarget, "layout", "layout.yaml")),
       false,
     );
   } finally {

@@ -144,8 +144,9 @@ test("hosted mode: arbitrary directory name is a valid wiki root when layout con
   try {
     // Hosted: arbitrary name + layout contract + generator marker → valid
     mkdirSync(hosted, { recursive: true });
+    mkdirSync(join(hosted, "layout"), { recursive: true });
     writeFileSync(
-      join(hosted, ".llmwiki.layout.yaml"),
+      join(hosted, "layout", "layout.yaml"),
       "mode: hosted\nversioning:\n  style: in-place\nlayout: []\n",
     );
     writeFileSync(

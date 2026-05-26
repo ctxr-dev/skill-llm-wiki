@@ -141,7 +141,8 @@ async function refuseSymlink(absPath, rootAbs = null) {
   }
 }
 
-export const CONTRACT_FILENAME = ".llmwiki.layout.yaml";
+// The canonical contract filename inside <wiki>/layout/.
+export const CONTRACT_FILENAME = "layout.yaml";
 
 export async function makeWikiFixture({
   path,
@@ -187,7 +188,11 @@ export async function makeWikiFixture({
       `makeWikiFixture: template "${tmplName}" not found at ${tmplPath}`,
     );
   }
-  const contractPath = join(rootAbs, CONTRACT_FILENAME);
+  // Contract lives at <wiki>/layout/layout.yaml — match the canonical
+  // location enforced by paths.mjs::resolveLayoutContractPath.
+  const layoutDir = join(rootAbs, "layout");
+  await mkdir(layoutDir, { recursive: true });
+  const contractPath = join(layoutDir, CONTRACT_FILENAME);
   await refuseSymlink(contractPath, rootAbs);
   await copyFile(tmplPath, contractPath);
 

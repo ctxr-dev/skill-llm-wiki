@@ -52,10 +52,11 @@ test("isWikiRoot still recognises legacy .llmwiki.vN naming", () => {
   }
 });
 
-test("isWikiRoot recognises hosted mode (layout.yaml + marker)", () => {
+test("isWikiRoot recognises hosted mode (layout/layout.yaml + marker)", () => {
   const wiki = freshDir("hosted");
   try {
-    writeFileSync(join(wiki, ".llmwiki.layout.yaml"), "version: 1\n");
+    mkdirSync(join(wiki, "layout"), { recursive: true });
+    writeFileSync(join(wiki, "layout", "layout.yaml"), "version: 1\n");
     writeFileSync(join(wiki, "index.md"), withMarker());
     assert.equal(isWikiRoot(wiki), true);
   } finally {

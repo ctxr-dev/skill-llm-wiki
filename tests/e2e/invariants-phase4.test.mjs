@@ -152,8 +152,9 @@ test("GIT-01 is skipped when .llmwiki/git/ is absent", () => {
     // private git repo. This mimics a pre-Phase-1 legacy wiki.
     const wiki = join(parent, "hand.wiki");
     mkdirSync(wiki);
+    mkdirSync(join(wiki, "layout"), { recursive: true });
     writeFileSync(
-      join(wiki, ".llmwiki.layout.yaml"),
+      join(wiki, "layout", "layout.yaml"),
       "version: 1\n",
     );
     // index.md id must match the directory basename — `hand.wiki` in
