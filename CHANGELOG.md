@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-05-26
+
 ### Hosted layout-contract folder moved to `.layout/` (BREAKING)
 
 - The hosted-mode layout contract now lives at `<wiki>/.layout/layout.yaml` (was
