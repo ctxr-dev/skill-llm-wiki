@@ -97,7 +97,8 @@ test("runInit creates the topic directory if it does not exist", () => {
   try {
     runInit({ topic, kind: "dated" });
     assert.ok(existsSync(topic));
-    assert.ok(existsSync(join(topic, ".llmwiki.layout.yaml")));
+    // Canonical layout-contract location is <topic>/layout/.llmwiki.layout.yaml.
+    assert.ok(existsSync(join(topic, "layout", ".llmwiki.layout.yaml")));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -211,10 +212,12 @@ test("runInit refuses to write through a symlink at the topic path", () => {
 test("runInit refuses to write through a symlink at the contract path", () => {
   const root = mktmp("symlink-contract");
   const topic = join(root, "topic");
+  const layoutDir = join(topic, "layout");
   const realTarget = join(root, "real-target.yaml");
-  mkdirSync(topic, { recursive: true });
+  mkdirSync(layoutDir, { recursive: true });
   writeFileSync(realTarget, "some content\n");
-  const contractLink = join(topic, ".llmwiki.layout.yaml");
+  // Plant the symlink at the CANONICAL contract path under layout/.
+  const contractLink = join(layoutDir, ".llmwiki.layout.yaml");
   try {
     symlinkSync(realTarget, contractLink, "file");
     assert.throws(

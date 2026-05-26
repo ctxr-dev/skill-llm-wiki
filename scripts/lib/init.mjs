@@ -146,11 +146,18 @@ export function runInit({
     mkdirSync(absTopic, { recursive: true });
   }
 
-  const contractPath = join(absTopic, CONTRACT_FILENAME);
-  // Same symlink guard for the contract file itself. An attacker
-  // who controls the topic directory could plant a symlink at
-  // <topic>/.llmwiki.layout.yaml pointing anywhere; without lstat
-  // we'd follow it on writeFileSync.
+  // Canonical layout-contract location: <topic>/layout/.llmwiki.layout.yaml
+  // The layout/ subfolder is the single self-contained home for the
+  // contract YAML and any sibling helper files (path compilers, README,
+  // etc.) so a template can be copied with `cp -r <example> <topic>/layout`.
+  // If a legacy <topic>/.llmwiki.layout.yaml exists from an earlier init,
+  // we honor it for the "already present" check so users don't get a
+  // double-write surprise during migration.
+  const layoutDir = join(absTopic, "layout");
+  const contractPath = join(layoutDir, CONTRACT_FILENAME);
+  const legacyContractPath = join(absTopic, CONTRACT_FILENAME);
+
+  // Symlink guard at the canonical location.
   if (existsSync(contractPath)) {
     const cst = lstatSync(contractPath);
     if (cst.isSymbolicLink()) {
@@ -160,14 +167,15 @@ export function runInit({
       );
     }
   }
-  const alreadyPresent = existsSync(contractPath);
+  const alreadyPresent = existsSync(contractPath) || existsSync(legacyContractPath);
   if (alreadyPresent && !force) {
     throw new InitError(
       "INIT-07",
-      `init: ${CONTRACT_FILENAME} already exists at ${absTopic}. Pass --force to overwrite, or use \`skill-llm-wiki rebuild\` to reconcile against the existing contract.`,
+      `init: ${CONTRACT_FILENAME} already exists at ${absTopic} (or under layout/). Pass --force to overwrite, or use \`skill-llm-wiki rebuild\` to reconcile against the existing contract.`,
     );
   }
 
+  mkdirSync(layoutDir, { recursive: true });
   const body = readFileSync(tmpl.path, "utf8");
   writeFileSync(contractPath, body, "utf8");
 

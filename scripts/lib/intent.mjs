@@ -67,6 +67,7 @@ import {
 } from "./join-constants.mjs";
 import {
   defaultSiblingPath,
+  hasLayoutContract,
   hasPrivateGit,
   isLegacyVersionedWiki,
 } from "./paths.mjs";
@@ -893,7 +894,7 @@ export function resolveIntent(ctx) {
     // the intent explicit.
     if (
       isForeignNonEmptyDir(explicitTarget) &&
-      !existsSync(resolve(explicitTarget, ".llmwiki.layout.yaml")) &&
+      !hasLayoutContract(explicitTarget) &&
       !f.accept_foreign_target
     ) {
       return ambiguous(
@@ -901,7 +902,8 @@ export function resolveIntent(ctx) {
         `--target ${explicitTarget} is a non-empty directory with no layout contract`,
         [
           {
-            description: "create or supply a .llmwiki.layout.yaml first",
+            description:
+              "create or supply a .llmwiki.layout.yaml (canonical: <target>/layout/.llmwiki.layout.yaml; legacy: <target>/.llmwiki.layout.yaml)",
             flag: "<author the contract at the target>",
           },
           {

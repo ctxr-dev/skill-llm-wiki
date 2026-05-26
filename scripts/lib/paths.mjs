@@ -134,13 +134,38 @@ export function shapeDir(wikiPath) {
   return join(wikiPath, ".shape");
 }
 
+// Filename of the layout-contract YAML (hosted-mode wikis).
+export const LAYOUT_CONTRACT_FILENAME = ".llmwiki.layout.yaml";
+
+// Resolve the layout-contract YAML path inside a wiki directory.
+//
+// Canonical location is `<wiki>/layout/.llmwiki.layout.yaml` — keeping the
+// contract together with its sibling helper files (path compilers,
+// readme, etc.) in a single self-contained folder users can copy as a
+// template (`cp -r examples/layouts/<name> <wiki>/layout`). Pre-existing
+// wikis that still have the contract at the legacy `<wiki>/.llmwiki.layout.yaml`
+// path keep working — we fall back to that when the canonical location is
+// absent. Returns null when neither exists.
+export function resolveLayoutContractPath(wikiPath) {
+  const canonical = join(wikiPath, "layout", LAYOUT_CONTRACT_FILENAME);
+  if (existsSync(canonical)) return canonical;
+  const legacy = join(wikiPath, LAYOUT_CONTRACT_FILENAME);
+  if (existsSync(legacy)) return legacy;
+  return null;
+}
+
+export function hasLayoutContract(wikiPath) {
+  return resolveLayoutContractPath(wikiPath) !== null;
+}
+
 // A directory is a wiki root iff:
 //   (a) it contains an `index.md`
 //   (b) that `index.md`'s frontmatter declares `generator: skill-llm-wiki/v<N>`
 //   (c) AND AT LEAST ONE of:
 //       - it has a `.llmwiki/git/HEAD` file (new default — private-git managed)
 //       - its name matches `*.llmwiki.v<N>` (legacy sibling-versioned mode)
-//       - it has a `.llmwiki.layout.yaml` file at its root (hosted mode)
+//       - it has a layout contract YAML either at `<dir>/layout/.llmwiki.layout.yaml`
+//         (canonical) or `<dir>/.llmwiki.layout.yaml` (legacy) (hosted mode)
 //
 // The generator marker (b) is the core safety check — it positively
 // identifies a directory the skill itself built. Private-git presence
@@ -158,10 +183,12 @@ export function isWikiRoot(dirPath) {
   const base = basename(dirPath);
   const hasPrivateGit = existsSync(join(dirPath, ".llmwiki", "git", "HEAD"));
   const hasVersionedName = /\.llmwiki\.v\d+$/.test(base);
-  const hasLayoutContract = existsSync(join(dirPath, ".llmwiki.layout.yaml"));
+  // hosted-mode recognition: layout contract may live in the canonical
+  // <dir>/layout/.llmwiki.layout.yaml OR (legacy) <dir>/.llmwiki.layout.yaml.
+  const hasContract = hasLayoutContract(dirPath);
 
   // Must satisfy at least one structural recognition rule.
-  if (!hasPrivateGit && !hasVersionedName && !hasLayoutContract) return false;
+  if (!hasPrivateGit && !hasVersionedName && !hasContract) return false;
 
   // Frontmatter probe: cheap, bounded, no YAML parse required for the
   // marker check — we just look for the line within the fence.
