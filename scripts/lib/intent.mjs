@@ -903,7 +903,7 @@ export function resolveIntent(ctx) {
         [
           {
             description:
-              "create or supply a layout contract at <target>/layout/layout.yaml",
+              "create or supply a layout contract at <target>/.layout/layout.yaml",
             flag: "<author the contract at the target>",
           },
           {

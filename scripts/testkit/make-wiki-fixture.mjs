@@ -141,8 +141,10 @@ async function refuseSymlink(absPath, rootAbs = null) {
   }
 }
 
-// The canonical contract filename inside <wiki>/layout/.
+// The canonical contract filename inside <wiki>/.layout/.
 export const CONTRACT_FILENAME = "layout.yaml";
+// The canonical contract directory (dotted: skipped by content walkers).
+export const CONTRACT_DIR = ".layout";
 
 export async function makeWikiFixture({
   path,
@@ -188,9 +190,9 @@ export async function makeWikiFixture({
       `makeWikiFixture: template "${tmplName}" not found at ${tmplPath}`,
     );
   }
-  // Contract lives at <wiki>/layout/layout.yaml — match the canonical
+  // Contract lives at <wiki>/.layout/layout.yaml — match the canonical
   // location enforced by paths.mjs::resolveLayoutContractPath.
-  const layoutDir = join(rootAbs, "layout");
+  const layoutDir = join(rootAbs, CONTRACT_DIR);
   await mkdir(layoutDir, { recursive: true });
   const contractPath = join(layoutDir, CONTRACT_FILENAME);
   await refuseSymlink(contractPath, rootAbs);

@@ -136,15 +136,21 @@ export function shapeDir(wikiPath) {
 
 // Filename of the layout-contract YAML (hosted-mode wikis).
 //
-// The contract lives inside a self-contained <wiki>/layout/ folder. The
-// folder name "layout" makes any prefix on the filename redundant, so the
-// contract is just "layout.yaml".
+// The contract lives inside a self-contained <wiki>/.layout/ folder. The
+// folder name makes any prefix on the filename redundant, so the contract is
+// just "layout.yaml".
 export const LAYOUT_CONTRACT_FILENAME = "layout.yaml";
+
+// Directory (inside a hosted wiki root) that holds the layout contract + its
+// sibling helpers. Dotted so it groups with other special folders (`.llmwiki`)
+// and is SKIPPED by every content walker (which ignore `.`-prefixed entries),
+// keeping it out of the content index.
+export const LAYOUT_CONTRACT_DIR = ".layout";
 
 // Resolve the layout-contract YAML path inside a wiki directory.
 // Returns the absolute path when present, or null when absent.
 export function resolveLayoutContractPath(wikiPath) {
-  const contract = join(wikiPath, "layout", LAYOUT_CONTRACT_FILENAME);
+  const contract = join(wikiPath, LAYOUT_CONTRACT_DIR, LAYOUT_CONTRACT_FILENAME);
   return existsSync(contract) ? contract : null;
 }
 
@@ -158,8 +164,7 @@ export function hasLayoutContract(wikiPath) {
 //   (c) AND AT LEAST ONE of:
 //       - it has a `.llmwiki/git/HEAD` file (new default — private-git managed)
 //       - its name matches `*.llmwiki.v<N>` (legacy sibling-versioned mode)
-//       - it has a layout contract YAML either at `<dir>/layout/.llmwiki.layout.yaml`
-//         (canonical) or `<dir>/.llmwiki.layout.yaml` (legacy) (hosted mode)
+//       - it has a layout contract YAML at `<dir>/.layout/layout.yaml` (hosted mode)
 //
 // The generator marker (b) is the core safety check — it positively
 // identifies a directory the skill itself built. Private-git presence
@@ -177,8 +182,7 @@ export function isWikiRoot(dirPath) {
   const base = basename(dirPath);
   const hasPrivateGit = existsSync(join(dirPath, ".llmwiki", "git", "HEAD"));
   const hasVersionedName = /\.llmwiki\.v\d+$/.test(base);
-  // hosted-mode recognition: layout contract may live in the canonical
-  // <dir>/layout/.llmwiki.layout.yaml OR (legacy) <dir>/.llmwiki.layout.yaml.
+  // hosted-mode recognition: layout contract lives at <dir>/.layout/layout.yaml.
   const hasContract = hasLayoutContract(dirPath);
 
   // Must satisfy at least one structural recognition rule.

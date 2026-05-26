@@ -33,11 +33,12 @@ import {
   getTemplate,
   listTemplates,
 } from "./templates.mjs";
+import { LAYOUT_CONTRACT_DIR, LAYOUT_CONTRACT_FILENAME } from "./paths.mjs";
 
 // Canonical filename for the layout contract — paired with the
-// <topic>/layout/ canonical location, so the contract path is
-// `<topic>/layout/layout.yaml`.
-const CONTRACT_FILENAME = "layout.yaml";
+// <topic>/.layout/ canonical location, so the contract path is
+// `<topic>/.layout/layout.yaml`.
+const CONTRACT_FILENAME = LAYOUT_CONTRACT_FILENAME;
 
 // Walk UP from `absTopic` to the first existing ancestor and
 // lstat it. Refuse if that ancestor is a symbolic link. This
@@ -149,11 +150,12 @@ export function runInit({
     mkdirSync(absTopic, { recursive: true });
   }
 
-  // Canonical layout-contract location: <topic>/layout/layout.yaml
-  // The layout/ subfolder is the single self-contained home for the
+  // Canonical layout-contract location: <topic>/.layout/layout.yaml
+  // The .layout/ subfolder is the single self-contained home for the
   // contract YAML and any sibling helper files (path compilers, README,
-  // etc.) so a template can be copied with `cp -r <example> <topic>/layout`.
-  const layoutDir = join(absTopic, "layout");
+  // etc.) so a template can be copied with `cp -r <example> <topic>/.layout`.
+  // Dotted, so content walkers skip it (kept out of the index).
+  const layoutDir = join(absTopic, LAYOUT_CONTRACT_DIR);
   const contractPath = join(layoutDir, CONTRACT_FILENAME);
 
   // Symlink guard at the canonical location.

@@ -981,8 +981,8 @@ test("hosted mode allows a foreign target when a layout contract is present", ()
     const target = join(parent, "hosted-target");
     mkdirSync(target);
     writeFileSync(join(target, "some-file.md"), "pre-existing\n");
-    mkdirSync(join(target, "layout"));
-    writeFileSync(join(target, "layout", "layout.yaml"), "version: 1\n");
+    mkdirSync(join(target, ".layout"));
+    writeFileSync(join(target, ".layout", "layout.yaml"), "version: 1\n");
     const r = resolveIntent({
       subcommand: "build",
       args: [src],

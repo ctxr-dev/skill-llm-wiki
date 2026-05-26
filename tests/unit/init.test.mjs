@@ -97,8 +97,8 @@ test("runInit creates the topic directory if it does not exist", () => {
   try {
     runInit({ topic, kind: "dated" });
     assert.ok(existsSync(topic));
-    // Canonical layout-contract location is <topic>/layout/layout.yaml.
-    assert.ok(existsSync(join(topic, "layout", "layout.yaml")));
+    // Canonical layout-contract location is <topic>/.layout/layout.yaml.
+    assert.ok(existsSync(join(topic, ".layout", "layout.yaml")));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -180,7 +180,7 @@ test("runInit refuses when an intermediate path segment is a symlink", () => {
     );
     // Confirm the real target was not populated through the symlink.
     assert.equal(
-      existsSync(join(realTarget, "reports", "layout", "layout.yaml")),
+      existsSync(join(realTarget, "reports", ".layout", "layout.yaml")),
       false,
     );
   } finally {
@@ -201,7 +201,7 @@ test("runInit refuses to write through a symlink at the topic path", () => {
     );
     // Confirm the target dir was NOT touched through the symlink.
     assert.equal(
-      existsSync(join(realTarget, "layout", "layout.yaml")),
+      existsSync(join(realTarget, ".layout", "layout.yaml")),
       false,
     );
   } finally {
@@ -212,7 +212,7 @@ test("runInit refuses to write through a symlink at the topic path", () => {
 test("runInit refuses to write through a symlink at the contract path", () => {
   const root = mktmp("symlink-contract");
   const topic = join(root, "topic");
-  const layoutDir = join(topic, "layout");
+  const layoutDir = join(topic, ".layout");
   const realTarget = join(root, "real-target.yaml");
   mkdirSync(layoutDir, { recursive: true });
   writeFileSync(realTarget, "some content\n");
@@ -261,7 +261,7 @@ test("`init <topic> --kind dated --json` emits the initialised envelope", () => 
     assert.equal(env.exit, 0);
     assert.equal(env.target, topic);
     assert.equal(env.artifacts.created.length, 1);
-    assert.ok(env.artifacts.created[0].endsWith("layout/layout.yaml"));
+    assert.ok(env.artifacts.created[0].endsWith(".layout/layout.yaml"));
     const hint = env.diagnostics.find((d) => d.code === "NEXT-01");
     assert.ok(hint);
     assert.match(hint.message, /skill-llm-wiki build/);

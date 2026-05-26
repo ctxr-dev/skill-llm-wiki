@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Hosted layout-contract folder moved to `.layout/` (BREAKING)
+
+- The hosted-mode layout contract now lives at `<wiki>/.layout/layout.yaml` (was
+  `<wiki>/layout/layout.yaml`). The dotted folder groups with other special dirs
+  (`.llmwiki/`) and is SKIPPED by every content walker, so the contract + its sibling
+  helpers never pollute the content index. New `LAYOUT_CONTRACT_DIR = ".layout"` constant
+  in `paths.mjs` (used by `init.mjs` + the testkit). No legacy fallback — already-installed
+  hosted wikis must move `layout/` → `.layout/`.
+
 ### Cross-harness support (Claude Code + OpenAI Codex CLI)
 
 - **SKILL.md prose neutralised so the wiki-runner sub-agent dispatch works under both Claude Code (via the `Agent` tool) and Codex CLI (via its equivalent).** The Tier 2 envelope shape is now the open `subagent.dispatch.v1` contract: top-level `kind: "subagent.dispatch.v1"`, `role: "wiki-tier2-<kind>"`, the per-Tier-2-request kind moved to the `tier2_kind` extension field. The deprecated `model_hint` / `effort_hint` aliases continue to be emitted for one release so existing wiki-runner consumers keep working; new code should consume `effort` (and optional `model` override) instead. See `https://github.com/ctxr-dev/kit/blob/main/docs/subagent-dispatch-v1.md` for the full envelope spec.

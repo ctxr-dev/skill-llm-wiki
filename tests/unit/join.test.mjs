@@ -107,8 +107,8 @@ function buildTinyWiki(tag, { leaves = [], subcats = {} } = {}) {
   // Mark as a skill-managed wiki so `isWikiRoot` accepts it. A
   // real build creates `.llmwiki/git/HEAD`; for unit tests a minimal
   // layout-contract file at the canonical path is sufficient.
-  mkdirSync(join(wiki, "layout"), { recursive: true });
-  writeFileSync(join(wiki, "layout", "layout.yaml"), "layout: tiny-test\n", "utf8");
+  mkdirSync(join(wiki, ".layout"), { recursive: true });
+  writeFileSync(join(wiki, ".layout", "layout.yaml"), "layout: tiny-test\n", "utf8");
   // Root index with "hosted"-ish shape. Category wiki-root index
   // needs empty `parents: []` to pass the non-root-parents rule.
   writeFm(
