@@ -135,21 +135,30 @@ export function shapeDir(wikiPath) {
 }
 
 // Filename of the layout-contract YAML (hosted-mode wikis).
-export const LAYOUT_CONTRACT_FILENAME = ".llmwiki.layout.yaml";
+//
+// The contract now lives inside a self-contained <wiki>/layout/ folder, so
+// the `.llmwiki.` prefix on the filename is redundant — `layout.yaml`
+// inside `layout/` is unambiguous. The previous filename
+// `.llmwiki.layout.yaml` is still accepted (at both the canonical location
+// and at the legacy wiki root) so pre-existing wikis keep working without
+// any rename.
+export const LAYOUT_CONTRACT_FILENAME = "layout.yaml";
+export const LEGACY_LAYOUT_CONTRACT_FILENAME = ".llmwiki.layout.yaml";
 
 // Resolve the layout-contract YAML path inside a wiki directory.
 //
-// Canonical location is `<wiki>/layout/.llmwiki.layout.yaml` — keeping the
-// contract together with its sibling helper files (path compilers,
-// readme, etc.) in a single self-contained folder users can copy as a
-// template (`cp -r examples/layouts/<name> <wiki>/layout`). Pre-existing
-// wikis that still have the contract at the legacy `<wiki>/.llmwiki.layout.yaml`
-// path keep working — we fall back to that when the canonical location is
-// absent. Returns null when neither exists.
+// Lookup order, first-match wins:
+//   1. <wiki>/layout/layout.yaml          (canonical)
+//   2. <wiki>/layout/.llmwiki.layout.yaml (canonical, legacy filename)
+//   3. <wiki>/.llmwiki.layout.yaml        (legacy location at wiki root)
+//
+// Returns null when none exist.
 export function resolveLayoutContractPath(wikiPath) {
   const canonical = join(wikiPath, "layout", LAYOUT_CONTRACT_FILENAME);
   if (existsSync(canonical)) return canonical;
-  const legacy = join(wikiPath, LAYOUT_CONTRACT_FILENAME);
+  const canonicalLegacyName = join(wikiPath, "layout", LEGACY_LAYOUT_CONTRACT_FILENAME);
+  if (existsSync(canonicalLegacyName)) return canonicalLegacyName;
+  const legacy = join(wikiPath, LEGACY_LAYOUT_CONTRACT_FILENAME);
   if (existsSync(legacy)) return legacy;
   return null;
 }

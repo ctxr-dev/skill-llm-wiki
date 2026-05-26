@@ -903,7 +903,7 @@ export function resolveIntent(ctx) {
         [
           {
             description:
-              "create or supply a .llmwiki.layout.yaml (canonical: <target>/layout/.llmwiki.layout.yaml; legacy: <target>/.llmwiki.layout.yaml)",
+              "create or supply a layout contract (canonical: <target>/layout/layout.yaml; legacy: <target>/layout/.llmwiki.layout.yaml or <target>/.llmwiki.layout.yaml)",
             flag: "<author the contract at the target>",
           },
           {

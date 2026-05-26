@@ -97,8 +97,8 @@ test("runInit creates the topic directory if it does not exist", () => {
   try {
     runInit({ topic, kind: "dated" });
     assert.ok(existsSync(topic));
-    // Canonical layout-contract location is <topic>/layout/.llmwiki.layout.yaml.
-    assert.ok(existsSync(join(topic, "layout", ".llmwiki.layout.yaml")));
+    // Canonical layout-contract location is <topic>/layout/layout.yaml.
+    assert.ok(existsSync(join(topic, "layout", "layout.yaml")));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -217,7 +217,7 @@ test("runInit refuses to write through a symlink at the contract path", () => {
   mkdirSync(layoutDir, { recursive: true });
   writeFileSync(realTarget, "some content\n");
   // Plant the symlink at the CANONICAL contract path under layout/.
-  const contractLink = join(layoutDir, ".llmwiki.layout.yaml");
+  const contractLink = join(layoutDir, "layout.yaml");
   try {
     symlinkSync(realTarget, contractLink, "file");
     assert.throws(
@@ -261,7 +261,7 @@ test("`init <topic> --kind dated --json` emits the initialised envelope", () => 
     assert.equal(env.exit, 0);
     assert.equal(env.target, topic);
     assert.equal(env.artifacts.created.length, 1);
-    assert.ok(env.artifacts.created[0].endsWith(".llmwiki.layout.yaml"));
+    assert.ok(env.artifacts.created[0].endsWith("layout/layout.yaml"));
     const hint = env.diagnostics.find((d) => d.code === "NEXT-01");
     assert.ok(hint);
     assert.match(hint.message, /skill-llm-wiki build/);

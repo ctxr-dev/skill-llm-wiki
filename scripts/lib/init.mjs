@@ -34,7 +34,13 @@ import {
   listTemplates,
 } from "./templates.mjs";
 
-const CONTRACT_FILENAME = ".llmwiki.layout.yaml";
+// Canonical filename for the layout contract (paired with the
+// <topic>/layout/ canonical location, so the `.llmwiki.` prefix is
+// redundant). The previous filename ".llmwiki.layout.yaml" is still
+// detected when checking "already initialised" so a re-run on an older
+// wiki refuses cleanly instead of silently double-writing.
+const CONTRACT_FILENAME = "layout.yaml";
+const LEGACY_CONTRACT_FILENAME = ".llmwiki.layout.yaml";
 
 // Walk UP from `absTopic` to the first existing ancestor and
 // lstat it. Refuse if that ancestor is a symbolic link. This
@@ -146,16 +152,18 @@ export function runInit({
     mkdirSync(absTopic, { recursive: true });
   }
 
-  // Canonical layout-contract location: <topic>/layout/.llmwiki.layout.yaml
+  // Canonical layout-contract location: <topic>/layout/layout.yaml
   // The layout/ subfolder is the single self-contained home for the
   // contract YAML and any sibling helper files (path compilers, README,
   // etc.) so a template can be copied with `cp -r <example> <topic>/layout`.
-  // If a legacy <topic>/.llmwiki.layout.yaml exists from an earlier init,
-  // we honor it for the "already present" check so users don't get a
-  // double-write surprise during migration.
+  // If a legacy contract exists (either old filename inside layout/, or the
+  // pre-subfolder location at <topic>/.llmwiki.layout.yaml), we honor it
+  // for the "already present" check so users don't get a double-write
+  // surprise during migration.
   const layoutDir = join(absTopic, "layout");
   const contractPath = join(layoutDir, CONTRACT_FILENAME);
-  const legacyContractPath = join(absTopic, CONTRACT_FILENAME);
+  const legacyInLayoutDir = join(layoutDir, LEGACY_CONTRACT_FILENAME);
+  const legacyAtRoot = join(absTopic, LEGACY_CONTRACT_FILENAME);
 
   // Symlink guard at the canonical location.
   if (existsSync(contractPath)) {
@@ -167,11 +175,14 @@ export function runInit({
       );
     }
   }
-  const alreadyPresent = existsSync(contractPath) || existsSync(legacyContractPath);
+  const alreadyPresent =
+    existsSync(contractPath) ||
+    existsSync(legacyInLayoutDir) ||
+    existsSync(legacyAtRoot);
   if (alreadyPresent && !force) {
     throw new InitError(
       "INIT-07",
-      `init: ${CONTRACT_FILENAME} already exists at ${absTopic} (or under layout/). Pass --force to overwrite, or use \`skill-llm-wiki rebuild\` to reconcile against the existing contract.`,
+      `init: a layout contract already exists at ${absTopic} (canonical: layout/${CONTRACT_FILENAME}; legacy: layout/${LEGACY_CONTRACT_FILENAME} or ${LEGACY_CONTRACT_FILENAME}). Pass --force to overwrite, or use \`skill-llm-wiki rebuild\` to reconcile against the existing contract.`,
     );
   }
 
