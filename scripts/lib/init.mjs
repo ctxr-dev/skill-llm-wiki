@@ -33,8 +33,12 @@ import {
   getTemplate,
   listTemplates,
 } from "./templates.mjs";
+import { LAYOUT_CONTRACT_DIR, LAYOUT_CONTRACT_FILENAME } from "./paths.mjs";
 
-const CONTRACT_FILENAME = ".llmwiki.layout.yaml";
+// Canonical filename for the layout contract — paired with the
+// <topic>/.layout/ canonical location, so the contract path is
+// `<topic>/.layout/layout.yaml`.
+const CONTRACT_FILENAME = LAYOUT_CONTRACT_FILENAME;
 
 // Walk UP from `absTopic` to the first existing ancestor and
 // lstat it. Refuse if that ancestor is a symbolic link. This
@@ -146,11 +150,15 @@ export function runInit({
     mkdirSync(absTopic, { recursive: true });
   }
 
-  const contractPath = join(absTopic, CONTRACT_FILENAME);
-  // Same symlink guard for the contract file itself. An attacker
-  // who controls the topic directory could plant a symlink at
-  // <topic>/.llmwiki.layout.yaml pointing anywhere; without lstat
-  // we'd follow it on writeFileSync.
+  // Canonical layout-contract location: <topic>/.layout/layout.yaml
+  // The .layout/ subfolder is the single self-contained home for the
+  // contract YAML and any sibling helper files (path compilers, README,
+  // etc.) so a template can be copied with `cp -r <example> <topic>/.layout`.
+  // Dotted, so content walkers skip it (kept out of the index).
+  const layoutDir = join(absTopic, LAYOUT_CONTRACT_DIR);
+  const contractPath = join(layoutDir, CONTRACT_FILENAME);
+
+  // Symlink guard at the canonical location.
   if (existsSync(contractPath)) {
     const cst = lstatSync(contractPath);
     if (cst.isSymbolicLink()) {
@@ -164,10 +172,11 @@ export function runInit({
   if (alreadyPresent && !force) {
     throw new InitError(
       "INIT-07",
-      `init: ${CONTRACT_FILENAME} already exists at ${absTopic}. Pass --force to overwrite, or use \`skill-llm-wiki rebuild\` to reconcile against the existing contract.`,
+      `init: ${CONTRACT_FILENAME} already exists at ${contractPath}. Pass --force to overwrite, or use \`skill-llm-wiki rebuild\` to reconcile against the existing contract.`,
     );
   }
 
+  mkdirSync(layoutDir, { recursive: true });
   const body = readFileSync(tmpl.path, "utf8");
   writeFileSync(contractPath, body, "utf8");
 
