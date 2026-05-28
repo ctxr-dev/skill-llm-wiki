@@ -261,7 +261,8 @@ test("`init <topic> --kind dated --json` emits the initialised envelope", () => 
     assert.equal(env.exit, 0);
     assert.equal(env.target, topic);
     assert.equal(env.artifacts.created.length, 1);
-    assert.ok(env.artifacts.created[0].endsWith(".layout/layout.yaml"));
+    // Use path.join so the suffix matches the OS separator (Windows uses `\`).
+    assert.ok(env.artifacts.created[0].endsWith(join(".layout", "layout.yaml")));
     const hint = env.diagnostics.find((d) => d.code === "NEXT-01");
     assert.ok(hint);
     assert.match(hint.message, /skill-llm-wiki build/);
