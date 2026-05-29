@@ -76,7 +76,7 @@ Works on any corpus: markdown notes, product docs, API references, research, run
 
 ```bash
 # Install into your project
-npx @ctxr/kit install @ctxr/skill-llm-wiki
+npx @ctxr/kit@latest install @ctxr/skill-llm-wiki
 ```
 
 Then in Claude Code, ask for any of the six operations:
@@ -171,8 +171,8 @@ Both checks fail **loud and early** with a clear explanation and zero side-effec
 ### Via @ctxr/kit
 
 ```bash
-npx @ctxr/kit install @ctxr/skill-llm-wiki            # project-local
-npx @ctxr/kit install @ctxr/skill-llm-wiki --user     # user-global
+npx @ctxr/kit@latest install @ctxr/skill-llm-wiki            # project-local
+npx @ctxr/kit@latest install @ctxr/skill-llm-wiki --user     # user-global
 ```
 
 Installs canonically to `.agents/skills/ctxr-skill-llm-wiki/` (or `~/.agents/skills/…` with `--user`); `@ctxr/kit` auto-creates discovery-mirror symlinks at `.claude/skills/` (and `~/.codex/skills/` for user-scope) so Claude Code, Codex CLI, and other Agent Skills harnesses all find the artefact. No post-install wiring, no automatic hooks, no filesystem watchers; the skill is pure standby until you explicitly ask the host harness to run an operation against a specific directory.

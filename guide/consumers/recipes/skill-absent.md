@@ -81,7 +81,7 @@ export function enforceSkillPresent() {
   const hint =
     p.state === "absent"
       ? "@ctxr/skill-llm-wiki is not installed.\n" +
-        "Install with: npx @ctxr/kit install @ctxr/skill-llm-wiki"
+        "Install with: npx @ctxr/kit@latest install @ctxr/skill-llm-wiki"
       : p.state === "too-old"
         ? `@ctxr/skill-llm-wiki format_version ${p.current} is below the required ${REQUIRED_FORMAT_VERSION}.\n` +
           "Upgrade with: npm i -g @ctxr/skill-llm-wiki@latest"
@@ -102,7 +102,7 @@ Once the consumer reports the skill is missing, recovery for the user is:
 
 ```bash
 # Via @ctxr/kit (preferred, manages SKILL.md path + update flow):
-npx @ctxr/kit install @ctxr/skill-llm-wiki
+npx @ctxr/kit@latest install @ctxr/skill-llm-wiki
 
 # Or plain npm for CI / scripted environments:
 npm i -g @ctxr/skill-llm-wiki
