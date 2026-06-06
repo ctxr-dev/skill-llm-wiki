@@ -489,7 +489,14 @@ function renderBody(data, existing, sourceAuthoredOrientation) {
     lines.push("|------|------|-------|");
     for (const e of data.entries) {
       const typeTag = e.type === "index" ? "📁 index" : e.type === "overlay" ? "🔗 overlay" : "📄 primary";
-      lines.push(`| [${e.file}](${e.file}) | ${typeTag} | ${e.focus || ""} |`);
+      // URL-encode the link DESTINATION so a path segment with a space (or
+      // other special char) still navigates in Obsidian / standard markdown.
+      // Split on BOTH separators (node's relative() yields "\\" on Windows) and
+      // join with "/" so the destination is a valid forward-slash URL path; the
+      // human-readable label keeps the raw relative path. encodeURIComponent is
+      // a no-op for ordinary slugified segments, so normal links are unchanged.
+      const dest = e.file.split(/[\\/]/).map(encodeURIComponent).join("/");
+      lines.push(`| [${e.file}](${dest}) | ${typeTag} | ${e.focus || ""} |`);
     }
     lines.push("");
   } else {
