@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- URL-encode auto-generated `index.md` navigation link destinations so a child folder or leaf whose name contains a space (or other special character) navigates correctly in Obsidian and standard markdown. The human-readable label keeps the raw relative path; only the link destination is percent-encoded (a no-op for ordinary slugified names).
+
 ## [1.4.3] - 2026-05-30
 
 ### Changed

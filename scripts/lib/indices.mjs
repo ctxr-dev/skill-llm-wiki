@@ -465,6 +465,18 @@ function orderKeys(data, isRoot) {
   return out;
 }
 
+// Percent-encode ONE path segment for a markdown link destination.
+// encodeURIComponent leaves `! ' ( ) *` unescaped, but markdown link
+// destinations `[label](dest)` break on an unescaped `(` or `)` (the paren
+// terminates the destination), so escape those too (RFC3986-style). A no-op
+// for ordinary slugified segments (kebab-case, dots).
+function encodeLinkSegment(seg) {
+  return encodeURIComponent(seg).replace(
+    /[!'()*]/g,
+    (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase(),
+  );
+}
+
 function renderBody(data, existing, sourceAuthoredOrientation) {
   const lines = [];
   lines.push("");
@@ -489,7 +501,14 @@ function renderBody(data, existing, sourceAuthoredOrientation) {
     lines.push("|------|------|-------|");
     for (const e of data.entries) {
       const typeTag = e.type === "index" ? "📁 index" : e.type === "overlay" ? "🔗 overlay" : "📄 primary";
-      lines.push(`| [${e.file}](${e.file}) | ${typeTag} | ${e.focus || ""} |`);
+      // URL-encode the link DESTINATION per path segment so a name with a
+      // space, parens, or other special char still navigates in Obsidian /
+      // standard markdown. Split on BOTH separators (node's relative() yields
+      // "\\" on Windows) and join with "/" so the destination is a valid
+      // forward-slash URL path; the human-readable label keeps the raw relative
+      // path. Encoding is a no-op for ordinary slugified segments.
+      const dest = e.file.split(/[\\/]/).map(encodeLinkSegment).join("/");
+      lines.push(`| [${e.file}](${dest}) | ${typeTag} | ${e.focus || ""} |`);
     }
     lines.push("");
   } else {
