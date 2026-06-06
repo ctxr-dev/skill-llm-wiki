@@ -32,6 +32,9 @@ test("rebuildIndex URL-encodes link destinations for names with spaces", async (
     writeFileSync(join(wiki, "my note.md"), leaf("my-note", "spaced leaf"));
     mkdirSync(join(wiki, "foo bar"), { recursive: true });
     writeFileSync(join(wiki, "foo bar", "index.md"), subIndex("foo-bar", "spaced folder"));
+    // A name with parentheses: encodeURIComponent leaves `(` `)` raw, but an
+    // unescaped `)` terminates a markdown link destination, so it must encode.
+    writeFileSync(join(wiki, "note (draft).md"), leaf("note-draft", "paren leaf"));
     // A normal slugified leaf must be left untouched (encode is a no-op).
     writeFileSync(join(wiki, "alpha-note.md"), leaf("alpha-note", "normal leaf"));
 
@@ -42,12 +45,15 @@ test("rebuildIndex URL-encodes link destinations for names with spaces", async (
     // The spaced names are encoded in the destination...
     assert.ok(dests.includes("my%20note.md"), `leaf dest encoded; got ${JSON.stringify(dests)}`);
     assert.ok(dests.includes("foo%20bar/index.md"), `folder dest encoded; got ${JSON.stringify(dests)}`);
+    // ...parentheses are percent-encoded (%28/%29), not left raw...
+    assert.ok(dests.includes("note%20%28draft%29.md"), `paren dest encoded; got ${JSON.stringify(dests)}`);
     // ...and the normal name is unchanged (no spurious encoding).
     assert.ok(dests.includes("alpha-note.md"), `normal dest unchanged; got ${JSON.stringify(dests)}`);
 
-    // No destination may contain a raw space (the bug).
+    // No destination may contain a char that breaks a markdown link
+    // destination: a raw space, or an unescaped paren.
     for (const d of dests) {
-      assert.ok(!d.includes(" "), `destination has a raw space: ${JSON.stringify(d)}`);
+      assert.ok(!/[ ()]/.test(d), `destination has an unencoded space/paren: ${JSON.stringify(d)}`);
     }
 
     // Every encoded destination round-trips to a real on-disk relative path.
