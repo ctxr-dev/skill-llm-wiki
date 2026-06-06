@@ -59,8 +59,12 @@ test("rebuildIndex URL-encodes link destinations for names with spaces", async (
       );
     }
 
-    // The human-readable label keeps the raw (decoded) path.
-    assert.match(body, /\[foo bar\/index\.md\]\(foo%20bar\/index\.md\)/);
-    assert.match(body, /\[my note\.md\]\(my%20note\.md\)/);
+    // The human-readable label keeps the raw (decoded) path. Normalise path
+    // separators first: node's relative() yields "\\" on Windows, so the label
+    // (raw relative path) varies by platform while the encoded destination is
+    // always forward-slash.
+    const norm = body.replace(/\\/g, "/");
+    assert.match(norm, /\[foo bar\/index\.md\]\(foo%20bar\/index\.md\)/);
+    assert.match(norm, /\[my note\.md\]\(my%20note\.md\)/);
   });
 });
