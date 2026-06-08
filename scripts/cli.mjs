@@ -358,6 +358,16 @@ Post-convergence enforcement flags (build/rebuild):
                                    SOFT_PARENT_AFFINITY_THRESHOLD (0.35)
                                    and caps at SOFT_PARENT_MAX_PER_LEAF (3)
                                    per leaf. No-op when omitted.
+  --layout-config <path>           Drive placement from a layout config
+                                   (taxonomy + pin rules). A leaf whose id
+                                   matches a pin is placed straight into its
+                                   pinned category BEFORE clustering, and
+                                   pinned leaves/dirs are protected from
+                                   convergence and balance — yielding a
+                                   deterministic projection. The config is
+                                   persisted under the wiki and validate
+                                   <wiki> then hard-fails on layout drift.
+                                   No-op when omitted (emergent clustering).
 
 UX flags:
   --no-prompt                      Never prompt; fail loud on ambiguity
@@ -410,6 +420,7 @@ const FLAG_WITH_VALUE = new Set([
   "--fanout-target",
   "--max-depth",
   "--id-collision",
+  "--layout-config",
 ]);
 const FLAG_BOOLEAN = new Set([
   "--no-prompt",

@@ -420,6 +420,15 @@ export async function runBalance(wikiRoot, ctx = {}) {
     opId,
     qualityMode = "tiered-fast",
     nestedParents = new Set(),
+    // Layout-config protection (optional): pinned leaves are protected at the
+    // DIRECTORY level — the orchestrator seeds every pinned taxonomy dir into
+    // `nestedParents`, which both the fanout sub-cluster pass and the
+    // depth-flatten pass already skip, so a pinned branch is never re-clustered
+    // or flattened. `pinnedLeaf(absPath)` is accepted for API parity with
+    // runConvergence (which uses it for pairwise-operator filtering) but balance
+    // needs no per-leaf check beyond `nestedParents`. Defaults to null ⇒ legacy
+    // behaviour unchanged.
+    pinnedLeaf = null,
     commitBetweenIterations = async () => {},
   } = ctx;
 
@@ -456,7 +465,20 @@ export async function runBalance(wikiRoot, ctx = {}) {
     // fanout pass keeps the per-iteration working set shrinking
     // monotonically.
     if (maxDepth != null) {
-      const overdeep = detectDepthOverage(wikiRoot, maxDepth);
+      // Layout-config protection: never flatten a protected (pinned)
+      // passthrough. Protection is dir-level and exact-match — `nestedParents`
+      // holds the taxonomy dirs (plus any subdir balance itself creates), and
+      // a depth-overage candidate that IS one of those dirs is skipped,
+      // mirroring the identical exact-match guard in `detectFanoutOverload`.
+      // Descendants need no separate guard: the only op that deepens a dir
+      // (fanout sub-clustering) already skips protected dirs, so the
+      // projection never produces a deeper candidate inside a protected
+      // branch. `pinnedLeaf` is unused here (dir-level protection suffices);
+      // it is referenced to keep the protection-contract signature explicit.
+      void pinnedLeaf;
+      const overdeep = detectDepthOverage(wikiRoot, maxDepth).filter(
+        (d) => !nestedParents.has(d),
+      );
       if (overdeep.length > 0) {
         const chosen = overdeep[0]; // lex-smallest, for determinism
         const result = applyBalanceFlatten(wikiRoot, chosen);

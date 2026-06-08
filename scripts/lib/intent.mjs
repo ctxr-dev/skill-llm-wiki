@@ -43,6 +43,9 @@
 //            rebuild (balance enforcement is build/rebuild-only)
 //   INT-16a  --soft-dag-parents used on a subcommand other than build /
 //            rebuild (soft-DAG synthesis is build/rebuild-only)
+//   INT-19   --layout-config path missing or fails to parse
+//   INT-19a  --layout-config used on a subcommand other than build /
+//            rebuild (deterministic layout projection is build/rebuild-only)
 //
 // Plan shape (status === "ok"):
 //   {
@@ -71,6 +74,7 @@ import {
   hasPrivateGit,
   isLegacyVersionedWiki,
 } from "./paths.mjs";
+import { loadLayoutConfig } from "./layout-config.mjs";
 
 export const VALID_LAYOUT_MODES = Object.freeze(["sibling", "in-place", "hosted"]);
 
@@ -465,6 +469,66 @@ export function resolveIntent(ctx) {
         "--soft-dag-parents",
       );
     }
+  }
+  // --layout-config makes leaf placement a deterministic projection of a
+  // hand-authored layout file. Build/rebuild only (it drives the same
+  // draft + convergence + balance phases those two operations run). The
+  // path must exist and parse — failing fast at intent time avoids an
+  // expensive pre-op snapshot + rollback on a typo'd or malformed file.
+  if (f.layout_config !== undefined) {
+    if (!BALANCE_FLAG_SUBCOMMANDS.has(subcommand)) {
+      return ambiguous(
+        "INT-19a",
+        `--layout-config is only supported on build / rebuild (got "${subcommand}")`,
+        [
+          {
+            description: "drop --layout-config",
+            flag: "(remove --layout-config)",
+          },
+          {
+            description: `run on a ${suggestedSub} instead`,
+            flag: `${suggestedSub} ... --layout-config <path>`,
+          },
+        ],
+        "--layout-config",
+      );
+    }
+    const layoutPath = absolute(cwd, f.layout_config);
+    if (!existsSync(layoutPath)) {
+      return ambiguous(
+        "INT-19",
+        `--layout-config path ${layoutPath} does not exist`,
+        [
+          {
+            description: "point at an existing layout YAML file",
+            flag: "--layout-config <path-to-layout.yaml>",
+          },
+        ],
+        "--layout-config",
+      );
+    }
+    try {
+      loadLayoutConfig(layoutPath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return ambiguous(
+        "INT-19",
+        `--layout-config ${layoutPath} failed to parse: ${message}`,
+        [
+          {
+            description: "fix the layout YAML (taxonomy[]/pins must be well-formed)",
+            flag: "--layout-config <valid-layout.yaml>",
+          },
+        ],
+        "--layout-config",
+      );
+    }
+    // Normalise the flag to an absolute path so the orchestrator (which
+    // runs after a chdir-free invocation but reads the raw plan.flags)
+    // never has to re-resolve against cwd. The build/rebuild plans pass
+    // `flags: f` straight through, so this mutation surfaces as
+    // `plan.flags.layout_config`.
+    f.layout_config = layoutPath;
   }
   if (f.layout_mode === "in-place" && f.target) {
     return ambiguous(

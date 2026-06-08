@@ -158,6 +158,26 @@ export function hasLayoutContract(wikiPath) {
   return resolveLayoutContractPath(wikiPath) !== null;
 }
 
+// Filename of the DETERMINISTIC LAYOUT-CONFIG contract written by a
+// `--layout-config` build/rebuild. Distinct from the hosted-mode layout
+// CONTRACT (`layout.yaml`, the dynamic-subdirs grammar): this file uses
+// the taxonomy/pins grammar (see scripts/lib/layout-config.mjs) and lives
+// alongside the hosted contract in the same self-contained `.layout/`
+// folder. Keeping the two filenames separate means a hosted wiki and a
+// taxonomy-projected wiki never collide on parse.
+export const LAYOUT_CONFIG_FILENAME = "layout-config.yaml";
+
+// Resolve the layout-config YAML path inside a wiki directory.
+// Returns the absolute path when present, or null when absent.
+export function resolveLayoutConfigPath(wikiPath) {
+  const cfg = join(wikiPath, LAYOUT_CONTRACT_DIR, LAYOUT_CONFIG_FILENAME);
+  return existsSync(cfg) ? cfg : null;
+}
+
+export function hasLayoutConfig(wikiPath) {
+  return resolveLayoutConfigPath(wikiPath) !== null;
+}
+
 // A directory is a wiki root iff:
 //   (a) it contains an `index.md`
 //   (b) that `index.md`'s frontmatter declares `generator: skill-llm-wiki/v<N>`
