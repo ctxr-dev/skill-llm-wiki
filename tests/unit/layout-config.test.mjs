@@ -90,6 +90,41 @@ test("loadLayoutConfig accepts single-matcher rules of each kind", () => {
   assert.equal(pinFor("unmatched"), null);
 });
 
+// Write a raw YAML string verbatim and load it (for parser-shape tests).
+function loadRaw(tag, yamlText) {
+  const dir = freshDir(tag);
+  const path = join(dir, "layout.yaml");
+  writeFileSync(path, yamlText);
+  return loadLayoutConfig(path);
+}
+
+// ── YAML parsing: pure-YAML, not frontmatter-fenced ──────────────────
+
+test("loadLayoutConfig parses a file that starts with a --- document marker", () => {
+  const cfg = loadRaw(
+    "doc-marker",
+    "---\nlayout_version: 1\ntaxonomy:\n  - id: security\n    pin:\n      - id_prefix: \"sec-\"\n",
+  );
+  assert.equal(cfg.layout_version, 1);
+  assert.equal(compilePins(cfg)("sec-xss").category, "security");
+});
+
+test("loadLayoutConfig preserves a |+ block scalar (no trailing-ws corruption)", () => {
+  const cfg = loadRaw(
+    "block-scalar",
+    "taxonomy:\n  - id: security\n    purpose: |+\n      keep\n\n    pin:\n      - id_prefix: \"sec-\"\n",
+  );
+  const cat = cfg.taxonomy.find((c) => c.id === "security");
+  assert.equal(cat.purpose, "keep\n\n");
+});
+
+test("loadLayoutConfig rejects a multi-document YAML stream", () => {
+  assert.throws(
+    () => loadRaw("multidoc", "taxonomy:\n  - id: a\n    pin: [{id_prefix: \"a-\"}]\n---\nb: 2\n"),
+    /failed to parse YAML/,
+  );
+});
+
 // ── categoryForLeaf id resolution: data.id / .id / source_path ───────
 
 test("categoryForLeaf resolves a parsed-frontmatter shape via data.id", () => {

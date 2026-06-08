@@ -57,15 +57,21 @@ function sanitiseValue(value) {
 }
 
 function parseYamlDocument(raw, path) {
-  const wrapped = "---\n" + raw.replace(/\r\n/g, "\n").replace(/\s+$/, "") + "\n---\n";
+  // Parse the layout file as a single YAML document directly via
+  // gray-matter's bundled YAML engine (js-yaml). We deliberately do NOT wrap
+  // the content in frontmatter fences: a layout file is pure YAML and may
+  // legitimately begin with a `---` document marker, contain `---` lines, or
+  // use `|+` block scalars — all of which a fence wrapper would corrupt (the
+  // first `---` would be read as a closing fence, yielding empty data, and
+  // trailing-whitespace trimming would drop block-scalar newlines).
   let parsed;
   try {
-    parsed = matter(wrapped);
+    parsed = matter.engines.yaml.parse(raw);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`layout-config: failed to parse YAML at ${path}: ${message}`);
   }
-  const data = sanitiseValue(parsed.data);
+  const data = sanitiseValue(parsed);
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     throw new Error(`layout-config: ${path} did not parse to a mapping`);
   }
