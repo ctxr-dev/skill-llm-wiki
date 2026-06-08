@@ -600,9 +600,26 @@ export async function runOperation(plan, {
         const abs = join(wikiRoot, rel);
         if (existsSync(abs)) protectedDirs.add(abs);
       }
+      const pinnedIdCache = new Map();
       pinnedLeaf = (absPath) => {
-        // Re-derive the leaf id from its filename (== validator pin key).
-        const id = basename(absPath, ".md");
+        // Key on the leaf's frontmatter `id` (the routing/pin key), NOT the
+        // on-disk filename: build stores leaves under the SOURCE basename, which
+        // can differ from the id (e.g. operations/build.md -> id operations-build).
+        // Using the filename stem would mis-detect such pinned leaves as unpinned
+        // and let convergence/balance move them, breaking the layout contract.
+        // Cache per path; fall back to the filename stem only if unreadable.
+        let id = pinnedIdCache.get(absPath);
+        if (id === undefined) {
+          try {
+            const parsed = parseFrontmatter(readFileSync(absPath, "utf8"), absPath);
+            id = parsed?.data && typeof parsed.data.id === "string"
+              ? parsed.data.id
+              : basename(absPath, ".md");
+          } catch {
+            id = basename(absPath, ".md");
+          }
+          pinnedIdCache.set(absPath, id);
+        }
         return pinFor(id) !== null;
       };
     }

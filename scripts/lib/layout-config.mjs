@@ -9,7 +9,8 @@
 // CI, and `validateTreeAgainstLayout` below re-implements its placement
 // checks in validate.mjs's finding shape so a plain `validate <wiki>`
 // hard-fails on drift once the layout contract is persisted to
-// `<wiki>/.layout/layout.yaml`.
+// `<wiki>/.layout/layout-config.yaml` (a filename distinct from hosted-mode's
+// `<wiki>/.layout/layout.yaml` contract, to avoid grammar collision).
 //
 // Pin grammar (mirrors validate_layout.py::category_for):
 //   - { id: "<exact>" }       leaf id === value
@@ -38,6 +39,23 @@ import { parseFrontmatter } from "./frontmatter.mjs";
 // same battle-tested YAML engine the rest of the pipeline relies on
 // parses the nested taxonomy / pins. Avoids taking a direct dependency
 // on the transitive `js-yaml`.
+// Recursively drop prototype-pollution keys (mirrors the `sanitise` pass in
+// source-frontmatter.mjs) so a malicious layout YAML cannot poison Object
+// prototypes via `__proto__` / `constructor` / `prototype`.
+const POLLUTION_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+function sanitiseValue(value) {
+  if (Array.isArray(value)) return value.map(sanitiseValue);
+  if (value && typeof value === "object") {
+    const out = Object.create(null);
+    for (const [k, v] of Object.entries(value)) {
+      if (POLLUTION_KEYS.has(k)) continue;
+      out[k] = sanitiseValue(v);
+    }
+    return out;
+  }
+  return value;
+}
+
 function parseYamlDocument(raw, path) {
   const wrapped = "---\n" + raw.replace(/\r\n/g, "\n").replace(/\s+$/, "") + "\n---\n";
   let parsed;
@@ -46,7 +64,7 @@ function parseYamlDocument(raw, path) {
   } catch (err) {
     throw new Error(`layout-config: failed to parse YAML at ${path}: ${err.message}`);
   }
-  const data = parsed.data;
+  const data = sanitiseValue(parsed.data);
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     throw new Error(`layout-config: ${path} did not parse to a mapping`);
   }
