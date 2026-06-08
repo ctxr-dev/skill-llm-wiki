@@ -355,6 +355,15 @@ function findKeyColon(text) {
   let inDouble = false;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
+    // Inside a double-quoted scalar a backslash escapes the next character
+    // (`\"`, `\\`). Skip it so an escaped quote does not wrongly close the
+    // string and expose an inner `: ` (e.g. `"... fmt.Errorf(\"a: b\")"`) as a
+    // key separator. Single-quoted YAML has no backslash escapes (only `''`),
+    // so this only applies inside double quotes.
+    if (inDouble && c === "\\") {
+      i += 1;
+      continue;
+    }
     if (c === "'" && !inDouble) inSingle = !inSingle;
     else if (c === '"' && !inSingle) inDouble = !inDouble;
     else if (c === ":" && !inSingle && !inDouble) {
