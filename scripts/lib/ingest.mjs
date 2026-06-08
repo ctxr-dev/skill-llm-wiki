@@ -18,21 +18,35 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, extname, join, relative, sep } from "node:path";
 import { parseSourceFrontmatter } from "./source-frontmatter.mjs";
 
-const SKIP_DIRS = new Set([
+// Directories that are NEVER hand-authored content: dependency installs, VCS
+// metadata, and Python caches/venvs. Always skipped. (Dot-directories are also
+// skipped unconditionally by `walk`, so the dotted entries here are belt-and-braces.)
+const BASE_SKIP_DIRS = new Set([
   "node_modules",
   ".git",
   ".svn",
   ".hg",
-  "dist",
-  "build",
-  "target",
   "__pycache__",
   ".venv",
   "venv",
+]);
+
+// Build / tool OUTPUT directories. These hold generated artifacts ONLY in a code
+// repository, so they are skipped only when ingesting code (`includeCode`). For a
+// curated text source a directory named `build/`, `dist/`, or `target/` is
+// hand-authored content (for example a leaf folder sharded by id prefix:
+// `reviewers.src/build/build-cargo.md`). Skipping these unconditionally silently
+// dropped such leaves, so for a text source they are NOT skipped.
+const CODE_OUTPUT_SKIP_DIRS = new Set([
+  "dist",
+  "build",
+  "target",
+  "out",
+  "coverage",
   ".next",
+  ".nuxt",
   ".turbo",
   ".cache",
-  "coverage",
 ]);
 
 const TEXT_EXTS = new Set([
@@ -73,7 +87,12 @@ const CODE_EXTS = new Set([
 
 export function ingestSource(sourcePath, options = {}) {
   const { includeCode = false } = options;
-  const files = walk(sourcePath, SKIP_DIRS);
+  // Build-output dirs are skipped only for code ingests; a text source treats them
+  // as content (so an id-prefix shard folder like build/ is not silently dropped).
+  const skipDirs = includeCode
+    ? new Set([...BASE_SKIP_DIRS, ...CODE_OUTPUT_SKIP_DIRS])
+    : BASE_SKIP_DIRS;
+  const files = walk(sourcePath, skipDirs);
   files.sort();
   const leaves = [];
   const indexSources = [];
