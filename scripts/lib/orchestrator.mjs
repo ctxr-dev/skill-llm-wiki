@@ -612,7 +612,11 @@ export async function runOperation(plan, {
         if (id === undefined) {
           try {
             const parsed = parseFrontmatter(readFileSync(absPath, "utf8"), absPath);
-            id = parsed?.data && typeof parsed.data.id === "string"
+            // Require a NON-EMPTY string id; an empty `id: ""` would make
+            // pinFor("") always miss and let convergence/balance move a leaf
+            // that should fall back to filename-stem protection. Matches
+            // layout-config.mjs::leafIdOf's non-empty check.
+            id = parsed?.data && typeof parsed.data.id === "string" && parsed.data.id !== ""
               ? parsed.data.id
               : basename(absPath, ".md");
           } catch {
