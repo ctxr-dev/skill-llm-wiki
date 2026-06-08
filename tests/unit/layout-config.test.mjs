@@ -3,9 +3,9 @@
 // silence. These lock the behaviours raised in the Copilot review of the
 // --layout-config build-driver feature.
 
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -15,12 +15,20 @@ import {
   validateTreeAgainstLayout,
 } from "../../scripts/lib/layout-config.mjs";
 
+// Every temp dir is tracked so the suite cleans up after itself instead of
+// leaking dirs under the OS temp folder across repeated runs.
+const CREATED = [];
+after(() => {
+  for (const dir of CREATED) rmSync(dir, { recursive: true, force: true });
+});
+
 function freshDir(tag) {
   const dir = join(
     tmpdir(),
     `skill-llm-wiki-layout-${tag}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
   );
   mkdirSync(dir, { recursive: true });
+  CREATED.push(dir);
   return dir;
 }
 
