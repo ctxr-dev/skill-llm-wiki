@@ -465,12 +465,16 @@ export async function runBalance(wikiRoot, ctx = {}) {
     // fanout pass keeps the per-iteration working set shrinking
     // monotonically.
     if (maxDepth != null) {
-      // Layout-config protection: never flatten a pinned/protected
-      // passthrough. With `nestedParents` seeded from the taxonomy dirs,
-      // a depth-overage candidate inside a protected branch is skipped so
-      // the deterministic projection's depth structure is preserved. The
-      // `pinnedLeaf` reference is touched to keep the protection contract
-      // explicit even when the dir-level guard already covers it.
+      // Layout-config protection: never flatten a protected (pinned)
+      // passthrough. Protection is dir-level and exact-match — `nestedParents`
+      // holds the taxonomy dirs (plus any subdir balance itself creates), and
+      // a depth-overage candidate that IS one of those dirs is skipped,
+      // mirroring the identical exact-match guard in `detectFanoutOverload`.
+      // Descendants need no separate guard: the only op that deepens a dir
+      // (fanout sub-clustering) already skips protected dirs, so the
+      // projection never produces a deeper candidate inside a protected
+      // branch. `pinnedLeaf` is unused here (dir-level protection suffices);
+      // it is referenced to keep the protection-contract signature explicit.
       void pinnedLeaf;
       const overdeep = detectDepthOverage(wikiRoot, maxDepth).filter(
         (d) => !nestedParents.has(d),

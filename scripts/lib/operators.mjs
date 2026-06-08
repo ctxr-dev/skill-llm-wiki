@@ -786,7 +786,18 @@ export async function runConvergence(wikiRoot, ctx = {}) {
         for (const s of sources) {
           if (typeof s !== "string") continue;
           if (protectedDirs.has(s)) return false;
-          if (pinnedLeaf && s.endsWith(".md") && pinnedLeaf(s)) return false;
+          // `sources` may name an index.md (DESCEND proposals do). An index
+          // is never a routed leaf, so skip the pinnedLeaf check for it —
+          // both to avoid a spurious pin "hit" that would suppress DESCEND
+          // and to avoid reading its frontmatter needlessly.
+          if (
+            pinnedLeaf &&
+            s.endsWith(".md") &&
+            basename(s) !== "index.md" &&
+            pinnedLeaf(s)
+          ) {
+            return false;
+          }
         }
         return true;
       });
