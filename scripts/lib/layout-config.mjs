@@ -34,11 +34,13 @@ import { parseFrontmatter } from "./frontmatter.mjs";
 
 // ── YAML loading ─────────────────────────────────────────────────────
 
-// Parse a top-level YAML document by reusing gray-matter (a declared
-// direct dependency) — the layout file is wrapped in `---` fences so the
-// same battle-tested YAML engine the rest of the pipeline relies on
-// parses the nested taxonomy / pins. Avoids taking a direct dependency
-// on the transitive `js-yaml`.
+// Parse a top-level YAML document via gray-matter's bundled YAML engine
+// (matter.engines.yaml.parse). gray-matter is a declared direct dependency,
+// so this reuses the same battle-tested engine the rest of the pipeline
+// relies on without taking a direct dependency on the transitive `js-yaml`.
+// The file is parsed as PURE YAML (NOT wrapped in frontmatter fences), so a
+// leading `---` document marker, `---` lines, and `|+` block scalars are all
+// handled natively.
 // Recursively drop prototype-pollution keys (mirrors the `sanitise` pass in
 // source-frontmatter.mjs) so a malicious layout YAML cannot poison Object
 // prototypes via `__proto__` / `constructor` / `prototype`.

@@ -275,8 +275,10 @@ export async function runOperation(plan, {
     plan.flags?.layout_config && (plan.operation === "build" || plan.operation === "rebuild")
       ? loadLayoutConfig(plan.flags.layout_config)
       : null;
-  // Compile the pin matcher once; both the draft loop and the
-  // convergence/balance protection use it.
+  // Compile the pin matcher once for the convergence/balance protection
+  // (consumed via `pinnedLeaf` below). The draft loop routes through
+  // categoryForLeaf(layoutCfg, candidate), which compiles and caches its own
+  // matcher from the same cfg — functionally identical, so both paths agree.
   const pinFor = layoutCfg ? compilePins(layoutCfg) : null;
 
   // Phase 1 — pre-op snapshot (always, even on empty wikis).
