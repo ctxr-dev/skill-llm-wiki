@@ -510,9 +510,10 @@ export function resolveIntent(ctx) {
     try {
       loadLayoutConfig(layoutPath);
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       return ambiguous(
         "INT-19",
-        `--layout-config ${layoutPath} failed to parse: ${err.message}`,
+        `--layout-config ${layoutPath} failed to parse: ${message}`,
         [
           {
             description: "fix the layout YAML (taxonomy[]/pins must be well-formed)",

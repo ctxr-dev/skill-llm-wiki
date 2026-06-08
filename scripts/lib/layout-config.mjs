@@ -62,7 +62,8 @@ function parseYamlDocument(raw, path) {
   try {
     parsed = matter(wrapped);
   } catch (err) {
-    throw new Error(`layout-config: failed to parse YAML at ${path}: ${err.message}`);
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`layout-config: failed to parse YAML at ${path}: ${message}`);
   }
   const data = sanitiseValue(parsed.data);
   if (!data || typeof data !== "object" || Array.isArray(data)) {
@@ -95,7 +96,8 @@ export function loadLayoutConfig(path) {
   try {
     raw = readFileSync(path, "utf8");
   } catch (err) {
-    throw new Error(`loadLayoutConfig: cannot read ${path}: ${err.message}`);
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`loadLayoutConfig: cannot read ${path}: ${message}`);
   }
   const doc = parseYamlDocument(raw, path);
 
