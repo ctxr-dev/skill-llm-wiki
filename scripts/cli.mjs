@@ -410,6 +410,7 @@ const FLAG_WITH_VALUE = new Set([
   "--fanout-target",
   "--max-depth",
   "--id-collision",
+  "--layout-config",
 ]);
 const FLAG_BOOLEAN = new Set([
   "--no-prompt",

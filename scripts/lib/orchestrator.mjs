@@ -28,11 +28,21 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { ingestSource } from "./ingest.mjs";
 import { draftCategory, draftLeafFrontmatter } from "./draft.mjs";
 import { rebuildAllIndices } from "./indices.mjs";
-import { indexIdForDir } from "./paths.mjs";
+import {
+  indexIdForDir,
+  LAYOUT_CONTRACT_DIR,
+  LAYOUT_CONFIG_FILENAME,
+} from "./paths.mjs";
+import {
+  categoryForLeaf,
+  compilePins,
+  expectedTaxonomy,
+  loadLayoutConfig,
+} from "./layout-config.mjs";
 import { validateWiki, summariseFindings } from "./validate.mjs";
 import {
   gitClean,
@@ -250,6 +260,25 @@ export async function runOperation(plan, {
   // survive from the source `index.md` into the synthesised target.
   const indexInputs = {};
 
+  // ── Deterministic layout projection (--layout-config) ──────────────
+  // When the plan carries `layout_config`, leaf placement becomes a
+  // PROJECTION of each leaf's id through the hand-authored taxonomy
+  // (loaded + validated once here). Pinned leaves are written straight
+  // into their category dir during the draft phase, and excluded from
+  // convergence + balance so the emergent clustering never re-shapes
+  // them. With `unpinned: reject` + full pin coverage there are no
+  // movable leaves, so the built tree IS the layout. Intent already
+  // validated existence + parseability; this load is the authoritative
+  // in-process copy. `layoutCfg === null` ⇒ legacy emergent behaviour
+  // (byte-identical to before).
+  const layoutCfg =
+    plan.flags?.layout_config && (plan.operation === "build" || plan.operation === "rebuild")
+      ? loadLayoutConfig(plan.flags.layout_config)
+      : null;
+  // Compile the pin matcher once; both the draft loop and the
+  // convergence/balance protection use it.
+  const pinFor = layoutCfg ? compilePins(layoutCfg) : null;
+
   // Phase 1 — pre-op snapshot (always, even on empty wikis).
   const snap = preOpSnapshot(wikiRoot, opId);
   record("snapshot", `tag ${snap.tag} sha=${(snap.sha ?? "n/a").slice(0, 12)}`);
@@ -358,7 +387,23 @@ export async function runOperation(plan, {
         }
         // Fresh leaf: compute the draft category and write at
         // <wiki>/<category>/<basename>.md.
-        const category = draftCategory(candidate);
+        //
+        // Deterministic layout projection: when a layout config is
+        // active, a leaf whose id matches a pin is placed straight into
+        // its pinned category (or category/subcategory) dir — BEFORE any
+        // clustering runs. The leaf's routing id (`candidate.id`) is the
+        // filename-derived slug the validator pins on, identical to the
+        // drafted frontmatter id, so `candidate` is an authoritative
+        // input to `categoryForLeaf`. A leaf matching no pin falls back
+        // to the legacy emergent `draftCategory(candidate)` (under
+        // `unpinned: reject` such a leaf later hard-fails layout
+        // validation). With NO layout config the expression is exactly
+        // `draftCategory(candidate)`, preserving byte-identical legacy
+        // behaviour.
+        const pinnedCategory = layoutCfg
+          ? categoryForLeaf(layoutCfg, candidate)
+          : null;
+        const category = pinnedCategory ?? draftCategory(candidate);
         const draft = draftLeafFrontmatter(candidate, {
           categoryPath: category,
         });
@@ -412,6 +457,23 @@ export async function runOperation(plan, {
           disposition: "preserved",
         });
         wrote++;
+      }
+
+      // Persist the layout config into <wiki>/.layout/layout-config.yaml
+      // so (a) the wiki is self-describing and (b) validate.mjs::
+      // validateWiki appends the layout-drift findings on every plain
+      // `validate <wiki>`. A dedicated filename (NOT the hosted-mode
+      // `layout.yaml` contract) keeps the two layout grammars from
+      // colliding. Written verbatim from the loaded raw text so the
+      // persisted copy is byte-identical to the user's authored file.
+      if (layoutCfg) {
+        const layoutDir = join(wikiRoot, LAYOUT_CONTRACT_DIR);
+        mkdirSync(layoutDir, { recursive: true });
+        writeFileSync(
+          join(layoutDir, LAYOUT_CONFIG_FILENAME),
+          layoutCfg.raw_text,
+          "utf8",
+        );
       }
 
       // Index-source inputs: source files named `index.md` (or
@@ -513,8 +575,45 @@ export async function runOperation(plan, {
     if (priorResponses.size > 0) {
       seedTier2Responses(wikiRoot, priorResponses);
     }
+
+    // ── Layout-config protection set ──────────────────────────────────
+    // When a layout config is active, pinned leaves are an immovable
+    // PROJECTION of the layout. We compute:
+    //   - `protectedDirs`: every taxonomy directory (absolute path) that
+    //     currently exists on disk — convergence's cluster-NEST and
+    //     balance's sub-cluster both skip directories in their
+    //     `nestedParents` set, so seeding it with the pinned dirs means
+    //     they are never carved into emergent sub-slugs.
+    //   - `pinnedLeaf(absPath)`: true when the leaf at that path matches
+    //     a pin — the pairwise operators (LIFT / MERGE) consult this to
+    //     leave pinned leaves where the projection placed them.
+    // With `unpinned: reject` + full pin coverage every leaf is pinned
+    // and every category dir is protected, so convergence + balance have
+    // no movable leaves and the tree IS the layout. When `layoutCfg` is
+    // null, `protectedDirs` is an empty set and `pinnedLeaf` is null,
+    // preserving byte-identical legacy behaviour.
+    const protectedDirs = new Set();
+    let pinnedLeaf = null;
+    if (layoutCfg) {
+      const { dirs: taxonomyDirs } = expectedTaxonomy(layoutCfg);
+      for (const rel of taxonomyDirs) {
+        const abs = join(wikiRoot, rel);
+        if (existsSync(abs)) protectedDirs.add(abs);
+      }
+      pinnedLeaf = (absPath) => {
+        // Re-derive the leaf id from its filename (== validator pin key).
+        const id = basename(absPath, ".md");
+        return pinFor(id) !== null;
+      };
+    }
+
     const convergence = await runConvergence(wikiRoot, {
       opId,
+      // Layout-config protection: pinned dirs are seeded into the
+      // nested-parents set (never re-clustered) and pinned leaves are
+      // excluded from the movable set used by the pairwise operators.
+      protectedDirs,
+      pinnedLeaf,
       // Resolve through tiered.mjs::resolveQualityMode so the
       // `LLM_WIKI_QUALITY_MODE` env var is actually consulted (the
       // prior `plan.flags?.quality_mode || "tiered-fast"` shortcut
@@ -617,11 +716,24 @@ export async function runOperation(plan, {
       return n;
     };
     const opSupportsBalance = BUILD_REBUILD_OPS.has(plan.operation);
+    // Honor the layout config's policy fanout/depth when the matching
+    // CLI flag is absent. The CLI flag always wins (explicit user
+    // intent); the cfg policy is the fallback so a hand-authored layout
+    // can carry its own fanout_target / max_depth without re-specifying
+    // them on every invocation. Both still pass through `parseBalanceInt`
+    // so an out-of-range policy value is treated as "unset" rather than
+    // crashing the balance pass.
     const fanoutTarget = opSupportsBalance
-      ? parseBalanceInt(plan.flags?.fanout_target, FANOUT_TARGET_MIN, FANOUT_TARGET_MAX)
+      ? parseBalanceInt(plan.flags?.fanout_target, FANOUT_TARGET_MIN, FANOUT_TARGET_MAX) ??
+        (layoutCfg
+          ? parseBalanceInt(layoutCfg.policy?.fanout_target, FANOUT_TARGET_MIN, FANOUT_TARGET_MAX)
+          : null)
       : null;
     const maxDepth = opSupportsBalance
-      ? parseBalanceInt(plan.flags?.max_depth, MAX_DEPTH_MIN, MAX_DEPTH_MAX)
+      ? parseBalanceInt(plan.flags?.max_depth, MAX_DEPTH_MIN, MAX_DEPTH_MAX) ??
+        (layoutCfg
+          ? parseBalanceInt(layoutCfg.policy?.max_depth, MAX_DEPTH_MIN, MAX_DEPTH_MAX)
+          : null)
       : null;
     let balance = null;
     if (fanoutTarget != null || maxDepth != null) {
@@ -633,6 +745,15 @@ export async function runOperation(plan, {
         qualityMode: resolveQualityMode(plan.flags || {}),
         fanoutTarget,
         maxDepth,
+        // Layout-config protection: pinned taxonomy dirs are seeded into
+        // balance's nested-parents opt-out so the fanout pass never carves
+        // them into emergent sub-slugs, and pinned leaves are protected
+        // from the depth-flatten pass. A fresh Set copy keeps balance's
+        // in-place mutation of nestedParents from leaking back into the
+        // convergence-shared set. Both default to the empty/no-op shape
+        // when layoutCfg is null (legacy behaviour unchanged).
+        nestedParents: new Set(protectedDirs),
+        pinnedLeaf,
         commitBetweenIterations: async ({ iteration, operator, summary }) => {
           gitRunChecked(wikiRoot, ["add", "-A"]);
           if (!gitWorkingTreeClean(wikiRoot)) {

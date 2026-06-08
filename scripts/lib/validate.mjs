@@ -5,7 +5,13 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { parseFrontmatter } from "./frontmatter.mjs";
 import { readIndex } from "./indices.mjs";
-import { isWikiRoot, indexIdForDir } from "./paths.mjs";
+import {
+  isWikiRoot,
+  indexIdForDir,
+  hasLayoutConfig,
+  resolveLayoutConfigPath,
+} from "./paths.mjs";
+import { loadLayoutConfig, validateTreeAgainstLayout } from "./layout-config.mjs";
 import { gitFsck, gitRefExists, gitRevParse, gitRun } from "./git.mjs";
 import { provenancePath, readProvenance, verifyCoverage } from "./provenance.mjs";
 import { readOpLog } from "./history.mjs";
@@ -154,6 +160,29 @@ export function validateWiki(wikiRoot) {
         "LEAF-AT-WIKI-ROOT",
         e.absolute,
         `non-index markdown file at wiki root — must live in a subcategory (run 'fix' to contain)`,
+      );
+    }
+  }
+
+  // LAYOUT-* — deterministic-layout drift. When the wiki carries a
+  // persisted layout config at `<wiki>/.layout/layout-config.yaml`
+  // (written by a `--layout-config` build/rebuild), a plain
+  // `validate <wiki>` MUST hard-fail on any placement / taxonomy / depth /
+  // fanout drift from the contract. Self-describing wikis enforce their
+  // own shape. A malformed config is itself a finding (the wiki cannot be
+  // checked against an unparseable layout). Guarded — wikis with no
+  // layout config are unaffected (including hosted-mode wikis that carry
+  // only the unrelated `layout.yaml` contract grammar).
+  if (hasLayoutConfig(wikiRoot)) {
+    try {
+      const cfg = loadLayoutConfig(resolveLayoutConfigPath(wikiRoot));
+      findings.push(...validateTreeAgainstLayout(wikiRoot, cfg));
+    } catch (err) {
+      push(
+        "error",
+        "LAYOUT-CONFIG",
+        resolveLayoutConfigPath(wikiRoot) ?? join(wikiRoot, ".layout", "layout-config.yaml"),
+        `persisted layout config failed to load: ${err.message}`,
       );
     }
   }

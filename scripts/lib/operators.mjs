@@ -711,6 +711,15 @@ export async function runConvergence(wikiRoot, ctx = {}) {
     // shorthand for legacy tiered-build tests that exercise the
     // pairwise tiered-AI path without a propose_structure fixture.
     skipClusterNest = process.env.LLM_WIKI_SKIP_CLUSTER_NEST === "1",
+    // Layout-config protection (optional). `protectedDirs` is a set of
+    // absolute directory paths that must never be carved into emergent
+    // sub-slugs — they are seeded into `nestedParents` so the cluster
+    // detector skips them. `pinnedLeaf(absPath) => boolean` marks leaves
+    // that are an immovable layout projection — the pairwise LIFT / MERGE
+    // operators skip them. Both default to no-op (empty set / null) so a
+    // non-layout build behaves exactly as before.
+    protectedDirs = new Set(),
+    pinnedLeaf = null,
   } = ctx;
   const applied = [];
   const suggestions = [];
@@ -722,7 +731,11 @@ export async function runConvergence(wikiRoot, ctx = {}) {
   // already represents a coherent group, and re-nesting within
   // it should wait for a separate run where the operator can
   // review the shape.
-  const nestedParents = new Set();
+  //
+  // Layout-config protection seeds this set with every pinned taxonomy
+  // dir up front, so the cluster-NEST path never re-shapes a pinned
+  // category.
+  const nestedParents = new Set(protectedDirs);
   let iteration = 0;
 
   // Baseline metric (for the trajectory log).
@@ -758,7 +771,26 @@ export async function runConvergence(wikiRoot, ctx = {}) {
         reason: p.describe,
       });
     }
-    const applicable = proposals.filter((p) => !p.detectOnly);
+    let applicable = proposals.filter((p) => !p.detectOnly);
+
+    // Layout-config protection: drop any applicable proposal that would
+    // move a pinned leaf or restructure a protected (pinned) directory.
+    // LIFT/MERGE name leaf paths in `sources`; LIFT also names the source
+    // dir. A proposal touching a pinned leaf or a protected dir is
+    // suppressed so the deterministic projection survives convergence.
+    // No-op when there is no protection (pinnedLeaf null AND protectedDirs
+    // empty) — the filter short-circuits and `applicable` is unchanged.
+    if (pinnedLeaf || protectedDirs.size > 0) {
+      applicable = applicable.filter((p) => {
+        const sources = Array.isArray(p.sources) ? p.sources : [];
+        for (const s of sources) {
+          if (typeof s !== "string") continue;
+          if (protectedDirs.has(s)) return false;
+          if (pinnedLeaf && s.endsWith(".md") && pinnedLeaf(s)) return false;
+        }
+        return true;
+      });
+    }
 
     if (applicable.length > 0) {
       // Pick the highest-priority proposal and apply it.

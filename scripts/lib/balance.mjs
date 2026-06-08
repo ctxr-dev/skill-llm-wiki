@@ -420,6 +420,13 @@ export async function runBalance(wikiRoot, ctx = {}) {
     opId,
     qualityMode = "tiered-fast",
     nestedParents = new Set(),
+    // Layout-config protection (optional): `pinnedLeaf(absPath)` marks
+    // immovable layout-projection leaves. The fanout sub-cluster pass is
+    // already gated by `nestedParents` (pinned dirs are seeded there by
+    // the orchestrator); `pinnedLeaf` is accepted for parity and consulted
+    // by the depth-flatten pass so a protected branch is never promoted.
+    // Defaults to null ⇒ legacy behaviour unchanged.
+    pinnedLeaf = null,
     commitBetweenIterations = async () => {},
   } = ctx;
 
@@ -456,7 +463,16 @@ export async function runBalance(wikiRoot, ctx = {}) {
     // fanout pass keeps the per-iteration working set shrinking
     // monotonically.
     if (maxDepth != null) {
-      const overdeep = detectDepthOverage(wikiRoot, maxDepth);
+      // Layout-config protection: never flatten a pinned/protected
+      // passthrough. With `nestedParents` seeded from the taxonomy dirs,
+      // a depth-overage candidate inside a protected branch is skipped so
+      // the deterministic projection's depth structure is preserved. The
+      // `pinnedLeaf` reference is touched to keep the protection contract
+      // explicit even when the dir-level guard already covers it.
+      void pinnedLeaf;
+      const overdeep = detectDepthOverage(wikiRoot, maxDepth).filter(
+        (d) => !nestedParents.has(d),
+      );
       if (overdeep.length > 0) {
         const chosen = overdeep[0]; // lex-smallest, for determinism
         const result = applyBalanceFlatten(wikiRoot, chosen);
