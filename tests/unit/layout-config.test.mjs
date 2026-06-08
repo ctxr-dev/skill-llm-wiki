@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import {
   loadLayoutConfig,
   compilePins,
+  categoryForLeaf,
   validateTreeAgainstLayout,
 } from "../../scripts/lib/layout-config.mjs";
 
@@ -79,6 +80,41 @@ test("loadLayoutConfig accepts single-matcher rules of each kind", () => {
   assert.equal(pinFor("sec-xss").category, "byprefix");
   assert.equal(pinFor("fw-django").category, "byglob");
   assert.equal(pinFor("unmatched"), null);
+});
+
+// ── categoryForLeaf id resolution: data.id / .id / source_path ───────
+
+test("categoryForLeaf resolves a parsed-frontmatter shape via data.id", () => {
+  const cfg = loadFrom("data-id", [{ id: "security", pin: [{ id_prefix: "sec-" }] }]);
+  // The shape parseFrontmatter returns: { data: {...}, body }.
+  assert.equal(categoryForLeaf(cfg, { data: { id: "sec-xss" }, body: "x" }), "security");
+});
+
+test("categoryForLeaf resolves a flat candidate via .id", () => {
+  const cfg = loadFrom("flat-id", [{ id: "security", pin: [{ id_prefix: "sec-" }] }]);
+  assert.equal(categoryForLeaf(cfg, { id: "sec-xss" }), "security");
+});
+
+test("categoryForLeaf falls back to the source filename stem", () => {
+  const cfg = loadFrom("src-path", [{ id: "security", pin: [{ id_prefix: "sec-" }] }]);
+  assert.equal(categoryForLeaf(cfg, { source_path: "/a/b/sec-xss.md" }), "security");
+});
+
+test("categoryForLeaf prefers data.id over a stale source_path stem", () => {
+  const cfg = loadFrom("prefer-data", [
+    { id: "security", pin: [{ id_prefix: "sec-" }] },
+    { id: "performance", pin: [{ id_prefix: "perf-" }] },
+  ]);
+  // data.id wins even when the file path would route elsewhere.
+  assert.equal(
+    categoryForLeaf(cfg, { data: { id: "sec-xss" }, source_path: "/x/perf-slow.md" }),
+    "security",
+  );
+});
+
+test("categoryForLeaf returns null for an unmatched id", () => {
+  const cfg = loadFrom("nohit", [{ id: "security", pin: [{ id_prefix: "sec-" }] }]);
+  assert.equal(categoryForLeaf(cfg, { data: { id: "lang-python" } }), null);
 });
 
 // ── fnmatch glob: `*`, `?`, and character classes ────────────────────

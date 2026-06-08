@@ -308,10 +308,15 @@ export function compilePins(cfg) {
   };
 }
 
-// Extract the routing id from a leaf data object or candidate. Leaf
-// frontmatter `data.id`, candidate `.id`, else the source filename stem.
+// Extract the routing id from a leaf data object or candidate, in priority
+// order: parsed-frontmatter `data.id` (the shape parseFrontmatter returns),
+// then a flat candidate `.id`, then the source filename stem.
 function leafIdOf(leafData) {
   if (leafData && typeof leafData === "object") {
+    const data = leafData.data;
+    if (data && typeof data === "object" && typeof data.id === "string" && data.id !== "") {
+      return data.id;
+    }
     if (typeof leafData.id === "string" && leafData.id !== "") return leafData.id;
     const sp = leafData.source_path;
     if (typeof sp === "string" && sp !== "") {
