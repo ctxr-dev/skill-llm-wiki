@@ -170,6 +170,16 @@ function normalizePins(pinIn, where) {
         `loadLayoutConfig: ${where} pin[${j}] needs one of id / id_prefix / id_glob`,
       );
     }
+    if (keys.length > 1) {
+      // The grammar is strictly one-of: allowing several matchers in a
+      // single rule would make precedence implicit. Reject at load so the
+      // config is unambiguous (and so the Python validator the build
+      // driver mirrors never sees a shape it would silently first-match).
+      throw new Error(
+        `loadLayoutConfig: ${where} pin[${j}] has ${keys.length} matchers ` +
+          `(${keys.join(", ")}); use exactly one of id / id_prefix / id_glob`,
+      );
+    }
     const out = {};
     for (const k of keys) {
       if (typeof rule[k] !== "string") {
@@ -218,15 +228,43 @@ function ruleMatches(leafId, rule) {
   return false;
 }
 
-// Minimal fnmatch-style glob: `*` → any run, `?` → single char. Anchored
-// at both ends, matching Python's fnmatch.fnmatch on a flat id (ids never
-// contain `/`). Other characters are matched literally (regex-escaped).
+// fnmatch-style glob: `*` → any run, `?` → single char, `[seq]` / `[!seq]`
+// → character class (with ranges like `a-z`). Anchored at both ends,
+// matching Python's fnmatch.fnmatch on a flat id (ids never contain `/`).
+// This ports the class-handling branch of CPython's fnmatch.translate so a
+// `id_glob` resolves identically here (the build driver) and in the Python
+// validate_layout.py validator. Other characters match literally.
 function globMatch(value, glob) {
   let re = "^";
-  for (const ch of glob) {
-    if (ch === "*") re += ".*";
-    else if (ch === "?") re += ".";
-    else re += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  let i = 0;
+  const n = glob.length;
+  while (i < n) {
+    const ch = glob[i];
+    i += 1;
+    if (ch === "*") {
+      re += ".*";
+    } else if (ch === "?") {
+      re += ".";
+    } else if (ch === "[") {
+      // Find the matching close bracket. A `]` immediately after `[` or
+      // `[!` is a literal member, not the terminator (fnmatch semantics).
+      let j = i;
+      if (j < n && glob[j] === "!") j += 1;
+      if (j < n && glob[j] === "]") j += 1;
+      while (j < n && glob[j] !== "]") j += 1;
+      if (j >= n) {
+        // No closing bracket: treat the `[` as a literal character.
+        re += "\\[";
+      } else {
+        let stuff = glob.slice(i, j).split("\\").join("\\\\");
+        i = j + 1;
+        if (stuff.startsWith("!")) stuff = "^" + stuff.slice(1);
+        else if (stuff.startsWith("^")) stuff = "\\" + stuff;
+        re += "[" + stuff + "]";
+      }
+    } else {
+      re += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
   }
   re += "$";
   return new RegExp(re).test(value);
@@ -406,7 +444,7 @@ export function validateTreeAgainstLayout(wikiRoot, cfg) {
     findings.push({ severity, code, target, message });
 
   const pinFor = compilePins(cfg);
-  const { dirs: expectedDirs, categories } = expectedTaxonomy(cfg);
+  const { categories } = expectedTaxonomy(cfg);
   const policy = cfg.policy || {};
   const maxDepth = policy.max_depth;
   const fanoutHardMax = policy.fanout_hard_max;
@@ -462,10 +500,10 @@ export function validateTreeAgainstLayout(wikiRoot, cfg) {
     }
   }
 
-  // Belt-and-suspenders: flag any expected dir that is wholly absent only
-  // as a warning — an empty category is not an error (a corpus may not
-  // yet carry any leaf for a category), but a surprising drift signal.
-  void expectedDirs;
-
+  // An empty category (a taxonomy entry with no leaf yet) is intentionally
+  // NOT reported: a growing corpus legitimately carries categories ahead of
+  // their first leaf, and the Python validate_layout.py validator this
+  // mirrors does not flag them either. Only placement/taxonomy/depth/fanout
+  // drift is actionable here.
   return findings;
 }
