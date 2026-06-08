@@ -420,12 +420,14 @@ export async function runBalance(wikiRoot, ctx = {}) {
     opId,
     qualityMode = "tiered-fast",
     nestedParents = new Set(),
-    // Layout-config protection (optional): `pinnedLeaf(absPath)` marks
-    // immovable layout-projection leaves. The fanout sub-cluster pass is
-    // already gated by `nestedParents` (pinned dirs are seeded there by
-    // the orchestrator); `pinnedLeaf` is accepted for parity and consulted
-    // by the depth-flatten pass so a protected branch is never promoted.
-    // Defaults to null ⇒ legacy behaviour unchanged.
+    // Layout-config protection (optional): pinned leaves are protected at the
+    // DIRECTORY level — the orchestrator seeds every pinned taxonomy dir into
+    // `nestedParents`, which both the fanout sub-cluster pass and the
+    // depth-flatten pass already skip, so a pinned branch is never re-clustered
+    // or flattened. `pinnedLeaf(absPath)` is accepted for API parity with
+    // runConvergence (which uses it for pairwise-operator filtering) but balance
+    // needs no per-leaf check beyond `nestedParents`. Defaults to null ⇒ legacy
+    // behaviour unchanged.
     pinnedLeaf = null,
     commitBetweenIterations = async () => {},
   } = ctx;

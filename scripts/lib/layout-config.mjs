@@ -288,10 +288,19 @@ function leafIdOf(leafData) {
 // matches no pin. The orchestrator uses this at the draftCategory call
 // site: a non-null result places the leaf straight into its pinned dir;
 // null falls back to emergent draftCategory(candidate).
+// Per-cfg compiled-matcher cache. A WeakMap keyed on the cfg object (NOT a
+// property mutated onto cfg) so user-controlled YAML can never collide with an
+// internal `__pinFor` key, and the public cfg shape stays clean.
+const _pinForCache = new WeakMap();
+
 export function categoryForLeaf(cfg, leafData) {
   const id = leafIdOf(leafData);
   if (id == null) return null;
-  const pinFor = cfg.__pinFor || (cfg.__pinFor = compilePins(cfg));
+  let pinFor = _pinForCache.get(cfg);
+  if (!pinFor) {
+    pinFor = compilePins(cfg);
+    _pinForCache.set(cfg, pinFor);
+  }
   const hit = pinFor(id);
   if (!hit) return null;
   return hit.subcategory ? `${hit.category}/${hit.subcategory}` : hit.category;

@@ -8,7 +8,6 @@ import { readIndex } from "./indices.mjs";
 import {
   isWikiRoot,
   indexIdForDir,
-  hasLayoutConfig,
   resolveLayoutConfigPath,
 } from "./paths.mjs";
 import { loadLayoutConfig, validateTreeAgainstLayout } from "./layout-config.mjs";
@@ -173,16 +172,22 @@ export function validateWiki(wikiRoot) {
   // checked against an unparseable layout). Guarded — wikis with no
   // layout config are unaffected (including hosted-mode wikis that carry
   // only the unrelated `layout.yaml` contract grammar).
-  if (hasLayoutConfig(wikiRoot)) {
+  // Resolve ONCE (returns null when absent); pass the same path to the loader so
+  // there's no TOCTOU window between an existence check and the load.
+  const layoutConfigPath = resolveLayoutConfigPath(wikiRoot);
+  if (layoutConfigPath) {
     try {
-      const cfg = loadLayoutConfig(resolveLayoutConfigPath(wikiRoot));
+      const cfg = loadLayoutConfig(layoutConfigPath);
       findings.push(...validateTreeAgainstLayout(wikiRoot, cfg));
     } catch (err) {
+      // The file may vanish between resolve and load, and a thrown value is not
+      // guaranteed to be an Error — coerce defensively.
+      const message = err instanceof Error ? err.message : String(err);
       push(
         "error",
         "LAYOUT-CONFIG",
-        resolveLayoutConfigPath(wikiRoot) ?? join(wikiRoot, ".layout", "layout-config.yaml"),
-        `persisted layout config failed to load: ${err.message}`,
+        layoutConfigPath,
+        `persisted layout config failed to load: ${message}`,
       );
     }
   }
