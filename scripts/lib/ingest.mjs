@@ -31,22 +31,20 @@ const BASE_SKIP_DIRS = new Set([
   "venv",
 ]);
 
-// Build / tool OUTPUT directories. These hold generated artifacts ONLY in a code
-// repository, so they are skipped only when ingesting code (`includeCode`). For a
-// curated text source a directory named `build/`, `dist/`, or `target/` is
-// hand-authored content (for example a leaf folder sharded by id prefix:
-// `reviewers.src/build/build-cargo.md`). Skipping these unconditionally silently
-// dropped such leaves, so for a text source they are NOT skipped.
+// Build / tool OUTPUT directories with NON-dot names. These hold generated
+// artifacts ONLY in a code repository, so they are skipped only when ingesting code
+// (`includeCode`). For a curated text source a directory named `build/`, `dist/`, or
+// `target/` is hand-authored content (for example a leaf folder sharded by id
+// prefix: `reviewers.src/build/build-cargo.md`), and skipping it unconditionally
+// silently dropped such leaves. Dot-named output dirs (`.next`, `.turbo`, `.cache`,
+// ...) are NOT listed here because `walk` already skips every dot-directory
+// unconditionally, for both text and code ingests.
 const CODE_OUTPUT_SKIP_DIRS = new Set([
   "dist",
   "build",
   "target",
   "out",
   "coverage",
-  ".next",
-  ".nuxt",
-  ".turbo",
-  ".cache",
 ]);
 
 const TEXT_EXTS = new Set([
